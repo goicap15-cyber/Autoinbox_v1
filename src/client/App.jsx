@@ -999,6 +999,16 @@ export default function App() {
         // so timestamps are display metadata only and never move a bubble.
         // NEW_MESSAGE is an arrival event. Never sort the whole live list:
         // append the new text, or patch its existing bubble in place.
+        // NGOẠI LỆ — thread PAGE (Page API): webhook event có thể về trễ
+        // (poll 5s) nên thứ tự đến ≠ thứ tự gửi; sort lại theo timestamp
+        // để bubble không bị lệch (báo lỗi 2026-10-06: "ok" nhảy trên tin khách).
+        if (String(newMsg.source_type || '') === 'page_messenger') {
+          updated = [...updated].sort((a, b) => {
+            const ta = Number(a?.timestamp_ms) || Date.parse(a?.created_at || '') || 0;
+            const tb = Number(b?.timestamp_ms) || Date.parse(b?.created_at || '') || 0;
+            return ta - tb || (Number(a?.id) || 0) - (Number(b?.id) || 0);
+          });
+        }
         updated = reconcileOutgoingTextEchoes(updated);
 
         return { ...prev, [tidStr]: updated };
@@ -1921,11 +1931,14 @@ export default function App() {
   } : null;
 
   const isCurrentExtensionDisconnected = currentAccount ? currentAccount.is_extension_connected === false : false;
+  // Thread PAGE gửi qua Graph API (page token) — KHÔNG phụ thuộc extension:
+  // lỗi thật (hết token, quá hạn 24h...) sẽ trả về từ Send API và hiện bong
+  // bóng lỗi, thay vì khóa ô soạn thảo vô căn cứ.
   const isCurrentSendDisabled = selectedThread?.source_type === 'page_messenger'
-    ? selectedThread?.source_status && selectedThread.source_status !== 'ACTIVE'
+    ? false
     : isCurrentExtensionDisconnected;
   const currentSendDisabledReason = selectedThread?.source_type === 'page_messenger'
-    ? 'Äang chá» Page Messenger sẵn sàng. Vui lòng đợi trong giây lát.'
+    ? 'Page chưa sẵn sàng gửi tin (chưa có Page Access Token). Hãy mở Quản lý → Fanpage → bấm "Lấy token".'
     : 'Tài khoản Facebook chưa được kết nối. Vui lòng vào Quản lý và bấm Kết nối Facebook.';
 
   const gridClass = `${leadPanelCollapsed ? 'app-grid-collapsed' : 'app-grid'}${activeView === 'employees' ? ' employee-view' : ''}`;

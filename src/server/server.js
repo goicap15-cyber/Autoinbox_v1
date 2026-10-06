@@ -94,6 +94,9 @@ const FollowupService = require('./services/FollowupService');
 const InboxSourceService = require('./services/InboxSourceService');
 const InboxSyncScheduler = require('./services/InboxSyncScheduler');
 const InitialMessageSweepService = require('./services/InitialMessageSweepService');
+// Chức năng Page chạy bằng Messenger Platform chính thức (Graph API + webhook)
+const pageApiService = require('./services/PageApiService');
+const setupAutomation = require('./services/AppSetupAutomation');
 const { isChangedIncomingSidebarPreview, isFreshRowTimeText } = require('./utils/sidebarIncomingDetection');
 
 // Dedupe media-hint theo thread: dòng thời gian sidebar giữ trạng thái "Bây
@@ -542,6 +545,9 @@ function activePageSourcesForAccount(accountId) {
   `).all(String(accountId || '')).filter((row) => /^\d+$/.test(String(row.page_id || '')));
 }
 function dispatchPageSidebarSync(accountId, reason = 'manual') {
+  // TẮT: đồng bộ page qua tab Business Suite (extension) đã ngừng sử dụng —
+  // Page giờ chạy bằng Messenger Platform (Graph API + webhook qua cầu nối hosting).
+  return 0;
   const accountKey = String(accountId || '');
   if (!accountKey) return 0;
   let dispatched = 0;
@@ -1165,6 +1171,230 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
   });
 }
 
+/* ─────────────────── Page API (Messenger Platform chính thức) ─────────────────── */
+
+// Xin cookie Facebook từ Chrome của account (extension có quyền chrome.cookies).
+// Kết quả trả về qua message WS 'FB_COOKIES' — nhìn thấy ở case tương ứng trong
+// wss.on('connection'). Dùng cho tự động hóa "Tạo app & Webhook" (Chrome riêng).
+const pendingCookieRequests = new Map(); // request_id -> { resolve, reject, timer }
+async function requestExtensionCookies(accountId, timeoutMs = 15000) {
+  const accId = String(accountId);
+  const ask = (ws) => new Promise((resolve, reject) => {
+    const requestId = crypto.randomUUID();
+    const timer = setTimeout(() => {
+      pendingCookieRequests.delete(requestId);
+      reject(new Error('__TIMEOUT__'));
+    }, timeoutMs);
+    pendingCookieRequests.set(requestId, { resolve, reject, timer });
+    ws.send(JSON.stringify({ type: 'GET_FB_COOKIES', data: { request_id: requestId } }));
+  });
+
+  let ws = extensionConnections.get(accId);
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    throw new Error('Chrome của tài khoản này chưa kết nối. Hãy khởi động Chrome trước.');
+  }
+  try {
+    return await ask(ws);
+  } catch (e) {
+    if (e?.message !== '__TIMEOUT__') throw e;
+  }
+  // Lần 1 im lặng → Chrome của account gần như chắc chắn đang chạy extension
+  // BẢN CŨ (Chrome được reuse từ trước khi update app — SW cũ không có handler
+  // GET_FB_COOKIES). Chỉ reload SW nửa vời không đủ: khởi động lại hẳn Chrome
+  // của account (stop + launch với extension mới), chờ nó đăng ký lại rồi hỏi.
+  console.warn(`[PageApi] Extension account=${accId} không trả cookie — khởi động lại Chrome của tài khoản để nạp extension mới…`);
+  try {
+    await processManager.startAccountProcess(accId, null, { forceExtensionReload: true });
+  } catch (e) {
+    console.warn('[PageApi] Restart Chrome của account lỗi:', e.message);
+  }
+  const reconnectedDeadline = Date.now() + 60000;
+  let gotFreshSocket = false;
+  while (Date.now() < reconnectedDeadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const fresh = extensionConnections.get(accId);
+    if (fresh && fresh !== ws && fresh.readyState === WebSocket.OPEN) { ws = fresh; gotFreshSocket = true; break; }
+  }
+  if (!gotFreshSocket) {
+    throw new Error('Không xin được cookie: extension của tài khoản không kết nối lại sau khi khởi động lại Chrome (60s). Hãy mở Quản lý và bấm "Kết nối Facebook" thử lại.');
+  }
+  try {
+    return await ask(ws);
+  } catch (e2) {
+    throw new Error('Extension không trả cookie về kịp (15s). Hãy tắt hẳn Chrome của tài khoản rồi bấm "Kết nối" lại trong CRM để Chrome nạp extension bản mới.');
+  }
+}
+
+// Bơm phụ thuộc cho tự động hóa tạo app: cookie từ extension, trạng thái ra
+// socket.io, dữ liệu page/app lưu qua PageApiService (KV page_api_config + inbox_sources)
+setupAutomation.configurePageSetupAutomation({
+  getCookies: (accountId) => requestExtensionCookies(accountId),
+  getOrCreateVerifyToken: () => pageApiService.getOrCreateVerifyToken(),
+  recordRun: (status, note) => {
+    try { fs.appendFileSync(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status, note: String(note || '').slice(0, 300) }) + '\n'); } catch (_) {}
+  },
+  upsertPages: (accountId, pages) => pageApiService.upsertPages(accountId, pages),
+  listPages: (accountId) => pageApiService.listPages(accountId),
+  savePages: (accountId, pages) => pageApiService.savePages(accountId, pages),
+  appAdd: (accountId, rec) => pageApiService.appAdd(accountId, rec),
+  appUpdate: (accountId, appId, patch) => pageApiService.appUpdate(accountId, appId, patch),
+  appGetLatest: (accountId) => pageApiService.appGetLatest(accountId),
+  appRemove: (accountId, appId) => pageApiService.appRemove(accountId, appId),
+  appList: (accountId) => pageApiService.appList(accountId),
+  clearPageTokens: (accountId) => pageApiService.clearPageTokens(accountId),
+  removeAccountPages: (accountId) => pageApiService.removeAccountPages(accountId),
+  knownPageIds: () => pageApiService.knownPageIds(),
+  log: (message) => {
+    console.log('[PageSetup]', message);
+    try { fs.appendFileSync(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status: 'step', note: String(message || '').slice(0, 300) }) + '\n'); } catch (_) {}
+  },
+  onStatus: (job) => {
+    if (!io) return;
+    io.emit('PAGE_API_SETUP_STATUS', {
+      sync_id: job.id,
+      kind: job.kind || 'create',
+      account_id: job.uid,
+      app_id: job.appId || null,
+      status: job.status,
+      message: job.message || '',
+      error: job.error || null,
+    });
+  },
+  dataDir: APP_DATA_ROOT,
+});
+
+// Gửi tin nhắn cho thread PAGE bằng Send API (page token), thay cho đường CDP
+// Business Suite cũ. Giữ đúng chu kỳ pending → sent/failed như tin cá nhân.
+// Gửi tin nhắn PAGE kèm file: upload tệp lên Meta (message_attachments) bằng
+// page token rồi gửi bằng attachment_id — đường chính thức cho tệp trên máy.
+async function sendPageThreadViaGraphAttachment(thread_id, text, client_message_id, attachment_id, socket) {
+  const threadRow = db.prepare(`
+    SELECT t.id, t.account_id, s.id AS source_id, s.external_id AS page_id, s.source_type
+    FROM threads t LEFT JOIN inbox_sources s ON s.id = t.source_id
+    WHERE t.id = ?
+  `).get(thread_id);
+  if (!threadRow || threadRow.source_type !== 'page_messenger' || !threadRow.source_id) {
+    throw new Error('Thread Page không hợp lệ hoặc thiếu Page source.');
+  }
+  const att = db.prepare('SELECT * FROM outbound_attachments WHERE id = ?').get(attachment_id);
+  if (!att || !att.storage_path || !fs.existsSync(att.storage_path)) {
+    throw new Error('Tệp đính kèm không còn trên máy — hãy đính lại file.');
+  }
+  const psid = String(thread_id).includes(':') ? String(thread_id).split(':').pop() : String(thread_id);
+  const maxSeqRow = db.prepare('SELECT MAX(COALESCE(sequence_order, id)) AS max_seq FROM messages WHERE thread_id = ?').get(thread_id);
+  const nextSeq = (Number.isFinite(Number(maxSeqRow?.max_seq)) && Number(maxSeqRow.max_seq) > 0) ? Number(maxSeqRow.max_seq) + 1 : 1;
+  const clientMsgId = client_message_id || `client_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const nowMs = Date.now();
+  const pendingFbId = `pending_${clientMsgId}`;
+  const insert = db.prepare(`
+    INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, attachment_id, is_outgoing, sender_role, delivery_status, sequence_order, timestamp_ms, timestamp_source, created_at)
+    VALUES (?, ?, ?, 'SYSTEM', ?, ?, ?, 1, 'operator', 'pending', ?, ?, 'client_submit', ?)
+  `).run(thread_id, pendingFbId, clientMsgId, (text || null), att.media_type, att.id, nextSeq, nowMs, new Date(nowMs).toISOString());
+  const rowId = insert.lastInsertRowid;
+  db.prepare('UPDATE threads SET last_message = ?, last_activity = CURRENT_TIMESTAMP WHERE id = ?').run(text || ('[' + att.media_type + ']'), thread_id);
+  const pendingRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+  io.emit('NEW_MESSAGE', withAttachmentAccessUrl({ ...pendingRow, status: 'pending' }));
+
+  const failPageSend = async (err) => {
+    db.prepare("UPDATE messages SET delivery_status = 'failed', delivery_error = ? WHERE id = ?").run(String(err.message || err), rowId);
+    const failedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+    io.emit('NEW_MESSAGE', withAttachmentAccessUrl({ ...failedRow, thread_id, account_id: threadRow.account_id }));
+    throw err;
+  };
+
+  try {
+    const token = InboxSourceService.getDecryptedToken(threadRow.source_id);
+    if (!token) throw new Error('Page chưa có Page Access Token — hãy bấm "Lấy token" trong modal Fanpage.');
+    // 1) Upload tệp lên Meta
+    const form = new FormData();
+    form.append('message', JSON.stringify({ attachment: { type: att.media_type, payload: {} } }));
+    form.append('filedata', new Blob([fs.readFileSync(att.storage_path)], { type: att.mime_type }), att.original_name || att.safe_name);
+    const upRes = await fetch(`https://graph.facebook.com/v21.0/${threadRow.page_id}/message_attachments?access_token=${encodeURIComponent(token)}`, { method: 'POST', body: form });
+    const upData = await upRes.json().catch(() => ({}));
+    if (upData.error) throw new Error('Upload tệp lên Facebook lỗi: ' + (upData.error.message || 'không rõ'));
+    if (!upData.attachment_id) throw new Error('Facebook không trả attachment_id sau khi upload.');
+    // 2) Gửi tin với attachment_id
+    const sendRes = await fetch(`https://graph.facebook.com/v21.0/${threadRow.page_id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recipient: { id: psid },
+        message: { attachment: { type: att.media_type, payload: { attachment_id: upData.attachment_id } } },
+        access_token: token,
+      }),
+    });
+    const data = await sendRes.json().catch(() => ({}));
+    if (data.error) {
+      const err = new Error(data.error.error_data?.message || data.error.message || 'Gửi tệp thất bại.');
+      err.code = data.error.code ? `GRAPH_${data.error.code}` : 'GRAPH_ERROR';
+      throw err;
+    }
+    db.prepare(`
+      UPDATE messages SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL WHERE id = ?
+    `).run(data.message_id || pendingFbId, rowId);
+    try {
+      db.prepare("UPDATE outbound_attachments SET status = 'sent', consumed_by_message_id = ? WHERE id = ?").run(rowId, attachment_id);
+    } catch (_) {}
+    const sentRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+    console.log(`[PageApi] ✅ Đã gửi ${att.media_type} qua Page thread=${thread_id} mid=${data.message_id || 'n/a'}`);
+    io.emit('NEW_MESSAGE', withAttachmentAccessUrl({ ...sentRow, thread_id, account_id: threadRow.account_id }));
+    io.emit('THREAD_LIST_UPDATED', { thread_id, account_id: threadRow.account_id });
+  } catch (err) {
+    await failPageSend(err);
+  }
+}
+
+
+async function sendPageThreadViaGraph(thread_id, text, client_message_id, socket) {
+  const threadRow = db.prepare(`
+    SELECT t.id, t.account_id, t.contact_name, s.id AS source_id, s.external_id AS page_id, s.source_type
+    FROM threads t LEFT JOIN inbox_sources s ON s.id = t.source_id
+    WHERE t.id = ?
+  `).get(thread_id);
+  if (!threadRow || threadRow.source_type !== 'page_messenger' || !threadRow.source_id) {
+    throw new Error('Thread Page không hợp lệ hoặc thiếu Page source.');
+  }
+  const psid = String(thread_id).includes(':') ? String(thread_id).split(':').pop() : String(thread_id);
+
+  const maxSeqRow = db.prepare('SELECT MAX(COALESCE(sequence_order, id)) AS max_seq FROM messages WHERE thread_id = ?').get(thread_id);
+  const nextSeq = (Number.isFinite(Number(maxSeqRow?.max_seq)) && Number(maxSeqRow.max_seq) > 0) ? Number(maxSeqRow.max_seq) + 1 : 1;
+  const clientMsgId = client_message_id || `client_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const nowMs = Date.now();
+  const pendingFbId = `pending_${clientMsgId}`;
+  const insert = db.prepare(`
+    INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, is_outgoing, sender_role, delivery_status, sequence_order, timestamp_ms, timestamp_source, created_at)
+    VALUES (?, ?, ?, 'SYSTEM', ?, 1, 'operator', 'pending', ?, ?, 'client_submit', ?)
+  `).run(thread_id, pendingFbId, clientMsgId, text, nextSeq, nowMs, new Date(nowMs).toISOString());
+  const rowId = insert.lastInsertRowid;
+  db.prepare('UPDATE threads SET last_message = ?, last_activity = CURRENT_TIMESTAMP WHERE id = ?').run(text, thread_id);
+
+  const pendingRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+  io.emit('NEW_MESSAGE', { ...pendingRow, status: 'pending' });
+
+  const result = await pageApiService.sendPageMessage(threadRow.source_id, psid, text);
+  if (result.success) {
+    db.prepare(`
+      UPDATE messages SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL WHERE id = ?
+    `).run(result.messageId || pendingFbId, rowId);
+    const sentRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+    console.log(`[PageApi] ✅ Đã gửi tin Page thread=${thread_id} page=${threadRow.page_id} mid=${result.messageId || 'n/a'}`);
+    io.emit('NEW_MESSAGE', { ...sentRow, thread_id, account_id: threadRow.account_id });
+    io.emit('THREAD_LIST_UPDATED', { thread_id, account_id: threadRow.account_id });
+    return { success: true };
+  }
+
+  db.prepare(`
+    UPDATE messages SET delivery_status = 'failed', delivery_error = ? WHERE id = ?
+  `).run(String(result.error || 'SEND_FAILED'), rowId);
+  const failedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+  io.emit('NEW_MESSAGE', { ...failedRow, thread_id, account_id: threadRow.account_id });
+  const err = new Error(result.error || 'Gửi tin nhắn Page thất bại.');
+  err.code = result.errorCode || 'SEND_FAILED';
+  throw err;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────── */
+
 
 function enqueueCampaignMessage({ campaign, recipient, attempt, content, attachment = null, manifest = null }) {
   const route = CampaignEligibilityService.revalidateSnapshotRecipient(recipient, db, {
@@ -1292,6 +1522,21 @@ wss.on('connection', (ws, req) => {
           // or trigger sync work for this lightweight liveness frame.
           ws.lastHeartbeatAt = Date.now();
           break;
+
+        case 'FB_COOKIES': {
+          // Extension trả cookie Facebook về theo yêu cầu requestExtensionCookies()
+          // (dùng cho tự động hóa "Tạo app & Webhook" chạy trong Chrome riêng).
+          const cookieReqId = String(msg.data?.request_id || '');
+          const waiter = pendingCookieRequests.get(cookieReqId);
+          if (waiter) {
+            clearTimeout(waiter.timer);
+            pendingCookieRequests.delete(cookieReqId);
+            const cookies = Array.isArray(msg.data?.cookies) ? msg.data.cookies : [];
+            console.log(`[WS] 🍪 FB_COOKIES: nhận ${cookies.length} cookie cho yêu cầu ${cookieReqId.slice(0, 8)}…`);
+            waiter.resolve(cookies);
+          }
+          break;
+        }
 
         case 'COMMAND_PROBE_ACK': {
           // Phase C (2026-10-01): extension tra loi probe cua watchdog kenh
@@ -5041,6 +5286,21 @@ io.on('connection', (socket) => {
     }
 
     try {
+      // Thread PAGE → gửi bằng Send API với Page Access Token (không qua extension)
+      const pageThreadRow = db.prepare(`
+        SELECT s.source_type FROM threads t LEFT JOIN inbox_sources s ON s.id = t.source_id WHERE t.id = ?
+      `).get(thread_id);
+      if (pageThreadRow?.source_type === 'page_messenger') {
+        if (isRichMessage && attachment_id) {
+          await sendPageThreadViaGraphAttachment(thread_id, content, client_message_id, attachment_id, socket);
+          return;
+        }
+        if (isRichMessage) {
+          throw new RichMessageService.Error('PAGE_ATTACHMENT_NOT_SUPPORTED', 'Tin nhắn Page kèm file chưa hỗ trợ trên đường API mới.', 400);
+        }
+        await sendPageThreadViaGraph(thread_id, content, client_message_id, socket);
+        return;
+      }
       if (isRichMessage) {
         if (isLoopbackAddress(socket.handshake?.address) === false) {
           throw new RichMessageService.Error(
@@ -5409,6 +5669,233 @@ function getAccountName(accountId) {
   }
 }
 
+/* ─────────────── Routes Page API (Messenger Platform chính thức) ─────────────── */
+
+// Cấu hình toàn cục: URL cầu nối hosting (webhook.php) + verify token
+app.get('/api/page-api/config', (req, res) => {
+  // Gọi getOrCreateVerifyToken trước để KV được chuẩn hóa theo .env
+  // (đề phòng CSDL còn giữ token tự sinh từ bản cũ).
+  const verifyToken = pageApiService.getOrCreateVerifyToken();
+  const g = pageApiService.getGlobalConfig();
+  res.json({
+    success: true,
+    bridge_url: g.bridge_url || null,
+    verify_token: verifyToken,
+    webhook_url: g.bridge_url || null,
+  });
+});
+
+app.post('/api/page-api/config', (req, res) => {
+  const url = String((req.body || {}).bridge_url || '').trim();
+  if (url && !/^https:\/\//.test(url)) {
+    return res.status(400).json({ success: false, error: 'URL cầu nối phải là https (webhook.php trên hosting của bạn).' });
+  }
+  pageApiService.setBridgeUrl(url);
+  res.json({ success: true, bridge_url: pageApiService.getGlobalConfig().bridge_url });
+});
+
+// Danh sách page của 1 account theo đường API mới (kèm trạng thái có token)
+app.get('/api/page-api/accounts/:id/pages', (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  const accountId = String(req.params.id);
+  const rows = db.prepare(`
+    SELECT external_id, display_name, avatar_url, status, access_token_encrypted, created_at
+    FROM inbox_sources WHERE source_type = 'page_messenger' AND owner_account_id = ?
+    ORDER BY created_at ASC
+  `).all(accountId);
+  const pages = rows.map((r) => ({
+    page_id: String(r.external_id),
+    name: r.display_name,
+    avatar_url: r.avatar_url || `https://graph.facebook.com/${r.external_id}/picture?type=normal`,
+    category: 'Trang Facebook',
+    has_token: Boolean(r.access_token_encrypted),
+    is_connected: r.status === 'ACTIVE',
+    connected_at: r.created_at,
+  }));
+  const latestApp = pageApiService.appGetLatest(accountId);
+  res.json({
+    success: true,
+    account_id: accountId,
+    pages,
+    app: latestApp ? {
+      app_id: latestApp.appId,
+      name: latestApp.name,
+      status: latestApp.status,
+      note: latestApp.note || '',
+      webhook_url: latestApp.webhookUrl || null,
+      created_at: latestApp.createdAt,
+    } : null,
+  });
+});
+
+// Bấm "Tạo app & Webhook": mở Chrome riêng, tự tạo app + điền webhook + connect page + cào page
+app.post('/api/page-api/accounts/:id/create-app', async (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  const accountId = String(req.params.id);
+  const g = pageApiService.getGlobalConfig();
+  if (!g.bridge_url) {
+    return res.status(400).json({ success: false, error: 'Hãy cấu hình URL cầu nối hosting (webhook.php) trước khi tạo app.' });
+  }
+  const body = req.body || {};
+  const appName = String(body.appName || '').trim() || ('CRM Page ' + Date.now().toString().slice(-6));
+  const email = String(body.email || '').trim();
+  const webhookUrl = g.bridge_url;
+  const r = setupAutomation.startAppCreation(appName, email, webhookUrl, accountId);
+  if (r.error) return res.status(409).json({ success: false, error: r.error });
+  res.json({ success: true, sync_id: r.job.id });
+});
+
+// Xóa app trên Facebook (Chrome tự động hóa: menu ⋯ → Gỡ ứng dụng) + dọn data CRM
+app.post('/api/page-api/accounts/:id/delete-app', async (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  const accountId = String(req.params.id);
+  const latest = pageApiService.appGetLatest(accountId);
+  const appId = String((req.body || {}).appId || (latest ? latest.appId : '') || '').trim();
+  if (!/^\d+$/.test(appId)) {
+    return res.status(400).json({ success: false, error: 'Chưa có app nào để xóa.' });
+  }
+  const r = setupAutomation.startDeleteApp(appId, accountId);
+  if (r.error) return res.status(409).json({ success: false, error: r.error });
+  res.json({ success: true, sync_id: r.job.id });
+});
+
+// "Đồng bộ": quét danh sách page của account (cuộn tải hết), chỉ THÊM page mới
+// — page đã có trong hệ thống (mọi trạng thái) thì bỏ qua.
+app.post('/api/page-api/accounts/:id/sync-pages', async (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  const r = setupAutomation.startPageSync(String(req.params.id));
+  if (r.error) return res.status(409).json({ success: false, error: r.error });
+  res.json({ success: true, sync_id: r.job.id });
+});
+
+// "Lấy token & Đăng ký": chạy lại phần cấu hình webhook + cào page + đăng ký field + lấy token
+app.post('/api/page-api/accounts/:id/page-setup', async (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  const accountId = String(req.params.id);
+  const g = pageApiService.getGlobalConfig();
+  if (!g.bridge_url) {
+    return res.status(400).json({ success: false, error: 'Hãy cấu hình URL cầu nối hosting (webhook.php) trước.' });
+  }
+  const body = req.body || {};
+  const latest = pageApiService.appGetLatest(accountId);
+  const appId = String(body.appId || (latest ? latest.appId : '') || '').trim();
+  if (!/^\d+$/.test(appId)) {
+    return res.status(400).json({ success: false, error: 'Chưa có app nào. Hãy bấm "Tạo app & Webhook" trước.' });
+  }
+  const pageIds = Array.isArray(body.pageIds) ? body.pageIds.map(String) : [];
+  const r = setupAutomation.startPageSetup(appId, pageIds, accountId, g.bridge_url);
+  if (r.error) return res.status(409).json({ success: false, error: r.error });
+  res.json({ success: true, sync_id: r.job.id });
+});
+
+// Trạng thái job tự động hóa đang chạy
+app.get('/api/page-api/sync-status', (req, res) => {
+  const active = setupAutomation.getActive();
+  const id = String(req.query.sync_id || '');
+  const job = active || (id ? setupAutomation.getJob(id) : null);
+  res.json({
+    success: true,
+    active: Boolean(active),
+    job: job ? {
+      sync_id: job.id,
+      kind: job.kind || 'create',
+      account_id: job.uid,
+      app_id: job.appId || null,
+      status: job.status,
+      message: job.message || '',
+      error: job.error || null,
+    } : null,
+  });
+});
+
+app.post('/api/page-api/sync-cancel', (req, res) => {
+  const id = String((req.body || {}).sync_id || '');
+  const ok = setupAutomation.cancelSync(id);
+  res.json({ success: ok });
+});
+
+// User nhập mật khẩu khi Facebook hỏi lại (re-auth) — KHÔNG lưu lại
+app.post('/api/page-api/submit-password', (req, res) => {
+  const { sync_id, password } = req.body || {};
+  const ok = setupAutomation.submitPassword(String(sync_id || ''), String(password || ''));
+  res.json({ success: ok });
+});
+
+// Input từ popup đăng ký developer (quốc gia / số điện thoại / mã OTP)
+app.post('/api/page-api/register-input', (req, res) => {
+  const { sync_id, type, value } = req.body || {};
+  const ok = setupAutomation.resolveRegisterInput(String(sync_id || ''), String(type || ''), value);
+  res.json({ success: ok });
+});
+
+app.post('/api/page-api/resend-sms', (req, res) => {
+  const { sync_id } = req.body || {};
+  const ok = setupAutomation.resendRegisterSms(String(sync_id || ''));
+  res.json({ success: ok });
+});
+
+// Backfill hội thoại của các page có token (đưa tin cũ về CRM)
+app.post('/api/page-api/accounts/:id/backfill', async (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  const accountId = String(req.params.id);
+  const sources = db.prepare(`
+    SELECT id, external_id, display_name FROM inbox_sources
+    WHERE source_type = 'page_messenger' AND owner_account_id = ? AND status = 'ACTIVE'
+      AND access_token_encrypted IS NOT NULL
+  `).all(accountId);
+  if (!sources.length) {
+    return res.json({ success: false, error: 'Chưa có page nào có Page Access Token.' });
+  }
+  const results = [];
+  for (const s of sources) {
+    const r = await pageApiService.backfillConversations(s.id, io);
+    results.push({ page_id: s.external_id, name: s.display_name, ...r });
+  }
+  res.json({ success: true, results });
+});
+
+// Webhook local (nếu user tự expose server): verify + nhận event từ Meta
+app.get('/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  const g = pageApiService.getGlobalConfig();
+  const expected = g.verify_token || pageApiService.getOrCreateVerifyToken();
+  if (mode === 'subscribe' && token === expected) {
+    res.type('text/plain').send(String(challenge || ''));
+  } else {
+    res.status(403).json({ error: 'Verify token mismatch' });
+  }
+});
+
+app.post('/webhook', (req, res) => {
+  try {
+    pageApiService.handleWebhookBody(req.body, io);
+  } catch (e) {
+    console.warn('[PageApi] Lỗi xử lý webhook POST:', e.message);
+  }
+  res.status(200).send('OK');
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────── */
+
+
+// ── TẮT: đường page cũ chạy qua extension DOM Business Suite ──
+// Chức năng Page chuyển sang Messenger Platform chính thức (Graph API + webhook).
+// Giữ lại code để tham khảo, không còn route nào dưới đây được đăng ký.
+/*
 app.get('/api/accounts/:id/pages', (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
     return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
@@ -5700,6 +6187,8 @@ app.post('/api/accounts/:id/pages/batch-open', async (req, res) => {
     errors: errors.length > 0 ? errors : undefined
   });
 });
+
+*/
 
 app.post('/api/accounts/new-session', async (req, res) => {
   if (!enterpriseAccess.isCompanyAdmin(req.user) && !(req.user.role === 'ADMIN' && req.user.username === 'admin')) {
@@ -6825,6 +7314,9 @@ function startServer() {
     server.listen(PORT, '0.0.0.0');
   });
 
+  // Bật poller đọc sự kiện webhook từ cầu nối hosting (webhook.php) cho Page API
+  pageApiService.startBridgePolling(io, db, 5000);
+
     // Dọn dẹp các tên rác hệ thống (ví dụ: "Tất cả tin nhắn", "Hộp thư đến", "Tin nhắn") đã lưu vào CSDL trước đây
   try {
     const dirtySystemNames = [
@@ -6875,6 +7367,41 @@ function startServer() {
     database: db,
     getConnection: (accountId) => extensionConnections.get(accountId),
     campaignEnabled: () => CampaignService.getConfig().enabled,
+    // Tin Page trong hàng đợi (campaign...) → Send API, không cần extension
+    pageGraphSend: async (message) => {
+      const threadRow = db.prepare(`
+        SELECT t.id, t.account_id, s.id AS source_id, s.external_id AS page_id, s.source_type
+        FROM threads t LEFT JOIN inbox_sources s ON s.id = t.source_id WHERE t.id = ?
+      `).get(message.thread_id);
+      if (!threadRow || threadRow.source_type !== 'page_messenger' || !threadRow.source_id) {
+        return { success: false, error: 'Thread Page không hợp lệ.', errorCode: 'PAGE_ROUTE_INVALID' };
+      }
+      const psid = String(message.thread_id).includes(':') ? String(message.thread_id).split(':').pop() : String(message.thread_id);
+      const maxSeqRow = db.prepare('SELECT MAX(COALESCE(sequence_order, id)) AS max_seq FROM messages WHERE thread_id = ?').get(message.thread_id);
+      const nextSeq = (Number.isFinite(Number(maxSeqRow?.max_seq)) && Number(maxSeqRow.max_seq) > 0) ? Number(maxSeqRow.max_seq) + 1 : 1;
+      const clientMsgId = message.client_message_id || `queue_${message.id}`;
+      const pendingFbId = `pending_${clientMsgId}`;
+      const nowMs = Date.now();
+      const insert = db.prepare(`
+        INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, is_outgoing, sender_role, delivery_status, sequence_order, timestamp_ms, timestamp_source, created_at)
+        VALUES (?, ?, ?, 'SYSTEM', ?, 1, 'operator', 'pending', ?, ?, 'client_submit', ?)
+      `).run(message.thread_id, pendingFbId, clientMsgId, message.content, nextSeq, nowMs, new Date(nowMs).toISOString());
+      const rowId = insert.lastInsertRowid;
+      db.prepare('UPDATE threads SET last_message = ?, last_activity = CURRENT_TIMESTAMP WHERE id = ?').run(message.content, message.thread_id);
+
+      const result = await pageApiService.sendPageMessage(threadRow.source_id, psid, message.content);
+      if (result.success) {
+        db.prepare('UPDATE messages SET fb_message_id = ?, delivery_status = \'sent\', delivery_error = NULL WHERE id = ?')
+          .run(result.messageId || pendingFbId, rowId);
+        const sentRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+        io.emit('NEW_MESSAGE', { ...sentRow, thread_id: message.thread_id, account_id: threadRow.account_id });
+        io.emit('THREAD_LIST_UPDATED', { thread_id: message.thread_id, account_id: threadRow.account_id });
+        return { success: true };
+      }
+      db.prepare("UPDATE messages SET delivery_status = 'failed', delivery_error = ? WHERE id = ?")
+        .run(String(result.error || 'SEND_FAILED'), rowId);
+      return { success: false, error: result.error, errorCode: result.errorCode };
+    },
     onQueueFail: (message, reason) => {
       if (message.outbound_attempt_id) {
         const attempt = OutboundAttemptRepository.getById(message.outbound_attempt_id, db);
@@ -6930,7 +7457,9 @@ function startServer() {
   // tránh nhiều Chrome khởi động tranh nhau cùng lúc.
   const autoReconnectTimer = setTimeout(() => {
     (async () => {
-      const accounts = db.prepare('SELECT id FROM accounts').all();
+      // Chỉ tự kết nối lại account ACTIVE — bỏ qua account DISCONNECTED
+      // (account cũ đã ngắt/test trái lại sẽ không bật Chrome lúc mở app).
+      const accounts = db.prepare("SELECT id FROM accounts WHERE status IS NULL OR status != 'DISCONNECTED'").all();
       for (const acc of accounts) {
         const accountId = String(acc.id);
         const requestedAt = Date.now();
@@ -6945,10 +7474,12 @@ function startServer() {
             backgroundAfterConnectRequests.delete(accountId);
             continue;
           }
-          const pageSources = activePageSourcesForAccount(accountId);
-          for (const source of pageSources) {
-            try { await processManager.startPageProcess(source.page_id, accountId, { skipUnhide: true }); } catch (_) {}
-          }
+          // TẮT: mở tab Business Suite cho từng Page khi reconnect — Page chuyển
+          // sang đường API chính thức, không còn cần tab business cho inbox page.
+          // const pageSources = activePageSourcesForAccount(accountId);
+          // for (const source of pageSources) {
+          //   try { await processManager.startPageProcess(source.page_id, accountId, { skipUnhide: true }); } catch (_) {}
+          // }
           // Watchdog 2026-10-01: nhanh "reuse" (Chrome do server vua launch, khong
           // force-reload) khong co co che tu chua - neu service worker cua extension
           // khong bao gio noi duoc WS thi account nam im o "Chua ket noi" mai khong
@@ -7134,6 +7665,14 @@ function sendDispatchProbe(accountId, extWs) {
 InboxSyncScheduler.configure({
   getConnection: (accountId) => extensionConnections.get(String(accountId)),
   dispatchThreadMessagesSync: ({ account_id, thread_id, external_thread_id, thread_url, page_id, contact_name, reason, allow_navigation, sync_mode, scroll_delta }) => {
+    // TẮT lane sync DOM cho thread PAGE — lịch sử page lấy qua Graph API
+    // (backfill) và realtime qua webhook. Mở tab Business Suite để quét DOM
+    // là đường cũ đã ngừng — trước đây nó tự sinh 2 tab Meta Business Suite
+    // trong Chrome của account (báo lỗi 2026-10-05).
+    if (page_id) {
+      syncDebug('SYNC_DISPATCH_SKIP_PAGE', { thread: String(thread_id || '').substring(0, 20), reason: reason || null });
+      return false;
+    }
     const extWs = extensionConnections.get(String(account_id));
     if (!extWs || extWs.readyState !== WebSocket.OPEN) {
       syncDebug('SYNC_DISPATCH_FAIL', { thread: String(thread_id || '').substring(0, 20), reason: reason || null, why: 'no_extension_ws' });

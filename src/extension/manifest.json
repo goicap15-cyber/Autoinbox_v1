@@ -63,15 +63,6 @@
       ],
       "js": ["textFilter.js", "callDirection.js", "sidebarActivityObserver.js", "content.js"],
       "run_at": "document_idle"
-    },
-    {
-      "matches": [
-        "https://business.facebook.com/*",
-        "https://*.facebook.com/*"
-      ],
-      "js": ["textFilter.js", "pageTimestampParser.js", "threadScanStateMachine.js", "pageDirection.js", "pageActiveScroller.js", "pageVideoDetector.js", "pageNameExtractor.js", "pageProfileUrlExtractor.js", "page_content.js"],
-      "all_frames": true,
-      "run_at": "document_idle"
     }
   ]
 }

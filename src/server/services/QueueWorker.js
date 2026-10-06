@@ -19,6 +19,7 @@ class QueueWorker {
     if (config.getConnection) this.getExtensionConnection = config.getConnection;
     if (config.onQueueFail) this.onQueueFail = config.onQueueFail;
     if (config.campaignEnabled) this.isCampaignEnabled = config.campaignEnabled;
+    if (config.pageGraphSend) this.pageGraphSend = config.pageGraphSend;
     if (config.database) this.database = config.database;
     if (Number.isFinite(config.dispatchTimeoutMs)) {
       this.dispatchTimeoutMs = Math.max(1, Number(config.dispatchTimeoutMs));
@@ -233,6 +234,33 @@ class QueueWorker {
     if (routeInvalid) {
       this.fail(message, message.campaign_id ? 'CAMPAIGN_ROUTE_INVALID' : 'RICH_MESSAGE_ROUTE_INVALID');
       return { message, outcome: 'failed' };
+    }
+
+    // Tin Page → Send API bằng Page Access Token (đường Graph API chính thức,
+    // thay cho dispatch qua extension CDP Business Suite đã ngừng sử dụng).
+    if (message.source_type === 'page_messenger') {
+      if (isRich) {
+        this.fail(message, 'PAGE_RICH_MESSAGE_NOT_SUPPORTED');
+        return { message, outcome: 'failed' };
+      }
+      if (typeof this.pageGraphSend !== 'function') {
+        this.fail(message, 'PAGE_GRAPH_SEND_NOT_CONFIGURED');
+        return { message, outcome: 'failed' };
+      }
+      let outcome = null;
+      try {
+        const r = await this.pageGraphSend(message);
+        outcome = r && r.success ? 'sent' : 'failed';
+        if (outcome === 'sent') {
+          MessageQueueRepository.updateStatus(message.id, 'sent');
+        } else {
+          this.fail(message, r.errorCode || 'PAGE_SEND_FAILED');
+        }
+      } catch (error) {
+        this.fail(message, error.message || 'PAGE_SEND_FAILED');
+        outcome = 'failed';
+      }
+      return { message, outcome };
     }
 
     let attachment = null;

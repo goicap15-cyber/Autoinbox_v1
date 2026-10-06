@@ -1486,6 +1486,37 @@ function connectWebSocket() {
         case 'COMMAND_PROBE':
           sendToBackend('COMMAND_PROBE_ACK', { probe_id: message.data?.probe_id || null, at: Date.now() });
           break;
+        case 'GET_FB_COOKIES': {
+          // Backend xin cookie Facebook của account này (dùng cho tự động hóa
+          // "Tạo app & Webhook" chạy trong Chrome riêng do server mở).
+          const cookieReqId = String(message.data?.request_id || '');
+          (async () => {
+            try {
+              const seen = new Map();
+              for (const domain of ['facebook.com', 'messenger.com']) {
+                const cookies = await chrome.cookies.getAll({ domain });
+                for (const c of cookies) {
+                  seen.set(c.name + '|' + c.domain + '|' + c.path, c);
+                }
+              }
+              const cookies = [...seen.values()].map((c) => ({
+                name: c.name,
+                value: c.value,
+                domain: c.domain,
+                path: c.path,
+                expires: c.expirationDate || 0,
+                secure: !!c.secure,
+                httpOnly: !!c.httpOnly,
+              }));
+              console.log('[FB Engine] 🍪 Gửi FB_COOKIES về backend:', cookies.length, 'cookie (req', cookieReqId.slice(0, 8) + '…)');
+              sendToBackend('FB_COOKIES', { request_id: cookieReqId, cookies });
+            } catch (e) {
+              console.warn('[FB Engine] Lỗi lấy cookie:', e?.message || e);
+              sendToBackend('FB_COOKIES', { request_id: cookieReqId, cookies: [], error: String(e?.message || e) });
+            }
+          })();
+          break;
+        }
         case 'RELOAD_EXTENSION': {
           console.warn('[FB Engine] Backend requested worker recovery:', message.data || {});
           try { ws?.close(1012, 'WORKER_RECOVERY'); } catch (_) {}
@@ -1551,6 +1582,18 @@ function connectWebSocket() {
           }
           backendAccountRegistered = true;
           console.log('[FB Engine] ✅ Backend ACK đăng ký tài khoản thành công:', message.data);
+          // Dọn tab Business Suite còn sót: đường Page DOM đã ngừng (Page chạy
+          // qua Messenger Platform API) — tab cũ không tự biến mất khi Chrome
+          // reuse qua nhiều phiên app (báo lỗi 2026-10-06: 2 tab biz kẹt mãi).
+          try {
+            chrome.tabs.query({ url: ['*://business.facebook.com/*'] }, (bizTabs) => {
+              const ids = (bizTabs || []).map((t) => t?.id).filter(Boolean);
+              if (ids.length) {
+                console.log('[FB Engine] 🧹 Đóng', ids.length, 'tab Business Suite còn sót (đường Page cũ).');
+                for (const id of ids) chrome.tabs.remove(id).catch(() => {});
+              }
+            });
+          } catch (_) {}
           const setupPendingKey = message.data?.pending_key || pending_key;
           pending_key = null;
           try {
@@ -1586,10 +1629,9 @@ function connectWebSocket() {
           break;
         }
         case 'REQ_REFRESH_PAGES': {
-          console.log('[FB Engine] 🔄 Nhận lệnh REQ_REFRESH_PAGES từ backend cho account:', user_id);
-          if (user_id) {
-            triggerPageDiscovery(user_id, true);
-          }
+          // TẮT: discovery page qua extension ngừng sử dụng — Page chuyển sang
+          // Messenger Platform (tạo app + webhook + page token qua server).
+          console.log('[FB Engine] REQ_REFRESH_PAGES bị bỏ qua: chức năng Page đã chuyển sang Page API.');
           break;
         }
         case 'PREPARE_CHAT_THREAD': {
@@ -1611,19 +1653,8 @@ function connectWebSocket() {
           await handleSendQueuedMessage(message.data);
           break;
         case 'SYNC_PAGE_SIDEBAR': {
-          const pageId = String(message.data?.page_id || '');
-          const tabs = await chrome.tabs.query({ url: ['*://business.facebook.com/*'] });
-          for (const tab of tabs) {
-            if (!tab?.id || (pageId && !String(tab.url || '').includes(`asset_id=${pageId}`))) continue;
-            chrome.tabs.sendMessage(tab.id, {
-              type: 'SCAN_PAGE_SIDEBAR',
-              data: {
-                page_id: pageId,
-                deep: Boolean(message.data?.deep),
-                max_rounds: Number(message.data?.max_rounds || 35)
-              }
-            }).catch(() => {});
-          }
+          // TẮT: quét sidebar Business Suite ngừng sử dụng (Page chạy qua API).
+          console.log('[FB Engine] SYNC_PAGE_SIDEBAR bị bỏ qua: chức năng Page đã chuyển sang Page API.');
           break;
         }
         case 'SYNC_THREADS':
@@ -2271,17 +2302,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'NEW_PAGE_MESSAGE_FROM_DOM') {
-    const msgData = message.data;
-    console.log('[FB Engine] 📨 NEW_PAGE_MESSAGE_FROM_DOM từ page_content:', JSON.stringify(msgData).substring(0, 300));
-    sendToBackend('NEW_MESSAGE_RECEIVED', {
-      ...msgData,
-      account_id: user_id || msgData.account_id,
-      source_type: 'page_messenger',
-      telemetry: {
-        ...(msgData?.telemetry || {}),
-        t_sw: Date.now()
-      }
-    });
+    // TẮT: page_content.js không còn được inject vào Business Suite (manifest
+    // đã bỏ) — tin Page giờ đến từ webhook Meta qua PageApiService.
+    console.log('[FB Engine] NEW_PAGE_MESSAGE_FROM_DOM bị bỏ qua (Page API).');
   }
 
   if (message.type === 'PAGE_TAB_BLANK_DETECTED') {
