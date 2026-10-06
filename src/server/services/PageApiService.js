@@ -687,18 +687,87 @@ function stopBridgePolling() {
   pollTimer = null;
 }
 
-// ── Tự động đồng bộ hội thoại (không cần bấm "Lấy hội thoại") ──
-// Mỗi chu kỳ: quét lần lượt các page CÓ TOKEN, kéo hội thoại/tin mới về bằng
-// Graph API (chống trùng theo mid). Đây là đường đảm bảo tin KHÁCH LUÔN tự
-// hiện lên CRM, độc lập với việc webhook app có đăng ký đủ hay không.
-let autoBackfillTimer = null;
-let autoBackfillRunning = false;
+// ── Theo dõi hội thoại page GẦN-THỜI-GIAN-THỰC (không cần bấm gì) ──
+// Mỗi 10s: 1 call nhẹ lấy danh sách hội thoại (id + updated_time) của từng page
+// có token → page nào CÓ BẢN CẬP NHẬT MỚI (khách vừa nhắn) mới kéo tin của
+// đúng page đó về. Tin vào DB chống trùng mid, chat đang mở tự cập nhật.
+let pageWatcherTimer = null;
+let pageWatcherBusy = false;
+const pageWatcherState = new Map(); // sourceId -> Map(convId -> updated_time ms)
 
-function startAutoBackfill(io, database = getDb(), intervalMs = 90000) {
-  if (autoBackfillTimer) return;
-  autoBackfillTimer = setInterval(async () => {
-    if (autoBackfillRunning) return;
-    autoBackfillRunning = true;
+function ensurePageThread(source, contactPsid, contactName, database) {
+  let threadId = contactPsid;
+  const clash = database.prepare(
+    "SELECT id, source_id FROM threads WHERE id = ? OR COALESCE(external_thread_id, '') = ?"
+  ).get(contactPsid, contactPsid);
+  if (clash && String(clash.source_id || '') !== String(source.id)) {
+    threadId = 'page:' + source.external_id + ':' + contactPsid;
+  }
+  const thread = ConversationRepository.upsertThread({
+    id: threadId,
+    account_id: source.owner_account_id || source.external_id,
+    source_id: source.id,
+    external_thread_id: contactPsid,
+    contact_name: contactName || null,
+    is_unread: 0,
+  }, database);
+  if (!thread) return null;
+  if (!thread.source_id) {
+    database.prepare('UPDATE threads SET source_id = ? WHERE id = ?').run(source.id, thread.id);
+  }
+  database.prepare(
+    'UPDATE threads SET account_id = ? WHERE id = ? AND (account_id IS NULL OR account_id != ?)'
+  ).run(String(source.owner_account_id || source.external_id), thread.id, String(source.owner_account_id || source.external_id));
+  return thread;
+}
+
+async function watchPageConversations(source, io, database) {
+  const token = InboxSourceService.getDecryptedToken(source.id, database);
+  if (!token) return;
+  const data = await graphGet(source.external_id + '/conversations', {
+    fields: 'id,updated_time,participants',
+    limit: '25',
+    access_token: token,
+  }, database);
+  if (data.error) return;
+  let state = pageWatcherState.get(source.id);
+  if (!state) { state = new Map(); pageWatcherState.set(source.id, state); }
+  let insertedNew = 0;
+  for (const conv of (data.data || [])) {
+    const participant = (conv.participants?.data || []).find((p) => String(p.id) !== String(source.external_id));
+    const psid = participant?.id;
+    if (!psid) continue;
+    const updated = new Date(conv.updated_time).getTime();
+    if (state.get(conv.id) === updated) continue; // không đổi — bỏ qua
+    state.set(conv.id, updated);
+    const msgData = await graphGet(conv.id + '/messages', {
+      fields: 'id,message,from,created_time,attachments{mime_type,image_url,video_url,audio_url,file_url}',
+      limit: '25',
+      access_token: token,
+    }, database);
+    if (msgData.error) continue;
+    const thread = ensurePageThread(source, psid, participant?.name || null, database);
+    if (!thread) continue;
+    for (const msg of (msgData.data || []).reverse()) {
+      const id = insertGraphMessage(thread.id, source, msg, database);
+      if (id != null) insertedNew++;
+    }
+    const lastMsg = (msgData.data || [])[0];
+    if (lastMsg) {
+      ConversationRepository.touchThread(thread.id, (lastMsg.message || '[Đính kèm]').substring(0, 200), database);
+    }
+  }
+  if (insertedNew > 0 && io) {
+    io.emit('THREAD_LIST_UPDATED', { account_id: source.owner_account_id, new_messages: insertedNew, page_id: source.external_id });
+    console.log('[PageApi] 🔄 Page ' + source.external_id + ': +' + insertedNew + ' tin mới về CRM');
+  }
+}
+
+function startPageConversationWatcher(io, database = getDb(), intervalMs = 10000) {
+  if (pageWatcherTimer) return;
+  pageWatcherTimer = setInterval(async () => {
+    if (pageWatcherBusy) return;
+    pageWatcherBusy = true;
     try {
       const sources = database.prepare(`
         SELECT id, external_id, display_name FROM inbox_sources
@@ -706,25 +775,23 @@ function startAutoBackfill(io, database = getDb(), intervalMs = 90000) {
       `).all();
       for (const s of sources) {
         try {
-          const r = await backfillConversations(s.id, io, { convLimit: 15 }, database);
-          if (r?.ok && r.newMessages > 0) {
-            console.log(`[PageApi] 🔄 Tự đồng bộ page ${s.external_id}: +${r.newMessages} tin mới`);
-          }
+          await watchPageConversations(s, io, database);
         } catch (_) { /* page lỗi — chu kỳ sau chạy tiếp */ }
-        await new Promise((r2) => setTimeout(r2, 2000)); // nghỉ giữa các page, tránh dồn Graph
+        await new Promise((r2) => setTimeout(r2, 800));
       }
     } catch (_) {}
     finally {
-      autoBackfillRunning = false;
+      pageWatcherBusy = false;
     }
   }, intervalMs);
-  console.log(`[PageApi] 🔁 Tự động đồng bộ hội thoại page mỗi ${intervalMs / 1000}s — không cần bấm "Lấy hội thoại".`);
+  console.log('[PageApi] 👀 Theo dõi hội thoại page mỗi ' + (intervalMs / 1000) + 's — khách nhắn là tin tự về CRM.');
 }
 
-function stopAutoBackfill() {
-  if (autoBackfillTimer) clearInterval(autoBackfillTimer);
-  autoBackfillTimer = null;
+function stopPageConversationWatcher() {
+  if (pageWatcherTimer) clearInterval(pageWatcherTimer);
+  pageWatcherTimer = null;
 }
+
 
 module.exports = {
   ensureSchema,
@@ -750,8 +817,8 @@ module.exports = {
   backfillConversations,
   handleWebhookBody,
   startBridgePolling,
-  startAutoBackfill,
-  stopAutoBackfill,
+  startPageConversationWatcher,
+  stopPageConversationWatcher,
   stopBridgePolling,
   GRAPH_VERSION,
 };

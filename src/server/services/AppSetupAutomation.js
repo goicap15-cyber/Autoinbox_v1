@@ -2140,6 +2140,8 @@ async function runPageSetup(job, uid) {
   // (bấm nút See more/Xem thêm mở rộng card — hướng dẫn của user 2026-10-06:
   //  KHÔNG đi vòng qua trang /webhooks/ nữa, nút Đăng ký nằm ngay tại đây)
   await subscribeWebhookFieldsInCard(job, page);
+  // Đăng ký ĐỐI TƯỢNG Page trên trang Webhooks (tầng bắt buộc để Meta đẩy event tức thì)
+  await subscribeAppToPageObject(job, page);
 
   // Mở rộng card "Tạo mã truy cập" nếu đang thu gọn
   for (let i = 0; i < 5; i++) {
