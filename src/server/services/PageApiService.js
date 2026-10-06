@@ -138,7 +138,7 @@ function upsertPages(accountId, pages, database = getDb()) {
     if (existing) {
       const ownerChanged = accountId && existing.owner_account_id !== String(accountId);
       database.prepare(
-        "UPDATE inbox_sources SET owner_account_id = ?, display_name = COALESCE(NULLIF(?, ''), display_name), status = 'ACTIVE' WHERE id = ?"
+        "UPDATE inbox_sources SET owner_account_id = ?, display_name = COALESCE(NULLIF(?, ''), display_name), status = 'ACTIVE', avatar_url = COALESCE(avatar_url, 'https://graph.facebook.com/' || external_id || '/picture?type=normal') WHERE id = ?"
       ).run(accountId || existing.owner_account_id, p.name || '', existing.id);
       // Đổi chủ source → kéo theo toàn bộ thread của source sang chủ mới
       if (ownerChanged) {
@@ -328,11 +328,17 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
 
   // Cập nhật tên page thật từ Graph (tên bóc từ DOM có khi là chữ UI như "Xem Thêm")
   try {
-    const me = await graphGet('me', { fields: 'name', access_token: token }, database);
+    const me = await graphGet('me', { fields: 'name,picture.type(normal)', access_token: token }, database);
     if (me?.name && InboxSourceService.isValidPageDisplayName(me.name) && me.name !== source.display_name) {
       database.prepare('UPDATE inbox_sources SET display_name = ? WHERE id = ?').run(me.name, source.id);
       source.display_name = me.name;
       console.log(`[PageApi] 🏷️ Cập nhật tên page ${pageId}: "${me.name}"`);
+    }
+    const picUrl = me?.picture?.data?.url;
+    if (picUrl && picUrl !== source.avatar_url) {
+      database.prepare('UPDATE inbox_sources SET avatar_url = ? WHERE id = ?').run(picUrl, source.id);
+      source.avatar_url = picUrl;
+      console.log(`[PageApi] 🖼️ Cập nhật avatar page ${pageId}`);
     }
   } catch (_) { /* không có tên mới thì giữ tên cũ */ }
 

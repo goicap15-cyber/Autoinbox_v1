@@ -113,7 +113,27 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
             <span className="relative inline-flex rounded-full h-4 w-4 bg-[var(--color-accent)] border-2 border-[var(--color-bg-panel)]"></span>
           </span>
         )}
-        <span className={'absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[var(--color-bg-panel)] ' + (isOnline ? 'bg-[var(--color-success)]' : 'bg-[var(--color-text-muted)]')} />
+        {sourceType === 'page_messenger' ? (
+          // Thread PAGE: thay chấm online (vô nghĩa với page) bằng badge avatar page
+          senderAccountAvatarUrl ? (
+            <img
+              src={senderAccountAvatarUrl}
+              alt=""
+              title={sourceName}
+              className="absolute -bottom-1.5 -right-1.5 h-[18px] w-[18px] rounded-full object-cover border-2 border-[var(--color-bg-panel)] shadow-sm"
+              onError={(e) => { e.currentTarget.style.display = 'none'; }}
+            />
+          ) : (
+            <span
+              title={sourceName}
+              className="absolute -bottom-1.5 -right-1.5 flex h-[18px] w-[18px] items-center justify-center rounded-full border-2 border-[var(--color-bg-panel)] bg-violet-500 text-[9px] font-bold text-white shadow-sm"
+            >
+              {(sourceName || 'P').charAt(0).toUpperCase()}
+            </span>
+          )
+        ) : (
+          <span className={'absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-[var(--color-bg-panel)] ' + (isOnline ? 'bg-[var(--color-success)]' : 'bg-[var(--color-text-muted)]')} />
+        )}
       </div>
 
       <div className="flex-1 min-w-0">

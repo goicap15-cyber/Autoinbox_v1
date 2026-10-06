@@ -172,17 +172,22 @@ class InboxSourceService {
     const sourceId = 'src_page_' + pageId;
     const targetThreadId = threadId || canonicalThreadId;
 
-    // 1. Upsert inbox_source row (idempotent)
-    const existing = database.prepare('SELECT id, display_name, owner_account_id FROM inbox_sources WHERE id = ?').get(sourceId);
+    // 1. Upsert inbox_source row (idempotent) — luôn có avatar mặc định từ Graph
+    // (link public không cần token) để hội thoại hiển thị avatar page.
+    const defaultAvatar = `https://graph.facebook.com/${String(pageId)}/picture?type=normal`;
+    const existing = database.prepare('SELECT id, display_name, owner_account_id, avatar_url FROM inbox_sources WHERE id = ?').get(sourceId);
     if (!existing) {
       const initialDisplayName = this.isValidPageDisplayName(pageName) ? pageName.trim() : ('Page ' + pageId);
       database.prepare(`
         INSERT OR IGNORE INTO inbox_sources
-          (id, source_type, owner_account_id, external_id, display_name, status)
-        VALUES (?, 'page_messenger', ?, ?, ?, 'ACTIVE')
-      `).run(sourceId, accountId || null, String(pageId), initialDisplayName);
+          (id, source_type, owner_account_id, external_id, display_name, avatar_url, status)
+        VALUES (?, 'page_messenger', ?, ?, ?, ?, 'ACTIVE')
+      `).run(sourceId, accountId || null, String(pageId), initialDisplayName, defaultAvatar);
       console.log(`[PAGE_SOURCE] ✅ Tự động tạo page source: ${sourceId} (${initialDisplayName})`);
     } else {
+      if (!existing.avatar_url) {
+        database.prepare('UPDATE inbox_sources SET avatar_url = ? WHERE id = ?').run(defaultAvatar, sourceId);
+      }
       // Gắn chủ cho row được tự tạo TRƯỚC khi user bấm "Kết nối Page":
       // các row này tồn tại với owner NULL (scan Business Suite tự phát hiện),
       // khiến danh sách "Page đã kết nối" lọc theo owner mất page và các luồng
