@@ -726,18 +726,30 @@ function ensurePageThread(source, contactPsid, contactName, database) {
   return thread;
 }
 
+// Log watcher ra file — packaged app không thấy console, đây là mắt giám sát duy nhất
+function watcherLog(msg) {
+  console.log('[PageApi] 👀 ' + msg);
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const { APP_DATA_ROOT } = require('../utils/appDataRoot');
+    fs.appendFileSync(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status: 'watcher', note: String(msg).slice(0, 300) }) + '\n');
+  } catch (_) {}
+}
+
 async function watchPageConversations(source, io, database) {
   const token = InboxSourceService.getDecryptedToken(source.id, database);
-  if (!token) return;
+  if (!token) { watcherLog(source.external_id + ': bỏ qua — không có token'); return; }
   const data = await graphGet(source.external_id + '/conversations', {
     fields: 'id,updated_time,participants',
     limit: '25',
     access_token: token,
   }, database);
-  if (data.error) return;
+  if (data.error) { watcherLog(source.external_id + ' conversations LỖI: ' + (data.error.message || '') ); return; }
   let state = pageWatcherState.get(source.id);
   if (!state) { state = new Map(); pageWatcherState.set(source.id, state); }
   let insertedNew = 0;
+  let failed = 0;
   for (const conv of (data.data || [])) {
     const participant = (conv.participants?.data || []).find((p) => String(p.id) !== String(source.external_id));
     const psid = participant?.id;
@@ -751,7 +763,7 @@ async function watchPageConversations(source, io, database) {
       limit: '25',
       access_token: token,
     }, database);
-    if (msgData.error) continue;
+    if (msgData.error) { failed++; watcherLog('kéo tin conv ' + conv.id + ' LỖI: ' + (msgData.error.message || '')); continue; }
     state.set(conv.id, updated);
     const thread = ensurePageThread(source, psid, participant?.name || null, database);
     if (!thread) continue;
@@ -764,6 +776,7 @@ async function watchPageConversations(source, io, database) {
       ConversationRepository.touchThread(thread.id, (lastMsg.message || '[Đính kèm]').substring(0, 200), database);
     }
   }
+  watcherLog(source.external_id + ': ' + (data.data || []).length + ' hội thoại, ' + insertedNew + ' tin mới' + (failed ? ', ' + failed + ' hội thoại kéo lỗi' : ''));
   if (insertedNew > 0 && io) {
     io.emit('THREAD_LIST_UPDATED', { account_id: source.owner_account_id, new_messages: insertedNew, page_id: source.external_id });
     console.log('[PageApi] 🔄 Page ' + source.external_id + ': +' + insertedNew + ' tin mới về CRM');
@@ -828,6 +841,7 @@ module.exports = {
   handleWebhookBody,
   startBridgePolling,
   startPageConversationWatcher,
+  watchPageConversations,
   stopPageConversationWatcher,
   stopBridgePolling,
   GRAPH_VERSION,
