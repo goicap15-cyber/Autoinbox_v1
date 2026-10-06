@@ -5534,22 +5534,11 @@ app.post('/api/accounts/:id/start', async (req, res) => {
     });
   }
 
-  // Start every Page already connected to this Facebook account in its own
-  // Chrome profile as part of Connect Facebook. This keeps Page and Personal
-  // Messenger independent and does not modify either existing process.
-  // Tuần tự hóa launch Page: chạy song song từng bị race startAccountProcess
-  // (3 Page = 3 lần launch Chrome tranh nhau - reproduced 2026-09-19). Mỗi
-  // Page vẫn mở Business Suite tab riêng trong CÙNG Chrome account.
-  const pageSources = activePageSourcesForAccount(accountId);
-  for (const source of pageSources) {
-    try {
-      await processManager.startPageProcess(source.page_id, accountId);
-    } catch (error) {
-      console.warn(`[PageSync] Could not launch Page ${source.page_id} on connect:`, error.message);
-    }
-  }
+  // TẮT: mở tab Business Suite cho từng Page khi bấm "Kết nối Facebook" —
+  // Page chạy qua Messenger Platform (Graph API + webhook), không cần tab.
+  // Trước đây 11 page = 11 tab biz trong Chrome account (báo lỗi 2026-10-06).
 
-  res.json({ success: true, page_windows_requested: pageSources.length });
+  res.json({ success: true, page_windows_requested: 0 });
 });
 app.post('/api/accounts/:id/stop', (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
