@@ -491,6 +491,22 @@ function resequenceThreadByTimestamp(threadId, database) {
 
 // ── Webhook ingestion (body từ Meta) ──
 // Trả về { processed, errors, messageData? } — messageData để caller bắn socket.
+// Đa page / đa account: tra pageId thuộc app của account nào (page_api_config)
+function findAccountForPage(pageId, database = getDb()) {
+  const rows = database.prepare("SELECT key, value FROM page_api_config WHERE key LIKE 'account:%'").all();
+  for (const r of rows) {
+    try {
+      const j = JSON.parse(r.value);
+      for (const app of (j.apps || [])) {
+        if ((app.pages || []).some((p) => String(p.pageId) === String(pageId))) {
+          return r.key.slice('account:'.length);
+        }
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
 function handleWebhookBody(body, io, database = getDb()) {
   const result = { processed: 0, errors: 0 };
   if (!body || body.object !== 'page') return result;
@@ -508,12 +524,11 @@ function handleWebhookBody(body, io, database = getDb()) {
       source = InboxSourceService.getSourceByExternalId('page_messenger', pageId, database);
     }
     if (source && !source.owner_account_id) {
-      const activeAccounts = database.prepare("SELECT id FROM accounts WHERE status = 'ACTIVE' OR status IS NULL").all();
-      if (activeAccounts.length === 1) {
+      const resolved = findAccountForPage(pageId, database) || (() => { const a = database.prepare("SELECT id FROM accounts WHERE status = 'ACTIVE' OR status IS NULL").all(); return a.length === 1 ? String(a[0].id) : null; })();
+      if (resolved) {
         database.prepare('UPDATE inbox_sources SET owner_account_id = ? WHERE id = ? AND owner_account_id IS NULL')
-          .run(String(activeAccounts[0].id), source.id);
-        source = InboxSourceService.getSourceByExternalId('page_messenger', pageId, database);
-        console.log(`[PageApi] 🔗 Tự gắn owner ${activeAccounts[0].id} cho page ${pageId}`);
+          .run(String(resolved), source.id);
+        console.log('[PageApi] 🔗 Tự gắn owner ' + resolved + ' cho page ' + pageId);
       }
     }
     if (!source) {
@@ -536,22 +551,29 @@ function handleWebhookBody(body, io, database = getDb()) {
 
 function processMessagingEvent(event, source, io, database) {
   const message = event.message;
-  if (!message || message.is_echo) {
-    // is_echo: tin do Page gửi ra (kể cả qua CRM) — bỏ qua, tin gửi từ CRM
-    // đã có bản ghi pending riêng của nó.
-    return null;
-  }
+  if (!message) return null;
   const pageId = String(source.external_id);
   const senderPsid = String(event.sender?.id || 'unknown');
-  const isOutgoing = senderPsid === pageId;
+  const isEcho = Boolean(message.is_echo);
+  const isOutgoing = isEcho || senderPsid === pageId;
   const contactPsid = isOutgoing ? String(event.recipient?.id || '') : senderPsid;
   if (!contactPsid) return null;
   const text = message.text || '';
   const ts = Number(event.timestamp || Date.now());
 
-  // Bare-first: id thường = psid, trùng hội thoại khác nguồn thì repo tự namespacing
+  // Đa page / đa account: cùng một khách có thể nhắn NHIỀU page (thậm chí
+  // qua account khác) — thread bare psid đã tồn tại ở nguồn KHÁC thì buộc
+  // namespacing page:<pageId>:<psid> ngay từ đầu, tránh INSERT trùng khóa.
+  let threadId = contactPsid;
+  const clash = database.prepare(
+    "SELECT id, source_id, account_id FROM threads WHERE id = ? OR COALESCE(external_thread_id, '') = ?"
+  ).get(contactPsid, contactPsid);
+  if (clash && String(clash.source_id || '') !== String(source.id)) {
+    threadId = 'page:' + pageId + ':' + contactPsid;
+  }
+
   const thread = ConversationRepository.upsertThread({
-    id: contactPsid,
+    id: threadId,
     account_id: source.owner_account_id || pageId,
     source_id: source.id,
     external_thread_id: contactPsid,
@@ -569,6 +591,27 @@ function processMessagingEvent(event, source, io, database) {
   database.prepare(
     'UPDATE threads SET account_id = ? WHERE id = ? AND (account_id IS NULL OR account_id != ?)'
   ).run(String(source.owner_account_id || pageId), thread.id, String(source.owner_account_id || pageId));
+
+  // ECHO = page gửi tin TRỰC TIẾP từ Messenger (không qua CRM) — phải ghi lại,
+  // không bỏ qua. Tin gửi TỪ CRM đã có row pending: đối soát theo nội dung
+  // ±5 phút rồi gắn mid thật; không khớp row nào thì ghi tin mới.
+  if (isEcho) {
+    const existing = database.prepare(`
+      SELECT id, fb_message_id, delivery_status FROM messages WHERE thread_id = ? AND is_outgoing = 1 AND content = ?
+        AND ABS(COALESCE(timestamp_ms, 0) - ?) <= 300000
+      ORDER BY (delivery_status = 'pending') DESC, id DESC LIMIT 1
+    `).get(thread.id, text, ts);
+    if (existing) {
+      if (String(existing.fb_message_id || '').startsWith('pending_') || existing.delivery_status !== 'sent') {
+        database.prepare(`
+          UPDATE messages SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL WHERE id = ?
+        `).run(message.mid, existing.id);
+        const row = database.prepare('SELECT * FROM messages WHERE id = ?').get(existing.id);
+        if (io) io.emit('NEW_MESSAGE', { ...row, thread_id: thread.id, account_id: thread.account_id, source_id: source.id, source_type: 'page_messenger' });
+      }
+      return null;
+    }
+  }
 
   const insertId = insertGraphMessage(thread.id, source, {
     id: message.mid,
@@ -596,7 +639,7 @@ function processMessagingEvent(event, source, io, database) {
     source_name: source.display_name,
     page_id: pageId,
   };
-  console.log(`[PageApi] 💬 Tin Page mới: mid=${message.mid} thread=${thread.id} page=${pageId}`);
+  console.log('[PageApi] 💬 Tin Page mới: mid=' + message.mid + ' thread=' + thread.id + ' page=' + pageId + (isEcho ? ' (echo)' : ''));
   if (io) {
     io.emit('NEW_MESSAGE', messageData);
     io.emit('THREAD_LIST_UPDATED', { thread_id: thread.id, account_id: thread.account_id });
