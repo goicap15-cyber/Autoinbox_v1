@@ -416,8 +416,10 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
         if (msgData.error) continue;
 
         for (const msg of (msgData.data || []).reverse()) {
+          await enrichAttachmentUrls(msg, token, database);
           const inserted = insertGraphMessage(thread.id, source, msg, database);
           if (inserted != null) insertedNew++;
+          else if (backfillMediaUrlOnExistingRow(msg, database)) insertedNew++;
         }
         const lastMsg = (msgData.data || [])[0];
         if (lastMsg) {
@@ -495,6 +497,46 @@ function resequenceThreadByTimestamp(threadId, database) {
   database.transaction(() => {
     rows.forEach((r, i) => upd.run(i + 1, r.id));
   })();
+}
+
+function mediaUrlOf(msg) {
+  const att = (msg.attachments?.data || [])[0];
+  if (!att) return null;
+  return att.image_url || att.video_url || att.audio_url || att.file_url || null;
+}
+
+// Graph /messages KHÔNG trả URL cho attachment (chỉ mime_type + id) — phải gọi
+// /{mid}/attachments để lấy image_data.url / video_data.url / file_url thật,
+// không thì ảnh/video về CRM trắng (lỗi 2026-10-06). Ném lỗi khi Graph trả error
+// để caller thử lại chu kỳ sau; trả về im lặng khi attachment rỗng (đã xóa).
+async function enrichAttachmentUrls(msg, token, database) {
+  const att = (msg.attachments?.data || [])[0];
+  if (!att || !att.id) return;
+  if (att.image_url || att.video_url || att.audio_url || att.file_url) return;
+  const res = await graphGet(msg.id + '/attachments', {
+    fields: 'mime_type,name,image_data,video_data,audio_data,file_url',
+    access_token: token,
+  }, database);
+  if (res.error) throw new Error('attachments LỖI: ' + (res.error.message || ''));
+  const full = (res.data || [])[0];
+  if (!full) return;
+  if (full.image_data?.url) att.image_url = full.image_data.url;
+  if (full.video_data?.url) att.video_url = full.video_data.url;
+  else if (full.video_data?.preview_url) att.video_url = full.video_data.preview_url;
+  if (full.audio_data?.url) att.audio_url = full.audio_data.url;
+  if (full.file_url) att.file_url = full.file_url;
+}
+
+// Chèn media URL vào row đã tồn tại (trước fix từng lưu media_url NULL) — trả
+// true nếu có sửa để caller tính là tin mới (client cần refetch hiển thị ảnh).
+function backfillMediaUrlOnExistingRow(msg, database) {
+  const url = mediaUrlOf(msg);
+  if (!url || !msg.id) return false;
+  const upd = database.prepare(`
+    UPDATE messages SET media_url = ?
+    WHERE fb_message_id = ? AND (media_url IS NULL OR media_url = '')
+  `).run(url, String(msg.id));
+  return upd.changes > 0;
 }
 
 // ── Webhook ingestion (body từ Meta) ──
@@ -720,9 +762,15 @@ function ensurePageThread(source, contactPsid, contactName, database) {
   if (!thread.source_id) {
     database.prepare('UPDATE threads SET source_id = ? WHERE id = ?').run(source.id, thread.id);
   }
-  database.prepare(
-    'UPDATE threads SET account_id = ? WHERE id = ? AND (account_id IS NULL OR account_id != ?)'
-  ).run(String(source.owner_account_id || source.external_id), thread.id, String(source.owner_account_id || source.external_id));
+  // owner_account_id bắt buộc phải là account THẬT — FK threads.account_id → accounts.id.
+  // Watcher từng SELECT thiếu cột owner_account_id khiến fallback ID page đổ vào
+  // account_id → FOREIGN KEY constraint failed, mất toàn bộ tin (lỗi 2026-10-06).
+  const ownerId = source.owner_account_id ? String(source.owner_account_id) : null;
+  if (ownerId) {
+    database.prepare(
+      'UPDATE threads SET account_id = ? WHERE id = ? AND (account_id IS NULL OR account_id != ?)'
+    ).run(ownerId, thread.id, ownerId);
+  }
   return thread;
 }
 
@@ -736,6 +784,8 @@ function watcherLog(msg) {
     fs.appendFileSync(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status: 'watcher', note: String(msg).slice(0, 300) }) + '\n');
   } catch (_) {}
 }
+
+let pageWatcherCycleStartedAt = 0;
 
 async function watchPageConversations(source, io, database) {
   const token = InboxSourceService.getDecryptedToken(source.id, database);
@@ -753,30 +803,42 @@ async function watchPageConversations(source, io, database) {
   for (const conv of (data.data || [])) {
     const participant = (conv.participants?.data || []).find((p) => String(p.id) !== String(source.external_id));
     const psid = participant?.id;
-    if (!psid) continue;
+    if (!psid) {
+      failed++;
+      watcherLog('conv ' + conv.id + ' KHÔNG có participants khách — participants=' + JSON.stringify(conv.participants).slice(0, 150));
+      continue;
+    }
     const updated = new Date(conv.updated_time).getTime();
     if (state.get(conv.id) === updated) continue; // không đổi — bỏ qua
-    // LƯU Ý: chỉ đánh dấu updated SAU khi kéo tin thành công — kéo lỗi thì
-    // chu kỳ sau thử lại, tin không bao giờ bị bỏ sót (lỗi mất Đikkjđi 2026-10-06)
-    const msgData = await graphGet(conv.id + '/messages', {
-      fields: 'id,message,from,created_time,attachments{mime_type,image_url,video_url,audio_url,file_url}',
-      limit: '25',
-      access_token: token,
-    }, database);
-    if (msgData.error) { failed++; watcherLog('kéo tin conv ' + conv.id + ' LỖI: ' + (msgData.error.message || '')); continue; }
-    state.set(conv.id, updated);
-    const thread = ensurePageThread(source, psid, participant?.name || null, database);
-    if (!thread) continue;
-    for (const msg of (msgData.data || []).reverse()) {
-      const id = insertGraphMessage(thread.id, source, msg, database);
-      if (id != null) insertedNew++;
-    }
-    const lastMsg = (msgData.data || [])[0];
-    if (lastMsg) {
-      ConversationRepository.touchThread(thread.id, (lastMsg.message || '[Đính kèm]').substring(0, 200), database);
+    // CHỈ đánh dấu updated SAU khi kéo + ghi tin THÀNH CÔNG — ném lỗi giữa
+    // chừng (SQLITE_BUSY, trùng mid...) trước đây "đầu độc" state khiến hội
+    // thoại bị bỏ qua vĩnh viễn (lỗi mất tin Síosss/xcxcxc 2026-10-06)
+    try {
+      const msgData = await graphGet(conv.id + '/messages', {
+        fields: 'id,message,from,created_time,attachments{mime_type,image_url,video_url,audio_url,file_url}',
+        limit: '25',
+        access_token: token,
+      }, database);
+      if (msgData.error) { failed++; watcherLog('kéo tin conv ' + conv.id + ' LỖI: ' + (msgData.error.message || '')); continue; }
+      const thread = ensurePageThread(source, psid, participant?.name || null, database);
+      if (!thread) { failed++; watcherLog('conv ' + conv.id + ': ensurePageThread trả null (psid=' + psid + ')'); continue; }
+      for (const msg of (msgData.data || []).reverse()) {
+        await enrichAttachmentUrls(msg, token, database);
+        const id = insertGraphMessage(thread.id, source, msg, database);
+        if (id != null) insertedNew++;
+        else if (backfillMediaUrlOnExistingRow(msg, database)) insertedNew++;
+      }
+      const lastMsg = (msgData.data || [])[0];
+      if (lastMsg) {
+        ConversationRepository.touchThread(thread.id, (lastMsg.message || '[Đính kèm]').substring(0, 200), database);
+      }
+      state.set(conv.id, updated);
+    } catch (err) {
+      failed++;
+      watcherLog('conv ' + conv.id + ' LỖI ngoại lệ: ' + String(err && (err.stack || err.message || err)).slice(0, 400));
     }
   }
-  watcherLog(source.external_id + ': ' + (data.data || []).length + ' hội thoại, ' + insertedNew + ' tin mới' + (failed ? ', ' + failed + ' hội thoại kéo lỗi' : ''));
+  watcherLog(source.external_id + ': ' + (data.data || []).length + ' hội thoại, ' + insertedNew + ' tin mới' + (failed ? ', ' + failed + ' hội thoại lỗi' : ''));
   if (insertedNew > 0 && io) {
     io.emit('THREAD_LIST_UPDATED', { account_id: source.owner_account_id, new_messages: insertedNew, page_id: source.external_id });
     console.log('[PageApi] 🔄 Page ' + source.external_id + ': +' + insertedNew + ' tin mới về CRM');
@@ -787,22 +849,29 @@ function startPageConversationWatcher(io, database = getDb(), intervalMs = 10000
   if (pageWatcherTimer) return;
   pageWatcherTimer = setInterval(async () => {
     if (pageWatcherBusy) {
-      console.warn('[PageApi] Chu kỳ watcher trước chưa xong sau 60s — mở khóa cưỡng bức.');
+      const stuckMs = Date.now() - pageWatcherCycleStartedAt;
+      if (stuckMs < 60000) return; // chu kỳ trước còn chạy — bỏ tick, KHÔNG chạy song song
+      console.warn('[PageApi] Chu kỳ watcher kẹt ' + stuckMs + 'ms — mở khóa cưỡng bức.');
       pageWatcherBusy = false;
     }
     pageWatcherBusy = true;
+    pageWatcherCycleStartedAt = Date.now();
     try {
       const sources = database.prepare(`
-        SELECT id, external_id, display_name FROM inbox_sources
+        SELECT id, external_id, display_name, owner_account_id FROM inbox_sources
         WHERE source_type = 'page_messenger' AND status = 'ACTIVE' AND access_token_encrypted IS NOT NULL
       `).all();
       for (const s of sources) {
         try {
           await watchPageConversations(s, io, database);
-        } catch (_) { /* page lỗi — chu kỳ sau chạy tiếp */ }
+        } catch (err) {
+          watcherLog('CHU KỲ LỖI page ' + s.external_id + ': ' + String(err && (err.stack || err.message || err)).slice(0, 400));
+        }
         await new Promise((r2) => setTimeout(r2, 800));
       }
-    } catch (_) {}
+    } catch (err) {
+      watcherLog('CHU KỲ LỖI chung: ' + String(err && (err.stack || err.message || err)).slice(0, 400));
+    }
     finally {
       pageWatcherBusy = false;
     }
