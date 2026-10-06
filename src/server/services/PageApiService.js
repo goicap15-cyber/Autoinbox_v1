@@ -299,21 +299,26 @@ function removeAccountPages(accountId, database = getDb()) {
 // Quy tắc: page CHỈ tồn tại khi được app tạo ra (có Page Access Token).
 // Page chưa có token (quét/Dồng bộ để lộ lại, app đã gỡ...) → xóa luôn kèm
 // hội thoại. Chạy lúc server khởi động + sau khi gỡ app.
+// NGOẠI LỆ: page ĐANG CÓ HỘI THOẠI (khách đã nhắn thật — webhook tự hồi phục
+// tạo ra) thì GIỮ, xóa là mất lịch sử khách (báo lỗi 2026-10-06).
 function removeUntokenedPages(database = getDb()) {
-  const srcs = database.prepare(
-    "SELECT id FROM inbox_sources WHERE source_type = 'page_messenger' AND access_token_encrypted IS NULL"
-  ).all();
+  const srcs = database.prepare(`
+    SELECT s.id FROM inbox_sources s
+    WHERE s.source_type = 'page_messenger' AND s.access_token_encrypted IS NULL
+      AND NOT EXISTS (SELECT 1 FROM threads t WHERE t.source_id = s.id)
+  `).all();
   let threads = 0;
   database.transaction(() => {
     for (const s of srcs) {
       threads += database.prepare('DELETE FROM threads WHERE source_id = ?').run(s.id).changes;
     }
-    database.prepare(
-      "DELETE FROM inbox_sources WHERE source_type = 'page_messenger' AND access_token_encrypted IS NULL"
-    ).run();
+    database.prepare(`
+      DELETE FROM inbox_sources WHERE source_type = 'page_messenger' AND access_token_encrypted IS NULL
+        AND NOT EXISTS (SELECT 1 FROM threads t WHERE t.source_id = inbox_sources.id)
+    `).run();
   })();
   if (srcs.length) {
-    console.log(`[PageApi] 🧹 Dọn ${srcs.length} page chưa có token (+ ${threads} hội thoại) — page chỉ tồn tại khi được app tạo ra.`);
+    console.log(`[PageApi] 🧹 Dọn ${srcs.length} page trống chưa có token (+ ${threads} hội thoại) — page đang có khách chat thì giữ lại.`);
   }
   return { sources: srcs.length, threads };
 }
@@ -492,7 +497,25 @@ function handleWebhookBody(body, io, database = getDb()) {
 
   for (const entry of (body.entry || [])) {
     const pageId = String(entry.id || '');
-    const source = InboxSourceService.getSourceByExternalId('page_messenger', pageId, database);
+    let source = InboxSourceService.getSourceByExternalId('page_messenger', pageId, database);
+    if (!source) {
+      // TỰ HỒI PHỤC: khách nhắn page chưa có trong CRM (mới, hoặc bị dọn khi
+      // gỡ app) — tự tạo source + gắn owner về account ACTIVE duy nhất (nếu
+      // rõ ràng) để tin KHÔNG BAO GIỜ bị bỏ qua (báo lỗi 2026-10-06: user mới
+      // nhắn lên page không thấy đồng bộ).
+      console.warn(`[PageApi] 🩹 Webhook cho page chưa có source (${pageId}) — tự tạo và tiếp nhận tin.`);
+      InboxSourceService.ensurePageSource({ pageId, pageName: 'Page ' + pageId }, database);
+      source = InboxSourceService.getSourceByExternalId('page_messenger', pageId, database);
+    }
+    if (source && !source.owner_account_id) {
+      const activeAccounts = database.prepare("SELECT id FROM accounts WHERE status = 'ACTIVE' OR status IS NULL").all();
+      if (activeAccounts.length === 1) {
+        database.prepare('UPDATE inbox_sources SET owner_account_id = ? WHERE id = ? AND owner_account_id IS NULL')
+          .run(String(activeAccounts[0].id), source.id);
+        source = InboxSourceService.getSourceByExternalId('page_messenger', pageId, database);
+        console.log(`[PageApi] 🔗 Tự gắn owner ${activeAccounts[0].id} cho page ${pageId}`);
+      }
+    }
     if (!source) {
       console.warn(`[PageApi] Nhận webhook cho page chưa kết nối: ${pageId} — bỏ qua.`);
       result.errors++;
