@@ -7305,6 +7305,10 @@ function startServer() {
 
   // Bật poller đọc sự kiện webhook từ cầu nối hosting (webhook.php) cho Page API
   pageApiService.startBridgePolling(io, db, 5000);
+  // Tự động đồng bộ hội thoại page 10s/lần — khách nhắn là tin tự về CRM
+  pageApiService.startPageConversationWatcher(io, db, 10000);
+  // Quy tắc: page chỉ tồn tại khi có token (do app tạo ra) — dọn page mồ côi
+  pageApiService.removeUntokenedPages(db);
 
     // Dọn dẹp các tên rác hệ thống (ví dụ: "Tất cả tin nhắn", "Hộp thư đến", "Tin nhắn") đã lưu vào CSDL trước đây
   try {
