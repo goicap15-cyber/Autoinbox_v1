@@ -381,6 +381,7 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
     }
 
     let convCount = 0;
+    let insertedNew = 0;
     for (const conv of (convData.data || [])) {
       try {
         const participant = (conv.participants?.data || []).find((p) => String(p.id) !== pageId);
@@ -410,7 +411,8 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
         if (msgData.error) continue;
 
         for (const msg of (msgData.data || []).reverse()) {
-          insertGraphMessage(thread.id, source, msg, database);
+          const inserted = insertGraphMessage(thread.id, source, msg, database);
+          if (inserted != null) insertedNew++;
         }
         const lastMsg = (msgData.data || [])[0];
         if (lastMsg) {
@@ -422,8 +424,9 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
       }
     }
     console.log(`[PageApi] ✅ Backfill page=${pageId}: ${convCount} hội thoại`);
-    if (io) io.emit('THREAD_LIST_UPDATED', { account_id: accountId });
-    return { ok: true, count: convCount };
+    // Chỉ bắn event khi CÓ tin mới — tránh đẩy list refresh vô nghĩa mỗi chu kỳ
+    if (io && insertedNew > 0) io.emit('THREAD_LIST_UPDATED', { account_id: accountId, new_messages: insertedNew });
+    return { ok: true, count: convCount, newMessages: insertedNew };
   } catch (err) {
     console.warn(`[PageApi] Backfill thất bại page=${pageId}:`, err.message);
     return { ok: false, reason: err.message };
@@ -650,7 +653,6 @@ function processMessagingEvent(event, source, io, database) {
 // ── Poller cầu nối hosting (webhook.php) ──
 let pollTimer = null;
 let polling = false;
-
 function startBridgePolling(io, database = getDb(), intervalMs = 5000) {
   if (pollTimer) return;
   pollTimer = setInterval(async () => {
@@ -685,6 +687,45 @@ function stopBridgePolling() {
   pollTimer = null;
 }
 
+// ── Tự động đồng bộ hội thoại (không cần bấm "Lấy hội thoại") ──
+// Mỗi chu kỳ: quét lần lượt các page CÓ TOKEN, kéo hội thoại/tin mới về bằng
+// Graph API (chống trùng theo mid). Đây là đường đảm bảo tin KHÁCH LUÔN tự
+// hiện lên CRM, độc lập với việc webhook app có đăng ký đủ hay không.
+let autoBackfillTimer = null;
+let autoBackfillRunning = false;
+
+function startAutoBackfill(io, database = getDb(), intervalMs = 90000) {
+  if (autoBackfillTimer) return;
+  autoBackfillTimer = setInterval(async () => {
+    if (autoBackfillRunning) return;
+    autoBackfillRunning = true;
+    try {
+      const sources = database.prepare(`
+        SELECT id, external_id, display_name FROM inbox_sources
+        WHERE source_type = 'page_messenger' AND status = 'ACTIVE' AND access_token_encrypted IS NOT NULL
+      `).all();
+      for (const s of sources) {
+        try {
+          const r = await backfillConversations(s.id, io, { convLimit: 15 }, database);
+          if (r?.ok && r.newMessages > 0) {
+            console.log(`[PageApi] 🔄 Tự đồng bộ page ${s.external_id}: +${r.newMessages} tin mới`);
+          }
+        } catch (_) { /* page lỗi — chu kỳ sau chạy tiếp */ }
+        await new Promise((r2) => setTimeout(r2, 2000)); // nghỉ giữa các page, tránh dồn Graph
+      }
+    } catch (_) {}
+    finally {
+      autoBackfillRunning = false;
+    }
+  }, intervalMs);
+  console.log(`[PageApi] 🔁 Tự động đồng bộ hội thoại page mỗi ${intervalMs / 1000}s — không cần bấm "Lấy hội thoại".`);
+}
+
+function stopAutoBackfill() {
+  if (autoBackfillTimer) clearInterval(autoBackfillTimer);
+  autoBackfillTimer = null;
+}
+
 module.exports = {
   ensureSchema,
   getOrCreateVerifyToken,
@@ -709,6 +750,8 @@ module.exports = {
   backfillConversations,
   handleWebhookBody,
   startBridgePolling,
+  startAutoBackfill,
+  stopAutoBackfill,
   stopBridgePolling,
   GRAPH_VERSION,
 };

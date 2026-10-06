@@ -607,6 +607,18 @@ export default function App() {
   const loadThreadsRef = useRef(loadThreads);
   useEffect(() => { loadThreadsRef.current = loadThreads; }, [loadThreads]);
 
+  // Page API tự đồng bộ (auto-backfill): server bắn THREAD_LIST_UPDATED khi có
+  // tin mới được kéo về — refresh danh sách hội thoại, chat đang mở tự cập nhật
+  // qua vòng reconcile 1s. Throttle 1.5s tránh dồn khi nhiều page cùng về.
+  const threadListRefreshTimerRef = useRef(null);
+  const refreshThreadListThrottled = useCallback(() => {
+    if (threadListRefreshTimerRef.current) return;
+    threadListRefreshTimerRef.current = setTimeout(() => {
+      threadListRefreshTimerRef.current = null;
+      loadThreadsRef.current();
+    }, 1500);
+  }, []);
+
   // Ghim / bỏ ghim hội thoại: cập nhật LOCAL ngay, server là nguồn chân lý.
   const handleToggleThreadPinned = useCallback(async (thread, nextPinned) => {
     const threadId = String(thread?.id || '');
@@ -867,6 +879,14 @@ export default function App() {
 
   useEffect(() => {
     if (!socket) return;
+    socket.on('THREAD_LIST_UPDATED', (data) => {
+      // Page API auto-backfill: có tin mới được kéo về → refresh danh sách
+      if (data?.account_id && accountsRef.current.length > 0) {
+        const matches = accountsRef.current.some((account) => String(account.id) === String(data.account_id));
+        if (!matches) return;
+      }
+      refreshThreadListThrottled();
+    });
     socket.on('NEW_MESSAGE', (newMsg) => {
       const t_ui = Date.now();
       if (newMsg?.telemetry?.t_dom) {
@@ -1565,6 +1585,7 @@ export default function App() {
 
     return () => {
       socket.off('NEW_MESSAGE');
+      socket.off('THREAD_LIST_UPDATED');
       socket.off('MESSAGE_SENT');
       socket.off('THREAD_INBOX_FOLDER_CHANGED');
       socket.off('MESSAGE_REQUEST_REMOVED');
