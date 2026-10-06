@@ -2215,13 +2215,33 @@ async function runPageSetup(job, uid) {
     DEPS.appUpdate(job.uid, job.appId, { pages: allPages });
   }
 
+  // Đăng ký webhook qua Graph ngay với token vừa lấy — nếu bước DOM
+  // (subscribeAppToPageObject) fail âm thầm thì bước này cứu, và kết quả
+  // được BÁO RÕ cho user thay vì im lặng (báo lỗi 2026-10-06).
+  const subResults = [];
+  for (const r of results) {
+    if (!r.token) continue;
+    setStatus(job, 'subscribing', `Đang đăng ký webhook cho trang ${r.pageId} (Graph)…`);
+    const sub = await graphSubscribePage(r.pageId, r.token);
+    subResults.push({ pageId: r.pageId, ...sub });
+    try { DEPS.log(`[subscribe] Graph ${r.pageId}: ${sub.ok ? 'OK' : 'FAIL - ' + sub.reason}`); } catch (_) {}
+  }
+
   const okCount = results.filter((r) => r.token).length;
   const summary = results.map((r) => {
     const p = allPages.find((x) => x.pageId === r.pageId);
     const nm = p ? p.name : r.pageId;
     return `${nm}${r.token ? ' ✓' : ' (không lấy được token)'}`;
   }).join(', ');
-  const successMsg = `Đã cấu hình ${targets.length} trang — lấy được token cho ${okCount}/${targets.length}: ${summary}.`;
+  let successMsg = `Đã cấu hình ${targets.length} trang — lấy được token cho ${okCount}/${targets.length}: ${summary}.`;
+  const subFail = subResults.filter((s) => !s.ok);
+  if (subFail.length) {
+    successMsg += ` ⚠️ KHÔNG đăng ký được webhook qua Graph cho: ${subFail.map((s) => `${s.pageId} (${s.reason})`).join('; ')}. `
+      + 'Token thiếu quyền pages_manage_metadata — Meta sẽ không đẩy tin khách realtime. '
+      + 'Tin vẫn về qua watcher 10s; nếu cần realtime, chạy lại và đảm bảo tick quyền pages_manage_metadata khi dialog token hiện ra.';
+  } else if (subResults.length) {
+    successMsg += ' Webhook Graph đã đăng ký cho tất cả page có token ✓';
+  }
   setStatus(job, 'success', successMsg);
   DEPS.recordRun('success', successMsg);
   closeBrowser(job);
@@ -2372,6 +2392,68 @@ async function subscribePageFields(job, page, pageId) {
 // Bấm "Tạo" → tick "Tôi hiểu" → bấm "Sao chép" → chụp token (hook clipboard + DOM)
 const TOKEN_LIKE = /^[A-Za-z0-9_-]{40,}$/;
 
+// Dialog "Generate Access Token" mới của FB liệt kê quyền bằng checkbox React
+// (div[role=checkbox]). KHÔNG tick pages_manage_metadata thì token sinh ra thiếu
+// quyền đó → POST /{pageId}/subscribed_apps chết (#200) → Meta không đẩy tin
+// khách về webhook (báo lỗi 2026-10-06: page có token mà khách nhắn không về CRM).
+// Tick bằng chuột thật theo tọa độ — React dialog bỏ qua dispatchEvent.
+const TOKEN_REQUIRED_PERMISSIONS = ['pages_manage_metadata'];
+async function tickTokenPermissions(page) {
+  const layout = await page
+    .evaluate((permissions) => {
+      const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+      const dlg = [...document.querySelectorAll('[role="dialog"]')].find(vis);
+      const scope = dlg || document;
+      const boxes = [...scope.querySelectorAll('[role="checkbox"], input[type="checkbox"]')].filter(vis);
+      const rowTextOf = (b) => {
+        const lab = b.closest('label');
+        if (lab && (lab.innerText || '').trim()) return (lab.innerText || '').trim();
+        for (const up of [b.parentElement, b.parentElement?.parentElement, b.parentElement?.parentElement?.parentElement]) {
+          if (!up) continue;
+          const t = (up.innerText || '').trim().split('\n')[0].trim();
+          if (t) return t;
+        }
+        return '';
+      };
+      const isOn = (b) => (b.tagName === 'INPUT') ? b.checked : b.getAttribute('aria-checked') === 'true';
+      const targets = [];
+      for (const f of permissions) {
+        const b = boxes.find((x) => /pages_manage_metadata/i.test(rowTextOf(x)));
+        if (b) {
+          const r = b.getBoundingClientRect();
+          targets.push({ field: f, x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), on: isOn(b) });
+        }
+      }
+      return targets;
+    }, TOKEN_REQUIRED_PERMISSIONS.slice())
+    .catch(() => []);
+  for (const t of layout.filter((x) => !x.on)) {
+    await page.mouse.click(t.x, t.y).catch(() => {});
+    await sleep(400);
+  }
+  return layout;
+}
+
+// Đăng ký page vào app qua Graph (cùng việc subscribePage của PageApiService
+// làm) — bảo hiểm cho bước DOM subscribeAppToPageObject có thể fail âm thầm.
+async function graphSubscribePage(pageId, token) {
+  try {
+    const res = await fetch(`https://graph.facebook.com/v21.0/${pageId}/subscribed_apps`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subscribed_fields: 'messages,messaging_postbacks,message_reads,message_deliveries,message_reactions',
+        access_token: token,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data.error) return { ok: false, reason: (data.error.error_data?.message || data.error.message || 'Graph lỗi không rõ') };
+    return { ok: true, reason: '' };
+  } catch (e) {
+    return { ok: false, reason: (e && e.message) || 'fetch lỗi' };
+  }
+}
+
 async function generatePageToken(job, page, pageId) {
   const clicked = await page
     .evaluate((pageId) => {
@@ -2394,6 +2476,25 @@ async function generatePageToken(job, page, pageId) {
     .catch(() => false);
   if (!clicked) return null;
   await sleep(2500);
+
+  // Tick quyền pages_manage_metadata rồi bấm "Generate Token" trong dialog
+  // (nếu có) — trước khi chụp token. Thiếu quyền này thì đăng ký webhook
+  // qua Graph chết và Meta không đẩy tin khách về CRM.
+  await tickTokenPermissions(page);
+  const genBtn = await page
+    .evaluate(() => {
+      const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+      const btn = [...document.querySelectorAll('[role="button"], button')].filter(vis)
+        .find((b) => /^(?:generate token|generate access token|tạo mã truy cập|tạo mã)$/i.test((b.innerText || '').trim()));
+      if (!btn) return null;
+      const r = btn.getBoundingClientRect();
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    })
+    .catch(() => null);
+  if (genBtn) {
+    await page.mouse.click(genBtn.x, genBtn.y).catch(() => {});
+    await sleep(2500);
+  }
 
   // Cài bẫy: clipboard API + sự kiện copy — bắt MỌI text được copy (trim sẵn)
   await page
