@@ -180,9 +180,11 @@ function savePages(accountId, pages, database = getDb()) {
       database.prepare('UPDATE inbox_sources SET owner_account_id = ? WHERE id = ?').run(String(accountId), existing.id);
     }
     if (p.token && /^EA[A-Za-z0-9_-]{20,}/.test(p.token)) {
-      database.prepare("UPDATE inbox_sources SET access_token_encrypted = ?, status = 'ACTIVE' WHERE id = ?")
-        .run(encryptToken(p.token), existing.id);
-      console.log(`[PageApi] 🔐 Đã lưu Page Access Token cho page ${p.pageId}`);
+      // Gắn luôn owner theo account chạy Lấy token — không để page có token mà mồ côi
+      // (owner NULL làm watcher/webhook không biế tin về account nào — lỗi 2026-10-06)
+      database.prepare("UPDATE inbox_sources SET access_token_encrypted = ?, status = 'ACTIVE', owner_account_id = COALESCE(owner_account_id, ?) WHERE id = ?")
+        .run(encryptToken(p.token), accountId || null, existing.id);
+      console.log(`[PageApi] 🔐 Đã lưu Page Access Token cho page ${p.pageId} (owner: ${accountId || existing.owner_account_id})`);
     }
     if (p.name && !/^Trang \d+$/.test(p.name)) {
       database.prepare('UPDATE inbox_sources SET display_name = ? WHERE id = ? AND display_name LIKE ?', database)
