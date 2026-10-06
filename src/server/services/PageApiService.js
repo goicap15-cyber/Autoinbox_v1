@@ -741,13 +741,15 @@ async function watchPageConversations(source, io, database) {
     if (!psid) continue;
     const updated = new Date(conv.updated_time).getTime();
     if (state.get(conv.id) === updated) continue; // không đổi — bỏ qua
-    state.set(conv.id, updated);
+    // LƯU Ý: chỉ đánh dấu updated SAU khi kéo tin thành công — kéo lỗi thì
+    // chu kỳ sau thử lại, tin không bao giờ bị bỏ sót (lỗi mất Đikkjđi 2026-10-06)
     const msgData = await graphGet(conv.id + '/messages', {
       fields: 'id,message,from,created_time,attachments{mime_type,image_url,video_url,audio_url,file_url}',
       limit: '25',
       access_token: token,
     }, database);
     if (msgData.error) continue;
+    state.set(conv.id, updated);
     const thread = ensurePageThread(source, psid, participant?.name || null, database);
     if (!thread) continue;
     for (const msg of (msgData.data || []).reverse()) {
