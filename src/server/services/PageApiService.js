@@ -200,7 +200,9 @@ async function graphGet(path, params, database = getDb()) {
     if (k !== 'access_token') url.searchParams.set(k, v);
   }
   url.searchParams.set('access_token', params.access_token);
-  const res = await fetch(url, { method: 'GET' });
+  // TIMEOUT BẮT BUỘC: fetch treo (mạng chợp) không có timeout làm watcher
+  // kẹt busy vĩnh viễn — mọi chu kỳ sau bị bỏ (lỗi 2026-10-06)
+  const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(10000) });
   const data = await res.json().catch(() => ({}));
   return data;
 }
@@ -222,6 +224,7 @@ async function sendPageMessage(sourceId, recipientPsid, text, database = getDb()
   };
   const res = await fetch(`${GRAPH_BASE}/${source.external_id}/messages`, {
     method: 'POST',
+    signal: AbortSignal.timeout(20000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
@@ -770,7 +773,10 @@ async function watchPageConversations(source, io, database) {
 function startPageConversationWatcher(io, database = getDb(), intervalMs = 10000) {
   if (pageWatcherTimer) return;
   pageWatcherTimer = setInterval(async () => {
-    if (pageWatcherBusy) return;
+    if (pageWatcherBusy) {
+      console.warn('[PageApi] Chu kỳ watcher trước chưa xong sau 60s — mở khóa cưỡng bức.');
+      pageWatcherBusy = false;
+    }
     pageWatcherBusy = true;
     try {
       const sources = database.prepare(`
