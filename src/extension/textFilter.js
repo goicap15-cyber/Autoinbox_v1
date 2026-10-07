@@ -45,6 +45,10 @@ function isBareVietnamMobileText(text) {
     /^Restore now$/i,
     /^Restore messages$/i,
     /^Personal chats are secured with end-to-end encryption/i,
+    // Bubble nhãn trợ năng trần (không có payload sau colon) - DOM thỉnh
+    // thoảng nhả nguyên nhãn "Enter, Message sent 15:15 by Khang" thành một
+    // row riêng, tin thật luôn đến bằng row của chính nó (reproduce 15:15).
+    /^Enter,\s*Message sent \d{1,2}:\d{2}\s+by\s+.+$/i,
     /^Thiếu lịch sử chat/i,
     /^Thiếu tin nhắn\.?$/i,
     /^Không khôi phục được tin nhắn\.?$/i,
@@ -198,12 +202,11 @@ function isBareVietnamMobileText(text) {
     // 1. Strip accessibility prefix (handling 'Tin nhắn do X gửi lúc Thứ Năm 18:00ch:', 'Tin nhắn do X gửi lúc 18:00:', etc.)
     text = text.replace(/^(?:Nhập,\s*)?Tin nhắn do [^\n]+? gửi lúc [^\n]*:\s*/i, '').trim();
     text = text.replace(/^(?:Nhập,\s*)?Message sent by [^\n]+? at [^\n]*:\s*/i, '').trim();
-    // Nhãn trợ năng dạng "Enter, Message sent 13:58 by Khang: 👍" - bubble like
-    // icon-only của Messenger E2EE để nguyên nhãn này trong DOM text, nếu
-    // không strip thì like lưu thành câu văn (reproduce 2026-10-07). Dùng
-    // .*: greedy tới colon CUỐI trước emoji (colon trong "13:58" không bị
-    // cắt nhầm); neo "Enter," để không đụng tin thật.
-    text = text.replace(/^Enter,\s*Message sent\b.*:\s*([\p{Extended_Pictographic}][\uFE0F\u200D]*)\s*$/iu, '$1').trim();
+    // Nhãn trợ năng dạng "Enter, Message sent 13:58 by Khang: <payload>" -
+    // bubble icon-only/text của Messenger E2EE để nguyên nhãn này trong DOM
+    // text; strip prefix giữ lại payload (emoji HOẶC text - bản cũ chỉ giữ
+    // emoji làm tin text của operator thành bubble nhãn trần).
+    text = text.replace(/^Enter,\s*Message sent\b.*:\s*/iu, '').trim();
     text = text.replace(/^Nhập,\s*/i, '').trim();
     text = text.replace(/^[:\s]+/, '').trim();
 

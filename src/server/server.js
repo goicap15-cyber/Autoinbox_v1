@@ -2154,6 +2154,21 @@ wss.on('connection', (ws, req) => {
           m.external_thread_id = m.external_thread_id || threadId;
           m.thread_id = canonicalThreadId || threadId;
 
+          // Mid rút gọn: DOM observer thỉnh thoảng chỉ lấy được PHẦN SỐ của
+          // mid (7513512...925) thay vì dạng đầy đủ 100066...@msgr.7513...925.
+          // Không ghép lại thì CÙNG một tin bị lưu 2 row với 2 "mid" khác
+          // nhau: pending_client + echo, 1 bản còn bị lưu nhầm chiều incoming
+          // (reproduce 2026-10-07 15:14-15:16). Map về mid đầy đủ đã có.
+          if (canonicalThreadId && m.fb_message_id && /^[0-9]{10,25}$/.test(String(m.fb_message_id))) {
+            const prefixedTwin = db.prepare(
+              "SELECT fb_message_id FROM messages WHERE thread_id = ? AND fb_message_id LIKE '%.' || ? LIMIT 1"
+            ).get(String(canonicalThreadId), String(m.fb_message_id));
+            if (prefixedTwin?.fb_message_id) {
+              console.log(`[WS] 🔗 Ghép mid rút gọn ${m.fb_message_id} về dạng đầy đủ đã có trong thread ${canonicalThreadId}`);
+              m.fb_message_id = prefixedTwin.fb_message_id;
+            }
+          }
+
           if (isCallLog && m.content && m.fb_message_id) {
             const callThreadId = canonicalThreadId || m.thread_id;
             const threadAccRow = db.prepare('SELECT account_id FROM threads WHERE id = ?').get(callThreadId);
@@ -2498,6 +2513,36 @@ wss.on('connection', (ws, req) => {
 
           const isOutgoing = finalIsOutgoing;
           const isConfirmedIncoming = directionStatus === 'confirmed' && !isOutgoing;
+
+          // Echo của tin CRM gửi qua composer thỉnh thoảng quay về SAI CHIỀU
+          // (incoming) với mid dạng trần hoặc nội dung là nhãn trợ năng
+          // ("Enter, Message sent 15:15 by Khang: ảo vậy"). Nếu khớp một row
+          // pending CHƯA được promote trong 2 phút (FIFO) thì gắn mid vào row
+          // gốc - đúng vị trí gửi, đúng chiều - thay vì tạo bubble thứ hai
+          // sai chiều/sai vị trí (reproduce 2026-10-07 15:14-15:15).
+          if ((isDomObserverRow || isNetworkObserverRow) && isConfirmedIncoming
+            && m.fb_message_id && !String(m.fb_message_id).startsWith('pending_')) {
+            let echoContent = String(m.content || '').trim();
+            const echoLabelMatch = echoContent.match(/^Enter,\s*Message sent \d{1,2}:\d{2}\s+by\s+[^:]*:\s*(.*)$/i);
+            if (echoLabelMatch) echoContent = echoLabelMatch[1].trim();
+            if (echoContent) {
+              const pendingRow = db.prepare(`
+                SELECT id FROM messages
+                WHERE thread_id = ? AND is_outgoing = 1
+                  AND fb_message_id LIKE 'pending_client_%'
+                  AND created_at >= datetime('now', '-2 minutes')
+                  AND COALESCE(content, '') = ?
+                ORDER BY id ASC LIMIT 1
+              `).get(String(canonicalThreadId), echoContent);
+              if (pendingRow) {
+                db.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?')
+                  .run(String(m.fb_message_id), pendingRow.id);
+                console.log(`[WS] 🔗 Ghép echo ${m.fb_message_id} vào row pending #${pendingRow.id} (đúng vị trí gửi) - thread ${canonicalThreadId}`);
+                io.emit('MESSAGE_UPDATED', { thread_id: String(canonicalThreadId), id: String(pendingRow.id) }).catch?.(() => {});
+                break;
+              }
+            }
+          }
 
           // A network/DOM observation with a conflicting incoming direction is
           // not authoritative for an operator send. The stored CRM outbound

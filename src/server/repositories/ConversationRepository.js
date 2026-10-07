@@ -492,6 +492,26 @@ class ConversationRepository {
           continue;
         }
         const observedCreatedAt = msg.created_at || (observedTimestampMs > 0 ? new Date(observedTimestampMs).toISOString() : new Date().toISOString());
+        // Mid rút gọn hai chiều: DOM thỉnh thoảng chỉ trả PHẦN SỐ của mid
+        // (7513...925) thay vì dạng đầy đủ 100066...@msgr.7513...925 -> CÙNG
+        // một tin bị lưu 2 row như 2 mid khác nhau (reproduce 2026-10-07
+        // 15:14-15:16: like/'ảo vậy' của operator nhân đôi, 1 bản sai chiều).
+        if (/^[0-9]{10,25}$/.test(stableId)) {
+          const prefixedTwin = database.prepare(
+            "SELECT fb_message_id FROM messages WHERE thread_id = ? AND fb_message_id LIKE '%.' || ? LIMIT 1"
+          ).get(threadId, stableId);
+          if (prefixedTwin?.fb_message_id) stableId = prefixedTwin.fb_message_id;
+        } else {
+          const digitsSuffix = String(stableId).match(/\.([0-9]{10,25})$/);
+          if (digitsSuffix) {
+            const bareTwin = database.prepare(
+              'SELECT id FROM messages WHERE thread_id = ? AND fb_message_id = ? LIMIT 1'
+            ).get(threadId, digitsSuffix[1]);
+            if (bareTwin) {
+              database.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?').run(stableId, bareTwin.id);
+            }
+          }
+        }
         let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
         let promotedSidebarPreview = false;
         // If the incoming message has an official fb_message_id but the DB only
