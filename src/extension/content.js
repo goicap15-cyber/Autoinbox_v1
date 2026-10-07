@@ -1419,6 +1419,19 @@
     } catch (_) { return null; }
   }
   function extractCustomerProfileUrlFromDom() {
+    // 0) Nút "Profile" trên right-rail Messenger (điểm DOM thật, khách hàng
+    //    gửi về 2026-10-07): <a aria-label="Profile" href="/<uid>/">. Label
+    //    đổi theo ngôn ngữ UI (Profile / Trang cá nhân) nên so không dấu hoa
+    //    thường; uid 6-18 số -> chuẩn hoá thành profile.php?id=<uid>.
+    for (const a of document.querySelectorAll('a[aria-label][href]')) {
+      const label = String(a.getAttribute('aria-label') || '').trim().toLowerCase();
+      if (label !== 'profile' && label !== 'trang cá nhân') continue;
+      const href = a.getAttribute('href') || '';
+      const uidMatch = href.match(/\/(\d{6,18})\/?$/);
+      if (uidMatch) return `https://www.facebook.com/profile.php?id=${uidMatch[1]}`;
+      const vanityUrl = isSafeVanityProfileHref(href);
+      if (vanityUrl) return vanityUrl;
+    }
     const rail = document.querySelector('div[role="complementary"]');
     const mainHeader = document.querySelector('div[role="main"] header');
     const main = document.querySelector('div[role="main"]');
