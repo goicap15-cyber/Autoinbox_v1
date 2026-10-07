@@ -851,13 +851,17 @@
   // removed Ã¢â‚¬â€œ the floating reaction button shares the same aria-label as a
   // real Like message, causing ghost Ã°Å¸â€˜Â entries in CRM every time a message
   // is sent. We no longer report quick-likes from the left side at all.
-  function extractBubbleEmoji(container) {
-    if (!container?.querySelectorAll) return '';
+  function extractAllBubbleEmojis(container) {
+    if (!container?.querySelectorAll) return [];
+    const found = [];
+    const visited = new Set();
     const candidates = container.querySelectorAll('img[alt], [aria-label], [title], svg title');
     for (const element of candidates) {
+      if (visited.has(element)) continue;
+      visited.add(element);
       const exactReceivedLikeTitle = element.tagName === 'TITLE'
         && /^(?:k\u00fd hi\u1ec7u gi\u01a1 ng\u00f3n tay c\u00e1i|thumbs up symbol)$/i.test(String(element.textContent || '').trim());
-      if (exactReceivedLikeTitle) return '\u{1F44D}';
+      if (exactReceivedLikeTitle) { found.push('\u{1F44D}'); continue; }
       // Controls for Like/reaction are UI, not message content.
       if (element.matches?.('[role="button"], button') || element.closest?.('[role="button"], button')) continue;
       // Messenger's Like glyph is currently an SVG whose human label lives in
@@ -868,18 +872,25 @@
       ).trim();
       if (!value) continue;
       // Only match when the attribute value IS itself an emoji character
-      // (e.g. alt="Ã°Å¸â€˜Â", alt="Ã¢ÂÂ¤Ã¯Â¸Â"). Word-based labels like "Thích"/"Like"/
+      // (e.g. alt="👍", alt="❤️"). Word-based labels like "Thích"/"Like"/
       // "thumbs up" are deliberately excluded to prevent the hover Like
       // button from being mistaken for a real customer message.
-      if (value.length <= 16 && /^\p{Extended_Pictographic}[\p{Extended_Pictographic}\uFE0F\u20D0-\u20FF]*$/u.test(value)) return value;
+      if (value.length <= 16 && /^\p{Extended_Pictographic}[\p{Extended_Pictographic}\uFE0F\u20D0-\u20FF]*$/u.test(value)) { found.push(value); continue; }
       // Match the exact SVG <title> used by Messenger's received Like.
       // The hover control remains excluded above because it is a button.
-      if (/(?:giơ ngón tay cái|thumbs?\s*up|\blike\b|thích|Ã°Å¸â€˜Â)/i.test(value)
-        && (element.matches?.('img, svg, title, [role="img"]') || element.closest?.('svg'))) return '\u{1F44D}';    }
+      if (/(?:giơ ngón tay cái|thumbs?\s*up|\blike\b|thích|Ã°Å¸â€˜)/i.test(value)
+        && (element.matches?.('img, svg, title, [role="img"]') || element.closest?.('svg'))) { found.push('\u{1F44D}'); }
+    }
     // Fallback: textContent of container itself is a single pictographic character
-    const directText = (container.textContent || '').trim();
-    if (directText.length <= 4 && /^\p{Extended_Pictographic}+$/u.test(directText)) return directText;
-    return '';
+    if (!found.length) {
+      const directText = (container.textContent || '').trim();
+      if (directText.length <= 4 && /^\p{Extended_Pictographic}+$/u.test(directText)) found.push(directText);
+    }
+    return found;
+  }
+
+  function extractBubbleEmoji(container) {
+    return extractAllBubbleEmojis(container)[0] || '';
   }
 
 
@@ -948,7 +959,8 @@
       }
     }
     const messageRow = directRowMatch || node;
-    let rowEmojiContent = extractBubbleEmoji(messageRow);
+    const rowEmojiList = extractAllBubbleEmojis(messageRow);
+    let rowEmojiContent = rowEmojiList[0] || '';
 
     // Ã¢â€â‚¬Ã¢â€€ STALE DOM GUARD (Self-Tagging Marker) Ã¢â€â‚¬Ã¢â€€
     if (messageRow && messageRow.dataset) {
@@ -1261,18 +1273,26 @@
     // In that exact shape the minute (e.g. 55) must become the Like glyph.
     if (!rowEmojiContent && hasOnlyClockFragments && messageRow.querySelector?.('svg')) rowEmojiContent = '👍';
     if (rowEmojiContent && (finalBubbles.length === 0 || hasOnlyClockFragments) && !isPhotoMessage && !isVideoMessage) {
-      return [{
+      // Messenger gộp NHIỀU like/sticker giống nhau gửi liên tiếp vào MỘT
+      // article - phải phát MỘT message cho TỪNG emoji, nếu không nửa số
+      // like biến mất ngay ở khâu parse (reproduce 2026-10-07 14:33: khách
+      // gửi 8 like, CRM chỉ nhận 4 vì mỗi article chỉ xuất 1). Mỗi bubble
+      // mang bubble_idx riêng -> mid thật + hậu tố __bubble_N vẫn distinct
+      // cho UNIQUE(fb_message_id).
+      const emojiList = rowEmojiList.length ? rowEmojiList : [rowEmojiContent];
+      const rowNativeId = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null;
+      return emojiList.map((emoji, emojiIdx) => ({
         sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
-        content: rowEmojiContent,
+        content: emoji,
         is_outgoing,
-        native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
+        native_id: rowNativeId,
         effective_label: effectiveLabel,
         is_valid: true,
-        bubble_idx: 0,
+        bubble_idx: emojiIdx,
         media_type: 'text',
         media_url: null,
         dom_anchor: messageRow,
-        }];
+      }));
     }
 
     // Ã¢â€â‚¬Ã¢â€€ áº¢nh: trÃ¡ÂºÂ£ vÃ¡Â»Â Ã„â€˜ÃƒÂºng 1 kÃ¡ÂºÂ¿t quÃ¡ÂºÂ£ duy nhÃ¡ÂºÂ¥t cho cÃ¡ÂºÂ£ row Ã¢â€â‚¬Ã¢â€€
