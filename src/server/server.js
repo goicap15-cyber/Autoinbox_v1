@@ -2600,8 +2600,23 @@ wss.on('connection', (ws, req) => {
             }
           }
 
-          const tsMs = m.timestamp_ms || 0;
+          let tsMs = Number(m.timestamp_ms) || 0;
           const tsSource = m.timestamp_source || 'unknown';
+          // Giữ đúng THỨ TỰ ĐẾN cho tin realtime: timestamp parse từ nhãn phút
+          // ('14:20' -> 14:20:00) luôn lùi về đầu phút, nên tin khách đến SAU
+          // tin operator 25 giây lại mang ts SỚM HƠN và bị sort nhầm lên trước
+          // (reproduce 2026-10-07 14:20: like operator 14:20:20 bị chìm dưới
+          // các like khách đến sau). Nếu ts nhỏ hơn max ts hiện có của thread
+          // và lệch với hiện tại dưới 15 phút -> đẩy lên maxTs + 1. Không đụng
+          // replay lịch sử cũ (tin legacy > 15 phút giữ nguyên ts thật).
+          if (tsMs > 0) {
+            const newestRow = db.prepare('SELECT MAX(timestamp_ms) AS maxTs FROM messages WHERE thread_id = ?').get(canonicalThreadId);
+            const newestTs = Number(newestRow?.maxTs || 0);
+            if (newestTs > tsMs && (Date.now() - tsMs) < 15 * 60 * 1000) {
+              tsMs = newestTs + 1;
+              m.created_at = new Date(tsMs).toISOString();
+            }
+          }
           const createdAt = (m.created_at && !isNaN(Date.parse(m.created_at))) ? m.created_at : new Date().toISOString();
 
           const safeSenderId = m.sender_id || (isOutgoing ? String(targetAccountId) : 'CONTACT');
