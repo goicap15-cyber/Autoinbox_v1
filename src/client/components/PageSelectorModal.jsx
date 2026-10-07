@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   X, RefreshCw, Check, Search, Layers, AlertCircle, CheckCircle2,
-  Rocket, KeyRound, Database, Lock, Send, Trash2
+  Rocket, KeyRound, Database, Lock, Send, Trash2, Copy, ClipboardPaste
 } from 'lucide-react';
 import ConfirmModal from './ConfirmModal';
 
@@ -43,6 +43,12 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
   const [appToDelete, setAppToDelete] = useState(false);
   const [deletingApp, setDeletingApp] = useState(false);
 
+  // Token tools: copy token từng page + dán token NGOÀI để nhận diện & đồng bộ
+  const [copiedPageId, setCopiedPageId] = useState('');
+  const [importText, setImportText] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importResults, setImportResults] = useState(null);
+
   const jobRef = useRef(null);
   jobRef.current = job;
 
@@ -65,6 +71,37 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       setErrorMsg(err.message || 'Lỗi kết nối khi tải danh sách Fanpage');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCopyPageToken = async (page) => {
+    try {
+      await navigator.clipboard.writeText(String(page.token || ''));
+      setCopiedPageId(String(page.page_id));
+      setTimeout(() => setCopiedPageId((cur) => (cur === String(page.page_id) ? '' : cur)), 1600);
+    } catch (_) {}
+  };
+
+  const handleImportTokens = async () => {
+    const text = importText.trim();
+    if (!text || importing) return;
+    setImporting(true);
+    setImportResults(null);
+    try {
+      const res = await fetch('/api/page-api/import-tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tokens: text }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
+      setImportResults(data.results || []);
+      await loadPages();
+      if (onSourcesChanged) onSourcesChanged();
+    } catch (e) {
+      setImportResults([{ token: '', status: 'error', error: e.message }]);
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -695,6 +732,21 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
                   <span className="text-xs font-bold text-[var(--color-text-primary,#f8fafc)] truncate block">{p.name}</span>
                   <div className="flex items-center gap-2 mt-0.5 text-[10px] text-[var(--color-text-muted,#7f95aa)]">
                     <span className="font-mono">ID: {p.page_id}</span>
+                    {p.token && (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); handleCopyPageToken(p); }}
+                        title="Copy token của page này"
+                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-semibold border transition-colors ${
+                          copiedPageId === String(p.page_id)
+                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                            : 'bg-[var(--color-accent-subtle,rgba(14,165,233,0.1))] text-[var(--color-accent,#0ea5e9)] border-[var(--color-accent,#0ea5e9)]/25 hover:opacity-80'
+                        }`}
+                      >
+                        {copiedPageId === String(p.page_id) ? <Check size={10} strokeWidth={3} /> : <Copy size={10} />}
+                        {copiedPageId === String(p.page_id) ? 'Đã copy token' : 'Copy token'}
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -712,6 +764,57 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
                 </div>
               </div>
             ))
+          )}
+        </div>
+
+        {/* Nhập token từ ngoài — tool nhận diện page & kéo toàn bộ hội thoại */}
+        <div className="px-5 py-4 border-t border-[var(--color-border,#284057)] bg-[var(--color-bg-panel,#0f1b2b)]/40">
+          <div className="flex items-center gap-2 text-xs font-bold text-[var(--color-text-primary,#f8fafc)] mb-1">
+            <ClipboardPaste size={13} className="text-[var(--color-accent,#0ea5e9)]" />
+            Nhập token Page (tool)
+          </div>
+          <p className="text-[10px] text-[var(--color-text-muted,#7f95aa)] mb-2 leading-relaxed">
+            Dán token, mỗi dòng một token (chấp nhận cả <strong>user token</strong> — tool tự nhận diện và kéo tất cả page).
+            Page chưa có trong CRM vẫn đồng bộ được: tự nhận diện page, kéo toàn bộ hội thoại cũ và tự bắt tin mới.
+          </p>
+          <textarea
+            value={importText}
+            onChange={(e) => setImportText(e.target.value)}
+            rows={3}
+            placeholder={'EAABsbCD… (mỗi dòng một token)'}
+            className="w-full px-3 py-2 rounded-xl bg-[var(--color-bg-elevated,#172b42)] border border-[var(--color-border,#284057)] text-[11px] font-mono text-[var(--color-text-primary,#f8fafc)] placeholder-[var(--color-text-muted,#7f95aa)]/60 focus:outline-none focus:border-[var(--color-accent,#0ea5e9)]/60 resize-y"
+          />
+          <div className="flex items-center gap-3 mt-2">
+            <button
+              type="button"
+              onClick={handleImportTokens}
+              disabled={importing || !importText.trim()}
+              className="px-4 py-2 bg-[var(--color-accent,#0ea5e9)] hover:bg-[var(--color-accent-hover,#38bdf8)] disabled:opacity-40 text-white rounded-xl text-xs font-bold flex items-center gap-2 transition-all shadow-md"
+            >
+              <RefreshCw size={13} className={importing ? 'animate-spin' : ''} />
+              {importing ? 'Đang nhận diện & đồng bộ…' : 'Nhập token & đồng bộ hội thoại'}
+            </button>
+            {importResults && (
+              <button type="button" onClick={() => setImportResults(null)} className="text-[10px] text-[var(--color-text-muted,#7f95aa)] hover:text-[var(--color-text-secondary,#cbd5e1)] underline">
+                Ẩn kết quả
+              </button>
+            )}
+          </div>
+          {importResults && (
+            <div className="mt-2 space-y-1 max-h-32 overflow-y-auto">
+              {importResults.map((r, i) => (
+                <div key={i} className={`text-[11px] flex items-start gap-1.5 ${r.status === 'error' ? 'text-[var(--color-danger,#f87171)]' : 'text-emerald-400'}`}>
+                  <span>{r.status === 'error' ? '❌' : '✅'}</span>
+                  <span className="min-w-0">
+                    <span className="font-mono">{r.token || '(trống)'}</span>
+                    {r.type === 'User' && ' — user token'}
+                    {r.pageName ? ` — ${r.pageName}` : ''}
+                    {r.pages ? ` — ${r.pages.length} page: ${r.pages.join(', ')}` : ''}
+                    {r.error ? ` — ${r.error}` : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
           )}
         </div>
 

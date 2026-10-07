@@ -5812,7 +5812,7 @@ app.get('/api/page-api/accounts/:id/pages', (req, res) => {
   }
   const accountId = String(req.params.id);
   const rows = db.prepare(`
-    SELECT external_id, display_name, avatar_url, status, access_token_encrypted, created_at
+    SELECT id, external_id, display_name, avatar_url, status, access_token_encrypted, created_at
     FROM inbox_sources WHERE source_type = 'page_messenger' AND owner_account_id = ?
     ORDER BY created_at ASC
   `).all(accountId);
@@ -5822,6 +5822,7 @@ app.get('/api/page-api/accounts/:id/pages', (req, res) => {
     avatar_url: r.avatar_url || `https://graph.facebook.com/${r.external_id}/picture?type=normal`,
     category: 'Trang Facebook',
     has_token: Boolean(r.access_token_encrypted),
+    token: r.access_token_encrypted ? (InboxSourceService.getDecryptedToken(r.id) || '') : '',
     is_connected: r.status === 'ACTIVE',
     connected_at: r.created_at,
   }));
@@ -5940,6 +5941,102 @@ app.post('/api/page-api/submit-password', (req, res) => {
   const { sync_id, password } = req.body || {};
   const ok = setupAutomation.submitPassword(String(sync_id || ''), String(password || ''));
   res.json({ success: ok });
+});
+
+// ── Token tools: copy token page + dán token NGOÀI để nhận diện & đồng bộ ──
+// Toàn bộ chuỗi sync page chỉ cần row inbox_sources + token: backfill kéo
+// toàn bộ hội thoại qua Graph, watcher 6s bắt tin mới, Send API để trả lời -
+// không phụ thuộc app record/FB account trong data (page "ngoài" vẫn chạy).
+app.get('/api/page-api/page-tokens', (req, res) => {
+  const rows = db.prepare(`
+    SELECT id, external_id, display_name, avatar_url, status, access_token_encrypted
+    FROM inbox_sources
+    WHERE source_type = 'page_messenger' AND access_token_encrypted IS NOT NULL
+    ORDER BY display_name COLLATE NOCASE ASC
+  `).all();
+  const pages = rows.map((r) => {
+    let token = '';
+    try { token = InboxSourceService.getDecryptedToken(r.id) || ''; } catch (_) {}
+    return {
+      page_id: String(r.external_id),
+      name: r.display_name,
+      avatar_url: r.avatar_url || `https://graph.facebook.com/${r.external_id}/picture?type=normal`,
+      status: r.status,
+      token,
+    };
+  });
+  res.json({ success: true, pages });
+});
+
+const PAGE_TOKEN_GRAPH_BASE = 'https://graph.facebook.com/v21.0';
+async function pageTokenGraphGet(path, params) {
+  const qs = new URLSearchParams(params).toString();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const resp = await fetch(`${PAGE_TOKEN_GRAPH_BASE}/${String(path).replace(/^\/+/, '')}?${qs}`, { signal: controller.signal });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.error) throw new Error(data.error?.message || `Graph HTTP ${resp.status}`);
+    return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+app.post('/api/page-api/import-tokens', async (req, res) => {
+  const raw = Array.isArray(req.body?.tokens) ? req.body.tokens.join('\n') : String(req.body?.tokens || '');
+  const tokens = [...new Set(raw.split(/[\s,;]+/).map((t) => t.trim()).filter((t) => t.length >= 20))];
+  if (!tokens.length) return res.status(400).json({ success: false, error: 'Chưa có token hợp lệ nào (token thường dài hơn 20 ký tự)' });
+  if (tokens.length > 50) return res.status(400).json({ success: false, error: 'Tối đa 50 token mỗi lần dán' });
+  const mask = (t) => `${String(t).slice(0, 8)}…${String(t).slice(-6)}`;
+
+  const importOnePage = (pageId, pageName, pageToken) => {
+    pageApiService.savePages(null, [{ id: String(pageId), name: String(pageName || 'Facebook Page'), token: pageToken }], db);
+    const src = db.prepare("SELECT id FROM inbox_sources WHERE source_type = 'page_messenger' AND external_id = ?").get(String(pageId));
+    if (src) {
+      // Backfill chạy nền: kéo toàn bộ hội thoại cũ; tin mới do watcher 6s tự bắt
+      pageApiService.backfillConversations(src.id, io, { convLimit: 50 })
+        .then((r) => console.log(`[PAGE_TOKEN] Backfill page ${pageId}: ${JSON.stringify(r).slice(0, 200)}`))
+        .catch((e) => console.warn(`[PAGE_TOKEN] Backfill page ${pageId} lỗi: ${e.message}`));
+    }
+    return src?.id || null;
+  };
+
+  const results = [];
+  for (const token of tokens) {
+    try {
+      const me = await pageTokenGraphGet('me', {
+        fields: 'id,name',
+        metadata: '1',
+        metadata_fields: 'type',
+        access_token: token,
+      });
+      const tokenType = String(me?.metadata?.type || 'Page');
+      if (tokenType === 'User') {
+        // User token: kéo TOÀN BỘ page của user đó (kèm page token) — dán 1 token nhận cả chục page
+        let accounts;
+        try {
+          accounts = await pageTokenGraphGet('me/accounts', { fields: 'id,name,access_token', limit: 100, access_token: token });
+        } catch (e) {
+          results.push({ token: mask(token), type: 'User', status: 'error', error: `User token không liệt kê được page (${e.message}) — cần quyền pages_show_list` });
+          continue;
+        }
+        const list = (accounts?.data || []).map((p) => ({ id: String(p.id), name: p.name || 'Facebook Page', token: p.access_token }));
+        if (!list.length) {
+          results.push({ token: mask(token), type: 'User', status: 'error', error: 'User này không quản lý Fanpage nào' });
+          continue;
+        }
+        for (const p of list) importOnePage(p.id, p.name, p.token);
+        results.push({ token: mask(token), type: 'User', status: 'imported', pages: list.map((p) => p.name) });
+      } else {
+        importOnePage(me.id, me.name, token);
+        results.push({ token: mask(token), type: 'Page', status: 'imported', page_id: String(me.id), pageName: me.name || '' });
+      }
+    } catch (e) {
+      results.push({ token: mask(token), status: 'error', error: e.message });
+    }
+  }
+  res.json({ success: true, results, note: 'Hội thoại đang được kéo về nền — danh sách page/tin nhắn sẽ cập nhật dần.' });
 });
 
 // Input từ popup đăng ký developer (quốc gia / số điện thoại / mã OTP)
