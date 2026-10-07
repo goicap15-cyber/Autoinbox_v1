@@ -469,13 +469,19 @@ class ConversationRepository {
         content = cleanedContent;
         // History crawlers can label an operator bubble as CONTACT/current_user.
         // The existing outgoing row is authoritative; reject that incoming
-        // history observation before it reaches INSERT/UPSERT.
+        // history observation before it reaches INSERT/UPSERT. CHỈ áp cho row
+        // TỔNG HỢP (dom_/history_/__bubble_): row mang mid thật được khớp theo
+        // fb_message_id + hysteresis spec 019 ở dưới. Check text cũ vô thời hạn
+        // đã nuốt tin thật của khách trùng text (hoa/thường) với tin operator
+        // trong 100 tin gần nhất (reproduce 2026-10-07: "Alo" của khách biến
+        // mất khỏi history vì operator từng gửi "alo").
         const historySource = String(msg.source || msg.timestamp_source || '').toLowerCase();
         const observedId = String(msg.fb_message_id || msg.messageId || '');
         const isHistoryObservation = historySource.includes('history') || historySource.includes('dom_')
           || historySource === 'facebook_label'
           || /(?:__bubble_\d+|^dom_|^history_)/i.test(observedId);
-        if (!isOutgoing && isHistoryObservation && mediaType === 'text'
+        const isSyntheticObservation = /^dom_|^history_/.test(observedId) || /__bubble_\d+/.test(observedId);
+        if (!isOutgoing && isHistoryObservation && isSyntheticObservation && mediaType === 'text'
           && ConversationRepository.hasMatchingOutgoingText(threadId, content, database)) {
           result.skippedCount += 1;
           continue;

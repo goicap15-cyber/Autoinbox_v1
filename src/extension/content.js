@@ -447,7 +447,9 @@
     const key = `${String(threadId || '')}:${normalized}`;
     const at = recentObservedOutgoing.get(key) || 0;
     if (!at) return false;
-    if (Date.now() - at > 10 * 60 * 1000) { recentObservedOutgoing.delete(key); return false; }
+    // 90s là dư sức phủ khoảng gửi -> bubble echo render. Cửa sổ 10 phút cũ
+    // nuốt cả tin thật của khách chỉ khác hoa/thường với tin operator.
+    if (Date.now() - at > 90 * 1000) { recentObservedOutgoing.delete(key); return false; }
     return true;
   }
   const domOccurrenceIds = new WeakMap();
@@ -1603,7 +1605,9 @@
           markObservedOutgoing(thread_id, parsed.content);
           continue;
         }
-        if (isRecentObservedOutgoing(thread_id, parsed.content)) continue;
+        // Row ở đây luôn mang native id nên không cần chống echo theo text:
+        // server tự khớp theo fb_message_id (reconcile spec 019). Check cũ
+        // nuốt tin thật của khách trùng text (hoa/thường) với tin operator.
         markDomOccurrence(parsed, row);
         const fbMessageId = makeDomMessageId(thread_id, parsed);
         const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
@@ -1669,6 +1673,76 @@
       try { processChatMutations(batch); } catch (_) {}
     }, 250);
   });
+
+  // Forward một quan sát bubble về background -> backend. Tách riêng để đường
+  // tức thời và đường defer (chờ hydrate native id) dùng chung payload.
+  function forwardIncomingDomObservation(thread_id, parsed, fbMessageId, contactAvatar, domPosition) {
+    // Chống echo CHỈ áp cho row KHÔNG có native id: row mang mid thật được
+    // server tự khớp theo fb_message_id (reconcile/hysteresis spec 019).
+    // Check cũ chạy cho mọi row + normalize lowercase + cửa sổ 10 phút đã
+    // nuốt tin thật của khách ("alo" của operator vs "Alo" của khách -
+    // reproduce 2026-10-07).
+    if (!parsed.native_id && !parsed.is_outgoing && isRecentObservedOutgoing(thread_id, parsed.content)) return;
+
+    let tsMs = null;
+    let tsSource = 'realtime_fallback';
+    if (parsed.effective_label) {
+      // Parse: "Tin nhắn do Bạn gửi lúc 15:20" hoặc "15:20"
+      const timeMatch = parsed.effective_label.match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
+      if (timeMatch) {
+        let hours = parseInt(timeMatch[1], 10);
+        const minutes = parseInt(timeMatch[2], 10);
+        const ampm = timeMatch[3]?.toUpperCase();
+        if (ampm === 'PM' || ampm === 'CH') {
+          if (hours < 12) hours += 12;
+        } else if (ampm === 'AM' || ampm === 'SA') {
+          if (hours === 12) hours = 0;
+        }
+
+        const now = new Date();
+        // Assuming current day. If label has specific day, it gets complex.
+        now.setHours(hours, minutes, 0, 0);
+
+        // If the parsed time is slightly in the future (e.g. timezone mismatch), subtract 1 day
+        if (now.getTime() > Date.now() + 60000) {
+          now.setDate(now.getDate() - 1);
+        }
+
+        tsMs = now.getTime();
+        tsSource = 'facebook_label';
+      }
+    }
+
+    try {
+      if (chrome?.runtime?.id) {
+        console.log(`[DOM Observer] matched message: thread_id=${thread_id} | id=${fbMessageId} | media_type=${parsed.media_type || 'text'} | content="${String(parsed.content || '').substring(0, 40)}" | tsMs=${tsMs}`);
+        chrome.runtime.sendMessage({
+          type: 'NEW_MESSAGE_FROM_FB',
+          data: {
+            thread_id: thread_id,
+            sender_id: parsed.is_outgoing ? capturedUserId : null,
+            sender_name: parsed.sender_name,
+            content: parsed.content,
+            is_outgoing: parsed.is_outgoing,
+            sender_role: parsed.is_outgoing ? 'operator' : 'customer',
+            fb_message_id: fbMessageId,
+            media_type: parsed.media_type || 'text',
+            media_url: parsed.media_url || null,
+            timestamp_ms: tsMs,
+            timestamp_source: tsSource,
+            created_at: new Date(tsMs || Date.now()).toISOString(),
+            source: 'dom_observer',
+            // Bubble forward trong window ngắn sau khi gắn baseline gần
+            // như luôn là DOM lịch sử hydrate trễ, không phải tin vừa đến.
+            initial_burst: (Date.now() - lastThreadAttachAt) < 8000,
+            ...(domPosition || {}),
+            dom_position_confirmed: Boolean(domPosition),
+            contact_avatar: contactAvatar || ''
+          }
+        });
+      }
+    } catch (err) {}
+  }
 
   const processChatMutations = (mutations) => {
     const thread_id = extractThreadIdFromUrl();
@@ -1776,7 +1850,6 @@
         }
 
         if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
-        if (!parsed.is_outgoing && isRecentObservedOutgoing(thread_id, parsed.content)) return;
 
         // The explicit composer confirmation/network intercept owns plain outgoing text.
         // The DOM observer must not forward the same rendered bubble a second time.
@@ -1784,35 +1857,37 @@
           && !parsed.media_url
           && (!parsed.media_type || parsed.media_type === 'text');
         if (isPlainOutgoingDomText) return;
-        try {
-          if (chrome?.runtime?.id) {
-            console.log(`[DOM Observer] matched message: thread_id=${thread_id} | id=${fbMessageId} | media_type=${parsed.media_type || 'text'} | content="${parsed.content.substring(0, 40)}" | tsMs=${tsMs}`);
-            chrome.runtime.sendMessage({
-              type: 'NEW_MESSAGE_FROM_FB',
-              data: {
-                thread_id: thread_id,
-                sender_id: parsed.is_outgoing ? capturedUserId : null,
-                sender_name: parsed.sender_name,
-                content: parsed.content,
-                is_outgoing: parsed.is_outgoing,
-                sender_role: parsed.is_outgoing ? 'operator' : 'customer',
-                fb_message_id: fbMessageId,
-                media_type: parsed.media_type || 'text',
-                media_url: parsed.media_url || null,
-                timestamp_ms: tsMs,
-                timestamp_source: tsSource,
-                created_at: new Date(tsMs || Date.now()).toISOString(),
-                source: 'dom_observer',
-                // Bubble forward trong window ngắn sau khi gắn baseline gần
-                // như luôn là DOM lịch sử hydrate trễ, không phải tin vừa đến.
-                initial_burst: (Date.now() - lastThreadAttachAt) < 8000,
-                ...(domPosition || {}),
-                dom_position_confirmed: Boolean(domPosition),
-                contact_avatar: contactAvatar || ''
+
+        // Row CHƯA có native id (React hydrate trễ): đợi ~1.5s rồi đọc lại đúng
+        // node đó - nếu mid thật đã gắn thì forward bằng mid (server tự khớp,
+        // hết nhân đôi khi mở thread); vẫn không có thì forward bản dom_ như cũ.
+        if (!parsed.is_outgoing && !parsed.native_id && !parsed.media_url
+          && (!parsed.media_type || parsed.media_type === 'text')) {
+          setTimeout(() => {
+            try {
+              let toForward = parsed;
+              let idToUse = fbMessageId;
+              let positionToUse = domPosition;
+              const reread = parseMessagesFromDOMNode(node, true)
+                .find((item) => !item.is_outgoing && String(item.content || '') === String(parsed.content || ''));
+              if (reread && reread.native_id) {
+                markDomOccurrence(reread, node);
+                toForward = reread;
+                idToUse = makeDomMessageId(thread_id, reread);
+                positionToUse = getDomMessagePosition(node, thread_id, idToUse);
               }
-            });
-          }
-        } catch (err) {}
+              const deferredSignature = domObservationSignature(toForward);
+              if (lastObservedMessages.get(idToUse) !== deferredSignature) {
+                lastObservedMessages.set(idToUse, deferredSignature);
+                forwardIncomingDomObservation(thread_id, toForward, idToUse, contactAvatar, positionToUse);
+              }
+            } catch (_) {
+              try { forwardIncomingDomObservation(thread_id, parsed, fbMessageId, contactAvatar, domPosition); } catch (_) {}
+            }
+          }, 1500);
+          return;
+        }
+        forwardIncomingDomObservation(thread_id, parsed, fbMessageId, contactAvatar, domPosition);
       });
     });
     });
@@ -1841,7 +1916,8 @@
         const isCallRow = /(?:cu?c g?i|nh?|b? l?|audio call|video call|missed call|call ended)/i.test(parsedText);
         const isMediaRow = Boolean(parsed.media_url || (parsed.media_type && parsed.media_type !== 'text'));
         if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
-        if (!parsed.is_outgoing && isRecentObservedOutgoing(thread_id, parsed.content)) continue;
+        // native id đã được đảm bảo ở trên -> bỏ chống echo theo text (server
+        // khớp theo mid), trước đây nuốt tin khách trùng text tin operator.
         // Outgoing media is required here: MutationObserver often sees the
         // video shell before Facebook hydrates its native id/media element.
         // The periodic tail pass then provides the confirmation that clears
