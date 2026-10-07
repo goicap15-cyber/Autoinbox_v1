@@ -24,16 +24,24 @@ function isThreadPinned(thread) {
   return Number(thread?.pinned) === 1;
 }
 
-// Messenger: hội thoại xếp theo thời gian hoạt động gần nhất. Đọc xong
-// KHÔNG tụt xuống dưới các hội thoại chưa đọc khác - vị trí chỉ do tin
-// nhắn gần nhất quyết định (tin mới đến vẫn đẩy lên đầu vì last_activity
-// được bump, chấm chưa đọc vẫn hiện bình thường).
+// Hội thoại CHƯA ĐỌC (khách nhắn chưa xem) đẩy lên nhóm đầu - trên mọi hội
+// thoại đã đọc; riêng nhóm chưa đọc xếp theo hoạt động gần nhất
+// (reproduce 2026-10-07: khách nhắn vào hội thoại cũ bị chìm dưới đống
+// hội thoại đang hoạt động vì chỉ sort theo last_activity).
+function isThreadUnread(thread) {
+  return Number(thread?.is_unread) === 1;
+}
+
+// Thứ tự: ghim -> chưa đọc -> hoạt động gần nhất. Mở hội thoại (seen) gỡ
+// cờ chưa đọc thì nó tự tụt về nhóm đã đọc, vị trí theo tin nhắn gần nhất.
 export function sortThreadsByActivity(threads = []) {
   return threads
     .map((thread, index) => ({ thread, index }))
     .sort((left, right) => {
       const pinnedDelta = (isThreadPinned(right.thread) ? 1 : 0) - (isThreadPinned(left.thread) ? 1 : 0);
       if (pinnedDelta !== 0) return pinnedDelta;
+      const unreadDelta = (isThreadUnread(right.thread) ? 1 : 0) - (isThreadUnread(left.thread) ? 1 : 0);
+      if (unreadDelta !== 0) return unreadDelta;
       const delta = threadActivityTime(right.thread) - threadActivityTime(left.thread);
       return delta || left.index - right.index;
     })
