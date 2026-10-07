@@ -893,17 +893,21 @@ function isRecentOutgoingTextEcho(threadId, message = {}, database = db) {
   if (mediaType && mediaType !== 'text') return false;
   const isExplicitOutgoing = message.is_outgoing === true || message.is_outgoing === 1;
   if (isExplicitOutgoing) return false;
-  // MIỄN TRỪ emoji-thuần: khách trả lời 👍 sau khi operator gửi 👍 là chuyện
-  // bình thường; guard này đã nuốt 2 like mid THẬT của khách trong window
-  // 10 phút (reproduce 2026-10-07 14:26 - log "skip CRM outbound text echo
-  // parsed as incoming content=👍").
-  if (/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(content)) return false;
-  // Synthetic DOM/history ids are the exact shape Facebook uses when it
-  // replays an operator bubble as an incoming row. Match the durable outgoing
-  // text across the history window so a late crawler cannot resurrect it.
+  // GUARD NÀY CHỈ ÁP DỤNG CHO ID TỔNG HỢP (dom_/history_/network_...): đó là
+  // hình dạng Facebook dùng khi render lại bubble operator thành incoming -
+  // chính mục tiêu của guard. Row mang MID THẬT được server tự khớp theo
+  // fb_message_id (UNIQUE + hysteresis spec 019) nên không thể thành ghost;
+  // check text ở đây từng nuốt tin THẬT trùng nội dung: "alo" của operator
+  // -> khách/operator nhắn "alo" lại trong 10 phút là mất (report 2026-10-07).
   const isSyntheticObserverId = /^(?:dom_|history_|network_|websocket_|mercury_|xhr_)/i.test(String(message.fb_message_id || ''));
+  if (!isSyntheticObserverId) return false;
+  // MIỄN TRỪ emoji-thuần: khách trả lời 👍 sau khi operator gửi 👍 là chuyện
+  // bình thường; guard này đã nuốt 2 like mid tổng hợp của khách (reproduce
+  // 2026-10-07 14:26 - log "skip CRM outbound text echo parsed as incoming
+  // content=👍").
+  if (/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(content)) return false;
   return ConversationRepository.hasRecentMatchingOutgoing(threadId, content, database, {
-    windowMs: isSyntheticObserverId ? 24 * 60 * 60 * 1000 : 10 * 60 * 1000,
+    windowMs: 24 * 60 * 60 * 1000,
     futureToleranceMs: 60 * 1000
   });
 }
