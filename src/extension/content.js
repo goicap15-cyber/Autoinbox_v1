@@ -1401,16 +1401,40 @@
   // không đoán vanity link vì dễ trúng đường hệ thống.
   const CONTACT_PROFILE_HREF_ID_RE = /[?&]id=(\d{6,18})/;
   const sentThreadProfileUrls = new Map();
+  let profileUrlScanTimer = null;
+  // Đường hệ thống của facebook.com - trông như vanity link nhưng không phải
+  // profile người dùng; chặn trước khi nhận vanity (chỉ xét 1 segment).
+  const VANITY_BLOCKLIST_RE = /^(?:help|policies|privacy|policy|business|marketplace|watch|gaming|groups|pages|events|support|settings|login|recover|me|profile|photo|photos|stories|story|permalink|plugins|sharer|share|dialog|ajax|api|about|ads|advertise|careers|legal|terms|conditions|facebook|fb|meta|threads|reel|reels|memory|memories|friends|bookmarks|saved|feed|home|ntf|notification|notifications|help\.community|transparency|accessibility|fundraisers|donate|weather|local|gaming\.video|college|sports|movies|tv|quizzes|notes)$/i;
+  function isSafeVanityProfileHref(href) {
+    try {
+      const u = new URL(href, 'https://www.facebook.com');
+      if (u.hostname !== 'www.facebook.com' && !/^[a-z]{2}-[a-z]{2}\.facebook\.com$/.test(u.hostname)) return null;
+      const segs = u.pathname.split('/').filter(Boolean);
+      if (segs.length !== 1) return null;
+      const vanity = segs[0];
+      if (!/^[A-Za-z0-9.\-]{5,50}$/.test(vanity)) return null;
+      if (/\.(?:php|html?|js|css|png|jpe?g|gif|svg|mp4)$/i.test(vanity)) return null;
+      if (VANITY_BLOCKLIST_RE.test(vanity)) return null;
+      return `https://www.facebook.com/${vanity}`;
+    } catch (_) { return null; }
+  }
   function extractCustomerProfileUrlFromDom() {
-    const scopes = [
-      document.querySelector('div[role="complementary"]'),
-      document.querySelector('div[role="main"] header'),
-      document.querySelector('div[role="main"]')
-    ].filter(Boolean);
-    for (const scope of scopes) {
+    const rail = document.querySelector('div[role="complementary"]');
+    const mainHeader = document.querySelector('div[role="main"] header');
+    const main = document.querySelector('div[role="main"]');
+    // 1) UID tường minh (profile.php?id=<digits>) - an toàn nhất, quét cả vùng chat
+    for (const scope of [rail, mainHeader, main].filter(Boolean)) {
       for (const a of scope.querySelectorAll('a[href*="profile.php?id="]')) {
         const match = (a.getAttribute('href') || '').match(CONTACT_PROFILE_HREF_ID_RE);
         if (match) return `https://www.facebook.com/profile.php?id=${match[1]}`;
+      }
+    }
+    // 2) Vanity link - chỉ nhận right rail + header (vùng thuộc về khách),
+    //    đã chặn đường hệ thống; vùng chat không xét để tránh link trôi nổi.
+    for (const scope of [rail, mainHeader].filter(Boolean)) {
+      for (const a of scope.querySelectorAll('a[href]')) {
+        const vanityUrl = isSafeVanityProfileHref(a.getAttribute('href') || '');
+        if (vanityUrl) return vanityUrl;
       }
     }
     return null;
@@ -1428,14 +1452,26 @@
           data: { thread_id, profile_url: profileUrl }
         });
         console.log(`[CRM] Đã gửi link profile của khách cho backend: ${profileUrl}`);
+        if (profileUrlScanTimer) { clearInterval(profileUrlScanTimer); profileUrlScanTimer = null; }
       }
     } catch (_) {}
   }
   function scheduleCustomerProfileUrlScan(thread_id) {
-    // DOM hydrate lệch nên quét vài nhịp; tìm thấy sớm thì các nhịp sau bỏ qua.
+    // Quét vài nhịp đầu (DOM hydrate lệch) + quét định kỳ 12s tới khi tìm
+    // thấy: hội thoại sync xong từ trước không có sự kiện đổi thread, và
+    // tab Messenger có thể đã đ sẵn đúng thread này từ trước đó.
+    if (profileUrlScanTimer) { clearInterval(profileUrlScanTimer); profileUrlScanTimer = null; }
     [800, 2500, 6000].forEach((delay) => setTimeout(() => {
       try { maybeSendCustomerProfileUrl(thread_id); } catch (_) {}
     }, delay));
+    profileUrlScanTimer = setInterval(() => {
+      if (String(thread_id) !== String(currentBaselineThreadId)) {
+        clearInterval(profileUrlScanTimer);
+        profileUrlScanTimer = null;
+        return;
+      }
+      try { maybeSendCustomerProfileUrl(thread_id); } catch (_) {}
+    }, 12000);
   }
 
   function makeDomMessageId(thread_id, parsed) {

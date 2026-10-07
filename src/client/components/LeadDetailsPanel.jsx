@@ -848,7 +848,21 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
           // 2026-10-07). Hội thoại cá nhân chỉ hiện nút khi extension đã gửi
           // link profile thật (THREAD_METADATA_UPDATED -> contacts.profile_url).
           const profileUrl = explicitUrl || (isPage ? fallbackUidUrl : null);
-          if (!profileUrl) return null;
+          if (!profileUrl) {
+            return (
+              <div className="mt-2 flex items-center justify-center">
+                <button
+                  type="button"
+                  disabled
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium bg-[var(--color-accent-subtle)] text-[var(--color-text-muted)] border border-[var(--color-accent)]/20 cursor-not-allowed opacity-70"
+                  title="Chưa bắt được link profile. Hãy mở hội thoại này trên tab Messenger (Chrome do CRM quản lý) và đợi vài giây - CRM sẽ tự nhận link profile."
+                >
+                  <Copy size={12} strokeWidth={1.75} />
+                  Chưa bắt được link profile
+                </button>
+              </div>
+            );
+          }
           return (
             <div className="mt-2 flex items-center justify-center gap-1.5 flex-wrap">
               <button
