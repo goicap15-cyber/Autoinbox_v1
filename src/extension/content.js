@@ -1387,6 +1387,11 @@
 
   let currentBaselineThreadId = null;
   let observerPaused = false;
+  // Thời điểm gắn baseline cho thread hiện tại. Các bubble render ngay sau
+  // seedBaseline (đợt hydrate đầu khi mở/đổi thread) là lịch sử được mount
+  // lại - server dùng cờ này để chặn row dom_ (mất native id) biến thành
+  // tin nhắn nhân đôi.
+  let lastThreadAttachAt = 0;
 
   function makeDomMessageId(thread_id, parsed) {
     // Real Facebook native id (data-message-id/data-id/mid.*) is always the
@@ -1597,6 +1602,7 @@
       // The mounted DOM already contains historical bubbles when switching users.
       // Do not replay that tail through realtime: history sync owns these rows.
       seedBaseline(thread_id);
+      lastThreadAttachAt = Date.now();
       observerPaused = false;
     }
 
@@ -1702,6 +1708,9 @@
                 timestamp_source: tsSource,
                 created_at: new Date(tsMs || Date.now()).toISOString(),
                 source: 'dom_observer',
+                // Bubble forward trong window ngắn sau khi gắn baseline gần
+                // như luôn là DOM lịch sử hydrate trễ, không phải tin vừa đến.
+                initial_burst: (Date.now() - lastThreadAttachAt) < 8000,
                 ...(domPosition || {}),
                 dom_position_confirmed: Boolean(domPosition),
                 contact_avatar: contactAvatar || ''
@@ -1802,6 +1811,7 @@
     currentBaselineThreadId = initialThreadId;
     // Already-mounted history is seeded, not replayed as realtime.
     seedBaseline(initialThreadId);
+    lastThreadAttachAt = Date.now();
   }
   chatObserver.observe(document.body, {
     childList: true,

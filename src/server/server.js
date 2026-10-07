@@ -2338,6 +2338,35 @@ wss.on('connection', (ws, req) => {
             break;
           }
 
+          // Chặn nhân đôi khi mở thread: MutationObserver đọc lại bubble CŨ
+          // trong đợt hydrate đầu trước khi React gắn data-message-id -> id rơi
+          // về dom_ (hash nội dung), UNIQUE(fb_message_id) không khớp row mid
+          // thật đã có -> text cũ thành "tin mới" (timestamp=giờ mở app + flip
+          // unread - reproduce 2026-10-07 "Khi nào bạn muốn ăn" x2). Bubble
+          // forward trong window 8s sau attach mang initial_burst=true (đường
+          // reconcile đã chặn sẵn bằng native-id từ trước). Tin khách thật
+          // đến ngoài window này, hoặc có mid thật/media, không bị đụng tới.
+          if (
+            !hasMediaPayload
+            && m.initial_burst === true
+            && m.is_outgoing !== true && m.is_outgoing !== 1
+            && String(m.fb_message_id || '').startsWith('dom_')
+            && cleanedContent
+          ) {
+            const nativeTwin = db.prepare(`
+              SELECT id FROM messages
+              WHERE thread_id = ? AND is_outgoing = 0
+                AND COALESCE(content, '') = COALESCE(?, '')
+                AND fb_message_id NOT LIKE 'dom_%'
+                AND fb_message_id NOT LIKE 'sidebar_preview_%'
+              LIMIT 1
+            `).get(canonicalThreadId, cleanedContent);
+            if (nativeTwin) {
+              console.log(`[WS] 🛡️ Bỏ quan sát lại bubble cũ khi mở thread (id dom_ trùng text đã có mid thật #${nativeTwin.id}): thread=${canonicalThreadId} content="${sanitizeLog(cleanedContent, 60)}"`);
+              break;
+            }
+          }
+
           // Nếu raw content chứa chuỗi quá lớn (scrap rộng), reject ở backend
           if ((m.content || '').split('\n').length > 8 && isSystemOrMetadataText(m.content)) {
             console.log(`[WS] ℹ️ Backend Guard: Bỏ qua cụm text scrap rộng từ thread ${threadId}`);
@@ -7401,30 +7430,84 @@ function startServer() {
       noticeThreadIds.add(row.thread_id);
       deletedNoticeCount++;
     }
-    for (const noticeThreadId of noticeThreadIds) {
-      const hasRealIncoming = db.prepare(`
-        SELECT 1 FROM messages
-        WHERE thread_id = ? AND is_outgoing = 0
-          AND fb_message_id NOT LIKE 'sidebar_preview_%'
-        LIMIT 1
-      `).get(noticeThreadId);
-      if (!hasRealIncoming) {
-        db.prepare('UPDATE threads SET is_unread = 0, unread_manual = 0 WHERE id = ?').run(noticeThreadId);
+    const healTouchedThreads = (threadIdSet) => {
+      for (const noticeThreadId of threadIdSet) {
+        const hasRealIncoming = db.prepare(`
+          SELECT 1 FROM messages
+          WHERE thread_id = ? AND is_outgoing = 0
+            AND fb_message_id NOT LIKE 'dom_%'
+            AND fb_message_id NOT LIKE 'sidebar_preview_%'
+          LIMIT 1
+        `).get(noticeThreadId);
+        if (!hasRealIncoming) {
+          db.prepare('UPDATE threads SET is_unread = 0, unread_manual = 0 WHERE id = ?').run(noticeThreadId);
+        }
+        const remaining = db.prepare(`
+          SELECT content, COALESCE(timestamp_ms, 0) AS ts FROM messages
+          WHERE thread_id = ? AND fb_message_id NOT LIKE 'dom_%'
+            AND fb_message_id NOT LIKE 'sidebar_preview_%'
+          ORDER BY COALESCE(timestamp_ms, 0) DESC, id DESC LIMIT 1
+        `).get(noticeThreadId);
+        if (remaining) {
+          db.prepare('UPDATE threads SET last_message = ?, last_activity = ? WHERE id = ?')
+            .run(remaining.content, new Date(remaining.ts).toISOString(), noticeThreadId);
+        } else {
+          db.prepare('UPDATE threads SET last_message = NULL WHERE id = ?').run(noticeThreadId);
+        }
       }
-      const remaining = db.prepare(`
-        SELECT content, COALESCE(timestamp_ms, 0) AS ts FROM messages
-        WHERE thread_id = ? AND fb_message_id NOT LIKE 'sidebar_preview_%'
-        ORDER BY COALESCE(timestamp_ms, 0) DESC, id DESC LIMIT 1
-      `).get(noticeThreadId);
-      if (remaining) {
-        db.prepare('UPDATE threads SET last_message = ?, last_activity = ? WHERE id = ?')
-          .run(remaining.content, new Date(remaining.ts).toISOString(), noticeThreadId);
-      } else {
-        db.prepare('UPDATE threads SET last_message = NULL WHERE id = ?').run(noticeThreadId);
-      }
+    };
+
+    // (1) Notice E2EE bị bắt nhầm thành tin nhắn của khách.
+    healTouchedThreads(noticeThreadIds);
+
+    // (2) Bubble nhân đôi từ đợt hydrate khi mở thread: row dom_ (mất native
+    // id) trùng nội dung với một row mid thật trong cùng thread là bản render
+    // lại của tin cũ, không phải tin mới (reproduce 2026-10-07 "Khi nào bạn
+    // muốn ăn" x2). Guard runtime chặn từ nay về sau, ở đây dọn row cũ.
+    const dupDomRows = db.prepare(`
+      SELECT m.id, m.thread_id FROM messages m
+      WHERE m.is_outgoing = 0
+        AND m.fb_message_id LIKE 'dom_%'
+        AND (m.media_type IS NULL OR m.media_type = 'text')
+        AND EXISTS (
+          SELECT 1 FROM messages twin
+          WHERE twin.thread_id = m.thread_id
+            AND twin.is_outgoing = 0
+            AND twin.id != m.id
+            AND COALESCE(twin.content, '') = COALESCE(m.content, '')
+            AND twin.fb_message_id NOT LIKE 'dom_%'
+            AND twin.fb_message_id NOT LIKE 'sidebar_preview_%'
+        )
+    `).all();
+    const deleteDupRow = db.prepare('DELETE FROM messages WHERE id = ?');
+    const dupThreadIds = new Set();
+    for (const row of dupDomRows) {
+      deleteDupRow.run(row.id);
+      dupThreadIds.add(row.thread_id);
     }
-    if (deletedNoticeCount > 0) {
-      console.log(`[DB] 🧹 Đã xóa ${deletedNoticeCount} notice E2EE bị bắt nhầm thành tin nhắn (touch ${noticeThreadIds.size} thread)`);
+    healTouchedThreads(dupThreadIds);
+
+    // (3) Separator thời gian dạng tắt ("9w", "2d"...) bị bắt nhầm thành
+    // bubble - chỉ tồn tại dưới id dom_ (separator không có data-message-id).
+    const COMPACT_RELATIVE_RE = /^\d{1,2}\s?(?:s|sec|m|min|h|hr|d|w|mo|y)$/i;
+    const sepCandidates = db.prepare(`
+      SELECT id, thread_id, content FROM messages
+      WHERE is_outgoing = 0 AND fb_message_id LIKE 'dom_%'
+        AND (media_type IS NULL OR media_type = 'text')
+        AND LENGTH(COALESCE(content, '')) <= 6
+    `).all();
+    const deleteSepRow = db.prepare('DELETE FROM messages WHERE id = ?');
+    const sepThreadIds = new Set();
+    for (const row of sepCandidates) {
+      if (!COMPACT_RELATIVE_RE.test(String(row.content || '').trim())) continue;
+      deleteSepRow.run(row.id);
+      sepThreadIds.add(row.thread_id);
+    }
+    healTouchedThreads(sepThreadIds);
+
+    const totalJunk = deletedNoticeCount + dupThreadIds.size + sepThreadIds.size;
+    if (totalJunk > 0) {
+      console.log(`[DB] 🧹 Heal tin rác/nhân đôi: ${deletedNoticeCount} notice E2EE, ${dupThreadIds.size} bubble dom_ trùng mid thật, ${sepThreadIds.size} separator thời gian (${totalJunk} thread bị đụng tới)`);
     }
 
     const activeThreads = db.prepare('SELECT DISTINCT thread_id FROM messages').all();

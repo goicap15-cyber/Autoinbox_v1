@@ -26,6 +26,10 @@ function isBareVietnamMobileText(text) {
     // thành tin của khách mỗi lần initial sweep mở thread (reproduce 2026-10-07).
     /^Messages and calls are secured with end-to-end encryption\.?$/i,
     /^Messages and calls are end-to-end encrypted\.?$/i,
+    // Nhãn phân cách thời gian dạng tắt khi Messenger UI tiếng Anh ("9w",
+    // "2d", "5h", "3m"...) - separator, không phải tin nhắn
+    // (reproduce 2026-10-07: "9w" thành bubble rác trong hội thoại).
+    /^\d{1,2}\s?(?:s|sec|m|min|h|hr|d|w|mo|y)$/i,
 
     // Footer, Privacy & Links
     /^Tìm hiểu thêm$/i,
