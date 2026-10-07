@@ -875,7 +875,7 @@ function startPageConversationWatcher(io, database = getDb(), intervalMs = 10000
         } catch (err) {
           watcherLog('CHU KỲ LỖI page ' + s.external_id + ': ' + String(err && (err.stack || err.message || err)).slice(0, 400));
         }
-        await new Promise((r2) => setTimeout(r2, 800));
+        await new Promise((r2) => setTimeout(r2, 120));
       }
     } catch (err) {
       watcherLog('CHU KỲ LỖI chung: ' + String(err && (err.stack || err.message || err)).slice(0, 400));

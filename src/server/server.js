@@ -7535,8 +7535,12 @@ function startServer() {
   // Bật poller đọc sự kiện webhook từ cầu nối hosting (webhook.php) cho Page API
   // 2.5s thay vì 5s — tin khách realtime về CRM trong ~3s sau khi webhook live
   pageApiService.startBridgePolling(io, db, 2500);
-  // Tự động đồng bộ hội thoại page 6s/lần (fallback khi webhook chưa đăng ký)
-  pageApiService.startPageConversationWatcher(io, db, 6000);
+  // Tự động đồng bộ hội thoại page 3s/lần (fallback khi webhook chưa đăng ký:
+  // page dán token ngoài không có webhook về CRM mình, watcher là đường chính).
+  // 6s cũ cho độ trễ trung bình ~4s; 3s giảm còn ~1.5-2s. Đổi lại số call
+  // Graph tăng gấp đôi — nếu Meta báo rate limit (watcher log "CHU KỲ LỖI")
+  // thì trả về 6000. Page có webhook vẫn đi cầu nối 2.5s nhanh hơn.
+  pageApiService.startPageConversationWatcher(io, db, 3000);
   // Quy tắc: page chỉ tồn tại khi có token (do app tạo ra) — dọn page mồ côi
   pageApiService.removeUntokenedPages(db);
 
