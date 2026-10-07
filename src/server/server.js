@@ -5998,7 +5998,10 @@ app.post('/api/page-api/import-tokens', async (req, res) => {
   const mask = (t) => `${String(t).slice(0, 8)}…${String(t).slice(-6)}`;
 
   const importOnePage = (pageId, pageName, pageToken) => {
-    pageApiService.savePages(importAccountId, [{ id: String(pageId), name: String(pageName || 'Facebook Page'), token: pageToken }], db);
+    // savePages đọc p.pageId (KHÔNG phải p.id) - sai tên field trước đây làm
+    // savePages continue âm thầm, page không bao giờ được lưu dù Graph nhận
+    // diện OK (reproduce: ✅ ADSUP Agency nhưng inbox_sources trống).
+    pageApiService.savePages(importAccountId, [{ pageId: String(pageId), name: String(pageName || 'Facebook Page'), token: pageToken }], db);
     const src = db.prepare("SELECT id FROM inbox_sources WHERE source_type = 'page_messenger' AND external_id = ?").get(String(pageId));
     if (src) {
       // Backfill chạy nền: kéo toàn bộ hội thoại cũ; tin mới do watcher 6s tự bắt
