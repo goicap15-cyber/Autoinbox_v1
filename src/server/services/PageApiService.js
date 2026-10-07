@@ -468,6 +468,15 @@ function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}
   }
   const ts = msg.created_time ? new Date(msg.created_time).getTime() : Date.now();
 
+  // Đánh dấu chưa đọc CHỈ khi tin MỚI HƠN mọi tin hiện có của thread: wave
+  // quét trễ chèn lại tin ĐÃ xem (ts backdate <= mốc cũ) không được đè cờ
+  // "đã đọc" (unread_manual=-1) của operator — chấm chưa đọc hồi sinh sau
+  // khi đọc xong (reproduce 2026-10-07 17:37).
+  const shouldMarkUnread = opts.markUnread && !isOutgoing
+    && ts > Number(database.prepare(
+      'SELECT MAX(COALESCE(timestamp_ms, 0)) AS m FROM messages WHERE thread_id = ?'
+    ).get(threadId)?.m || 0);
+
   // sequence_order: xếp sau tin cuối cùng trong thread
   const maxSeqRow = database.prepare(
     'SELECT MAX(COALESCE(sequence_order, id)) AS max_seq FROM messages WHERE thread_id = ?'
@@ -489,7 +498,7 @@ function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}
   // Tin khách đến REALTIME (watcher/webhook): đánh dấu chưa đọc để hội thoại
   // đẩy lên đầu danh sách (sort unread-first phía client). Backfill lịch sử
   // KHÔNG đánh dấu - import page không làm unread hàng loạt.
-  if (opts.markUnread && !isOutgoing) {
+  if (shouldMarkUnread) {
     database.prepare("UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?").run(threadId);
   }
 
