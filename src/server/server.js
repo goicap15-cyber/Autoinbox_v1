@@ -893,6 +893,11 @@ function isRecentOutgoingTextEcho(threadId, message = {}, database = db) {
   if (mediaType && mediaType !== 'text') return false;
   const isExplicitOutgoing = message.is_outgoing === true || message.is_outgoing === 1;
   if (isExplicitOutgoing) return false;
+  // MIỄN TRỪ emoji-thuần: khách trả lời 👍 sau khi operator gửi 👍 là chuyện
+  // bình thường; guard này đã nuốt 2 like mid THẬT của khách trong window
+  // 10 phút (reproduce 2026-10-07 14:26 - log "skip CRM outbound text echo
+  // parsed as incoming content=👍").
+  if (/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(content)) return false;
   // Synthetic DOM/history ids are the exact shape Facebook uses when it
   // replays an operator bubble as an incoming row. Match the durable outgoing
   // text across the history window so a late crawler cannot resurrect it.
