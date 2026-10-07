@@ -1681,8 +1681,11 @@
     // server tự khớp theo fb_message_id (reconcile/hysteresis spec 019).
     // Check cũ chạy cho mọi row + normalize lowercase + cửa sổ 10 phút đã
     // nuốt tin thật của khách ("alo" của operator vs "Alo" của khách -
-    // reproduce 2026-10-07).
-    if (!parsed.native_id && !parsed.is_outgoing && isRecentObservedOutgoing(thread_id, parsed.content)) return;
+    // reproduce 2026-10-07). MIỄN TRỪ emoji-thuần: khách trả lời 👍 ngay sau
+    // khi operator gửi 👍 là bình thường, không được drop.
+    if (!parsed.native_id && !parsed.is_outgoing
+      && !/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(String(parsed.content || ''))
+      && isRecentObservedOutgoing(thread_id, parsed.content)) return;
 
     let tsMs = null;
     let tsSource = 'realtime_fallback';

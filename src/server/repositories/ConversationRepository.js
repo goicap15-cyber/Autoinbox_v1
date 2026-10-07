@@ -481,7 +481,12 @@ class ConversationRepository {
           || historySource === 'facebook_label'
           || /(?:__bubble_\d+|^dom_|^history_)/i.test(observedId);
         const isSyntheticObservation = /^dom_|^history_/.test(observedId) || /__bubble_\d+/.test(observedId);
+        // MIỄN TRỪ emoji-thuần: khach/operator nhắn lặp 👍 là bình thường,
+        // drop theo text đã nuốt like của khách vì operator từng gửi 👍
+        // (reproduce 2026-10-07 14:06).
+        const isPureEmojiContent = /^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(String(content || ''));
         if (!isOutgoing && isHistoryObservation && isSyntheticObservation && mediaType === 'text'
+          && !isPureEmojiContent
           && ConversationRepository.hasMatchingOutgoingText(threadId, content, database)) {
           result.skippedCount += 1;
           continue;

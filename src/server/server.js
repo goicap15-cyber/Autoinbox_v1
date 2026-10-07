@@ -2346,12 +2346,16 @@ wss.on('connection', (ws, req) => {
           // forward trong window 8s sau attach mang initial_burst=true (đường
           // reconcile đã chặn sẵn bằng native-id từ trước). Tin khách thật
           // đến ngoài window này, hoặc có mid thật/media, không bị đụng tới.
+          // MIỄN TRỪ emoji-thuần: khách/operator nhắn lặp 👍 liên tục là chuyện
+          // bình thường, không được drop (reproduce 2026-10-07 14:06 - mất 3
+          // like vì trùng 👍 đã có); trùng lặp mid thật vẫn chặn ở UNIQUE.
           if (
             !hasMediaPayload
             && m.initial_burst === true
             && m.is_outgoing !== true && m.is_outgoing !== 1
             && String(m.fb_message_id || '').startsWith('dom_')
             && cleanedContent
+            && !/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(cleanedContent)
           ) {
             const nativeTwin = db.prepare(`
               SELECT id FROM messages
