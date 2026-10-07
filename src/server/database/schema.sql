@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS inbox_sources (
 CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY,
     external_thread_id TEXT,
-    account_id TEXT NOT NULL,
+    account_id TEXT,
     source_id TEXT,
     thread_url TEXT,
     contact_name TEXT,
@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS threads (
     sync_cursor TEXT,
     sync_error TEXT,
     archived_at DATETIME,
-    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE SET NULL,
     FOREIGN KEY(assigned_user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 

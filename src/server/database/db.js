@@ -1242,6 +1242,69 @@ const migrations = [
         console.log('[DB] Migration v20260930002: messages.sent_by_agent already exists, skipped.');
       }
     }
+  },
+  {
+    version: 20261007001,
+    name: 'make_threads_account_id_nullable',
+    // Xóa account CUỐI CÙNG từng CASCADE xóa sạch hội thoại page (threads.account_id
+    // NOT NULL + FK ON DELETE CASCADE, removeAccount chỉ chuyển thread khi CÒN
+    // account khác). Giờ account_id nullable + FK SET NULL: thread page rời account
+    // khi account bị xóa, được gắn lại khi account đăng nhập lại / page có chủ mới.
+    up: (db) => {
+      // legacy_alter_table giữ REFERENCES threads(...) trong bảng con (messages,
+      // conversation_reminders...) không bị RENAME viết lại thành threads_old —
+      // nếu không DROP bảng cũ sẽ làm hỏng FK của các bảng con.
+      db.pragma('legacy_alter_table = ON');
+      try {
+        db.exec(`
+          ALTER TABLE threads RENAME TO threads_old_account_id;
+          CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            external_thread_id TEXT,
+            account_id TEXT,
+            source_id TEXT,
+            thread_url TEXT,
+            contact_name TEXT,
+            last_message TEXT,
+            last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_unread BOOLEAN DEFAULT 1,
+            status TEXT CHECK(status IN ('UNPROCESSED', 'ASSIGNED', 'COMPLETED')) DEFAULT 'UNPROCESSED',
+            assigned_user_id INTEGER,
+            ai_paused_until DATETIME,
+            sync_status TEXT DEFAULT 'LOCAL',
+            sync_cursor TEXT,
+            sync_error TEXT,
+            archived_at DATETIME,
+            inbox_folder TEXT CHECK(inbox_folder IN ('INBOX', 'MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')) DEFAULT 'INBOX',
+            unread_manual INTEGER NOT NULL DEFAULT 0,
+            pinned INTEGER NOT NULL DEFAULT 0,
+            last_seen_message_id TEXT,
+            history_completed INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE SET NULL,
+            FOREIGN KEY(assigned_user_id) REFERENCES users(id) ON DELETE SET NULL
+          );
+          INSERT INTO threads (id, external_thread_id, account_id, source_id, thread_url, contact_name,
+            last_message, last_activity, is_unread, status, assigned_user_id, ai_paused_until,
+            sync_status, sync_cursor, sync_error, archived_at, inbox_folder, unread_manual, pinned,
+            last_seen_message_id, history_completed)
+          SELECT id, external_thread_id, account_id, source_id, thread_url, contact_name,
+            last_message, last_activity, is_unread, status, assigned_user_id, ai_paused_until,
+            sync_status, sync_cursor, sync_error, archived_at, inbox_folder, unread_manual, pinned,
+            last_seen_message_id, history_completed
+          FROM threads_old_account_id;
+          DROP TABLE threads_old_account_id;
+          CREATE INDEX idx_threads_account ON threads(account_id);
+          CREATE INDEX idx_threads_assigned ON threads(assigned_user_id);
+          CREATE INDEX idx_threads_source_id ON threads(source_id);
+          CREATE UNIQUE INDEX idx_threads_source_external ON threads(source_id, external_thread_id)
+            WHERE source_id IS NOT NULL AND external_thread_id IS NOT NULL;
+          CREATE INDEX idx_threads_account_external_lookup ON threads(account_id, external_thread_id);
+        `);
+        console.log('[DB] Migration v20261007001: threads.account_id nullable + FK ON DELETE SET NULL.');
+      } finally {
+        db.pragma('legacy_alter_table = OFF');
+      }
+    }
   }
 ];
 

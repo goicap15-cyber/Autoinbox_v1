@@ -1696,6 +1696,21 @@ wss.on('connection', (ws, req) => {
           `).run(account_id, accName, profileDir, ownerUserId || null,
             ownerUserId ? db.prepare('SELECT company_id FROM users WHERE id=?').get(ownerUserId)?.company_id || ownerUserId : null,
             accountAvatarFilename);
+          // Hội thoại page bị rời account (account cũ là chủ duy nhất đã xóa) —
+          // gắn lại ngay khi account đăng nhập lại nếu page đã có chủ là account này.
+          try {
+            const reattached = db.prepare(`
+              UPDATE threads SET account_id = ?
+              WHERE account_id IS NULL AND source_id IN (
+                SELECT id FROM inbox_sources WHERE owner_account_id = ?
+              )
+            `).run(account_id, account_id).changes;
+            if (reattached > 0) {
+              console.log(`[WS] 🔗 Gắn lại ${reattached} hội thoại page về account ${account_id}`);
+            }
+          } catch (reattachErr) {
+            console.warn('[WS] Lỗi khi gắn lại hội thoại page:', reattachErr.message);
+          }
           if (pending_key || readdPendingKey) {
             const setupKey = String(pending_key || readdPendingKey);
             completedPendingSetups.set(setupKey, { account_id: String(account_id), completed_at: Date.now() });
@@ -4379,13 +4394,18 @@ wss.on('connection', (ws, req) => {
               const pid = String(p.page_id || '');
               const pname = (p.name || '').trim();
               if (pid) {
-                const updated = db.prepare(`
-                  UPDATE inbox_sources
-                  SET owner_account_id = ?
+                const matched = db.prepare(`
+                  SELECT id FROM inbox_sources
                   WHERE (external_id = ? OR (display_name = ? AND display_name != ''))
                     AND source_type = 'page_messenger' AND owner_account_id IS NULL
-                `).run(accountId, pid, pname);
-                if (updated.changes > 0) {
+                `).all(pid, pname);
+                for (const m of matched) {
+                  db.prepare('UPDATE inbox_sources SET owner_account_id = ? WHERE id = ?')
+                    .run(accountId, m.id);
+                  // Hội thoại page từng rời account (chủ cũ xóa khi là account cuối)
+                  // — gắn lại để inbox của account này hiển thị đủ lịch sử.
+                  db.prepare('UPDATE threads SET account_id = ? WHERE source_id = ? AND account_id IS NULL')
+                    .run(accountId, m.id);
                   console.log(`[WS] 🔗 Đã tự động gắn owner=${accountId} cho page_source=${pid} (${pname})`);
                 }
               }

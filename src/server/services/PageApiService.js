@@ -343,16 +343,21 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
   const token = InboxSourceService.getDecryptedToken(sourceId, database);
   if (!source || !token) return { ok: false, reason: 'NO_TOKEN' };
   const pageId = String(source.external_id);
-  const accountId = source.owner_account_id || pageId;
+  // account_id nullable từ 2026-10-07: page mồ côi (chưa có chủ) thì KHÔNG đổ
+  // pageId vào account_id — trước đây fallback này gây FOREIGN KEY constraint
+  // failed (pageId không phải account thật) và mất toàn bộ tin.
+  const accountId = source.owner_account_id ? String(source.owner_account_id) : null;
   const convLimit = Number(options.convLimit || 25);
 
   // Thread của source này thuộc về chủ HIỆN HÀNH — re-point những thread trước
   // đây bị bind vào account khác (vd account test cũ đã ngắt), nếu không CRM
   // sẽ không hiện hội thoại ở inbox của account đang dùng (báo lỗi 2026-10-06:
   // backfill về đủ 55 tin nhưng account_id là account cũ nên không thấy gì).
-  database.prepare(
-    'UPDATE threads SET account_id = ? WHERE source_id = ? AND (account_id IS NULL OR account_id != ?)'
-  ).run(String(accountId), source.id, String(accountId));
+  if (accountId) {
+    database.prepare(
+      'UPDATE threads SET account_id = ? WHERE source_id = ? AND (account_id IS NULL OR account_id != ?)'
+    ).run(accountId, source.id, accountId);
+  }
 
   // Đảm bảo page đã đăng ký webhook (tin khách mới về được) — idempotent, gọi lại không hại
   const sub = await subscribePage(sourceId, database);
@@ -624,7 +629,7 @@ function processMessagingEvent(event, source, io, database) {
 
   const thread = ConversationRepository.upsertThread({
     id: threadId,
-    account_id: source.owner_account_id || pageId,
+    account_id: source.owner_account_id || null,
     source_id: source.id,
     external_thread_id: contactPsid,
     contact_name: null,
@@ -637,10 +642,13 @@ function processMessagingEvent(event, source, io, database) {
   }
   // Thread của source thuộc về chủ hiện hành — re-point nếu trước đây bị bind
   // vào account khác (account test cũ), ngược lại tin đổ vào account chết và
-  // inbox của account đang dùng không thấy gì.
-  database.prepare(
-    'UPDATE threads SET account_id = ? WHERE id = ? AND (account_id IS NULL OR account_id != ?)'
-  ).run(String(source.owner_account_id || pageId), thread.id, String(source.owner_account_id || pageId));
+  // inbox của account đang dùng không thấy gì. Page chưa có chủ thì giữ nguyên.
+  const webhookOwnerId = source.owner_account_id ? String(source.owner_account_id) : null;
+  if (webhookOwnerId) {
+    database.prepare(
+      'UPDATE threads SET account_id = ? WHERE id = ? AND (account_id IS NULL OR account_id != ?)'
+    ).run(webhookOwnerId, thread.id, webhookOwnerId);
+  }
 
   // ECHO = page gửi tin TRỰC TIẾP từ Messenger (không qua CRM) — phải ghi lại,
   // không bỏ qua. Tin gửi TỪ CRM đã có row pending: đối soát theo nội dung
@@ -752,7 +760,7 @@ function ensurePageThread(source, contactPsid, contactName, database) {
   }
   const thread = ConversationRepository.upsertThread({
     id: threadId,
-    account_id: source.owner_account_id || source.external_id,
+    account_id: source.owner_account_id || null,
     source_id: source.id,
     external_thread_id: contactPsid,
     contact_name: contactName || null,

@@ -58,11 +58,29 @@ class AccountService {
           UPDATE inbox_sources SET owner_account_id = ?
           WHERE owner_account_id = ? AND source_type = 'page_messenger'
         `).run(otherAccount.id, normalizedId).changes;
+        // Tin cá nhân không có source vẫn xóa theo account (hành vi cũ — FK giờ
+        // là SET NULL nên phải xóa tường minh, không thì thành thread mồ côi).
+        database.prepare(
+          'DELETE FROM threads WHERE account_id = ? AND source_id IS NULL'
+        ).run(normalizedId);
       } else {
         detachedPages = database.prepare(`
           UPDATE inbox_sources SET owner_account_id = NULL
           WHERE owner_account_id = ? AND source_type = 'page_messenger'
         `).run(normalizedId).changes;
+        // Account CUỐI CÙNG bị xóa: GIỮ hội thoại page bằng cách rời account (NULL)
+        // thay vì để FK xóa sạch lịch sử khách — account đăng nhập lại hoặc page
+        // được gắn chủ mới sẽ tự gắn lại threads này (báo lỗi 2026-10-07: đăng
+        // xuất rồi đăng nhập lại là mất data page, phải bấm Lấy hội thoại).
+        database.prepare(`
+          UPDATE threads SET account_id = NULL
+          WHERE account_id = ? AND source_id LIKE 'src_page_%'
+        `).run(normalizedId);
+        // Tin cá nhân vẫn xóa theo account (hành vi cũ — chỉ page là giữ lại).
+        database.prepare(`
+          DELETE FROM threads
+          WHERE account_id = ? AND (source_id IS NULL OR source_id LIKE 'src_personal_%')
+        `).run(normalizedId);
       }
 
       database.prepare(`

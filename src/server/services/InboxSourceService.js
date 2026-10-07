@@ -194,6 +194,9 @@ class InboxSourceService {
       // ingest chặt chẽ bị từ chối. Chỉ bind khi chưa có chủ.
       if (accountId && !existing.owner_account_id) {
         database.prepare('UPDATE inbox_sources SET owner_account_id = ? WHERE id = ?').run(String(accountId), sourceId);
+        // Hội thoại page từng rời account (chủ cũ xóa khi là account cuối) —
+        // gắn lại để inbox của account này hiển thị đủ lịch sử.
+        database.prepare('UPDATE threads SET account_id = ? WHERE source_id = ? AND account_id IS NULL').run(String(accountId), sourceId);
         console.log(`[PAGE_SOURCE] 🔗 Đã gắn owner ${accountId} cho source ${sourceId} (trước đây NULL).`);
       }
       if (pageName && this.isValidPageDisplayName(pageName) && (!existing.display_name || existing.display_name === 'Page ' + pageId || existing.display_name.startsWith('Page ') || !this.isValidPageDisplayName(existing.display_name))) {
