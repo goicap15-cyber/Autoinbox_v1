@@ -283,13 +283,20 @@ const reconcileOutgoingTextEchoes = (items = []) => {
   const outgoingTextKeys = new Set(items
     .filter((message) => isOutgoing(message) && isPlainText(message) && normalizedText(message))
     .map((message) => normalizedText(message).toLocaleLowerCase('vi-VN')));
+  const hasNativeMid = (message) => {
+    const mid = String(message?.fb_message_id || '');
+    return Boolean(mid) && !mid.startsWith('sidebar_preview_') && !mid.startsWith('dom_');
+  };
   const withoutIncomingEchoes = items.filter((message) => {
     if (isOutgoing(message) || !isPlainText(message)) return true;
+    // Tin khách mang MID THẬT là tin thật của Facebook: hai mid khác nhau =
+    // hai tin nhắn khác nhau, KỂ CẢ nội dung trùng (hoa/thường) với tin
+    // operator đã gửi ("alo" vs "Alo" - reproduce 2026-10-07 14:58: 2 tin
+    // "Alo" của khách nằm trong DB nhưng UI không render vì filter này
+    // coi trùng text là echo). Chỉ drop bản PROVISIONAL (sidebar_preview_/
+    // dom_) mirror lại tin mình gửi.
+    if (hasNativeMid(message)) return true;
     const contentKey = normalizedText(message).toLocaleLowerCase('vi-VN');
-    // Direction is authoritative: if this thread already has the exact text
-    // as an outgoing CRM row, an incoming copy is a Messenger history echo.
-    // Keep only the outgoing bubble. Real incoming messages with different
-    // content remain untouched.
     if (contentKey && outgoingTextKeys.has(contentKey)) return false;
     return true;
   });
@@ -307,7 +314,10 @@ const reconcileOutgoingTextEchoes = (items = []) => {
       const syntheticDomEcho = isSyntheticId(candidate) || isSyntheticId(message);
       if (!asymmetricClientEcho && !syntheticDomEcho) return false;
       const candidateAt = messageTime(candidate);
-      return !candidateAt || !messageAt || Math.abs(candidateAt - messageAt) <= 120000;
+      // Echo DOM của một lần gửi chỉ render lại trong vài GIÂY sau khi gửi.
+      // Window 120s cũ gộp nhầm 2 lần gửi "alo" CÁCH NHAU 47s của operator
+      // (reproduce 2026-10-07 14:57) - siết còn 20s.
+      return !candidateAt || !messageAt || Math.abs(candidateAt - messageAt) <= 20000;
     });
     if (matchIndex < 0) {
       result.push(message);
