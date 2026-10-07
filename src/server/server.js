@@ -7507,23 +7507,47 @@ function startServer() {
 
     // (4) Like/reaction emoji bị lưu thành mojibake: literal hỏng encoding
     // trong extractBubbleEmoji của các build trước trả về chuỗi latin1 thay
-    // vì emoji (reproduce 2026-10-07: like 👍 của khách thành "Ã°...").
-    // Giải mã ngược latin1 -> utf8, chỉ nhận khi kết quả là emoji thuần.
+    // vì emoji (reproduce 2026-10-07: like 👍 của khách thành "Ã°..."). Chuỗi
+    // trong DB bị mã hóa kép (cp1252 hai lớp: byte UTF-8 -> ký tự -> byte -> ký
+    // tự) nên giải mã ngược tối đa 3 vòng qua bảng cp1252, chỉ nhận khi kết
+    // quả là emoji thuần. VN text/'alo'/emoji thật không map được qua cp1252
+    // (ký tự > U+00FF không có byte cp1252) nên không bao giờ bị đụng tới.
+    const CP1252_HIGH = {
+      0x20AC: 0x80, 0x201A: 0x82, 0x0192: 0x83, 0x201E: 0x84, 0x2026: 0x85,
+      0x2020: 0x86, 0x2021: 0x87, 0x02C6: 0x88, 0x2030: 0x89, 0x0160: 0x8A,
+      0x2039: 0x8B, 0x0152: 0x8C, 0x017D: 0x8E, 0x2018: 0x91, 0x2019: 0x92,
+      0x201C: 0x93, 0x201D: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97,
+      0x02DC: 0x98, 0x2122: 0x99, 0x0161: 0x9A, 0x203A: 0x9B, 0x0153: 0x9C,
+      0x017E: 0x9E, 0x0178: 0x9F
+    };
+    const cp1252Bytes = (str) => {
+      const bytes = [];
+      for (const ch of String(str)) {
+        const cp = ch.codePointAt(0);
+        if (cp < 0x100) bytes.push(cp);
+        else if (CP1252_HIGH[cp] !== undefined) bytes.push(CP1252_HIGH[cp]);
+        else return null;
+      }
+      return Buffer.from(bytes);
+    };
+    const isPureEmoji = (s) => /^[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(s) && /\p{Extended_Pictographic}/u.test(s);
     const fixMojibakeEmoji = (content) => {
-      const trimmed = String(content || '').trim();
-      if (!trimmed) return null;
-      try {
-        const decoded = Buffer.from(trimmed, 'latin1').toString('utf8');
-        if (/^[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(decoded) && /\p{Extended_Pictographic}/u.test(decoded)) {
-          return decoded;
-        }
-      } catch (_) {}
+      let current = String(content || '').trim();
+      if (!current || current.codePointAt(0) <= 127) return null;
+      for (let round = 0; round < 3; round++) {
+        const bytes = cp1252Bytes(current);
+        if (!bytes) return null;
+        const decoded = bytes.toString('utf8');
+        if (isPureEmoji(decoded)) return decoded;
+        if (decoded === current) return null;
+        current = decoded;
+      }
       return null;
     };
     const mojibakeCandidates = db.prepare(`
       SELECT id, thread_id, content FROM messages
       WHERE (media_type IS NULL OR media_type = 'text')
-        AND LENGTH(content) <= 8
+        AND LENGTH(content) <= 16
         AND unicode(substr(trim(content), 1, 1)) > 127
     `).all();
     const setMsgContent = db.prepare('UPDATE messages SET content = ? WHERE id = ?');
