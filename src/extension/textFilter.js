@@ -198,6 +198,12 @@ function isBareVietnamMobileText(text) {
     // 1. Strip accessibility prefix (handling 'Tin nhắn do X gửi lúc Thứ Năm 18:00ch:', 'Tin nhắn do X gửi lúc 18:00:', etc.)
     text = text.replace(/^(?:Nhập,\s*)?Tin nhắn do [^\n]+? gửi lúc [^\n]*:\s*/i, '').trim();
     text = text.replace(/^(?:Nhập,\s*)?Message sent by [^\n]+? at [^\n]*:\s*/i, '').trim();
+    // Nhãn trợ năng dạng "Enter, Message sent 13:58 by Khang: 👍" - bubble like
+    // icon-only của Messenger E2EE để nguyên nhãn này trong DOM text, nếu
+    // không strip thì like lưu thành câu văn (reproduce 2026-10-07). Dùng
+    // .*: greedy tới colon CUỐI trước emoji (colon trong "13:58" không bị
+    // cắt nhầm); neo "Enter," để không đụng tin thật.
+    text = text.replace(/^Enter,\s*Message sent\b.*:\s*([\p{Extended_Pictographic}][\uFE0F\u200D]*)\s*$/iu, '$1').trim();
     text = text.replace(/^Nhập,\s*/i, '').trim();
     text = text.replace(/^[:\s]+/, '').trim();
 

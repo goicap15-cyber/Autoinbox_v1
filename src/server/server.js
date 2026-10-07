@@ -7560,6 +7560,26 @@ function startServer() {
       setThreadPreview.run(fixed, row.thread_id, row.content);
       fixedMojibakeCount++;
     }
+    // (4b) Like bị lưu nguyên nhãn trợ năng "Enter, Message sent 13:58 by
+    // Khang: 👍" (bubble icon-only E2EE để label trong DOM text - cùng
+    // reproduce 2026-10-07). Tách emoji cuối cùng làm nội dung.
+    const A11Y_LABEL_LIKE_RE = /^(?:Enter,\s*)?(?:Message sent|Tin nhắn)\b[^\n]*?:\s*(\p{Extended_Pictographic}[\uFE0F\u200D]*)\s*$/u;
+    const fixLabelLike = (content) => {
+      const match = String(content || '').trim().match(A11Y_LABEL_LIKE_RE);
+      return match ? match[1] : null;
+    };
+    const labelLikeCandidates = db.prepare(`
+      SELECT id, thread_id, content FROM messages
+      WHERE (media_type IS NULL OR media_type = 'text')
+        AND (content LIKE 'Enter,%' OR content LIKE 'Nhập,%')
+    `).all();
+    for (const row of labelLikeCandidates) {
+      const fixed = fixLabelLike(row.content);
+      if (!fixed || fixed === row.content) continue;
+      setMsgContent.run(fixed, row.id);
+      setThreadPreview.run(fixed, row.thread_id, row.content);
+      fixedMojibakeCount++;
+    }
 
     const totalJunk = deletedNoticeCount + dupThreadIds.size + sepThreadIds.size + fixedMojibakeCount;
     if (totalJunk > 0) {
