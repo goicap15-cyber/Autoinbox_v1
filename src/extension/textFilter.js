@@ -21,6 +21,11 @@ function isBareVietnamMobileText(text) {
     /Tin nhắn và cuộc gọi (?:đang )?được bảo mật/i,
     /bảo mật bằng tính năng mã hóa/i,
     /bảo mật đầu cuối/i,
+    // Notice E2EE thật trong tab hội thoại Messenger tiếng Anh - filter cũ chỉ
+    // có bản VN và mẫu "Personal chats..." (sai chữ) nên notice bị bắt nhầm
+    // thành tin của khách mỗi lần initial sweep mở thread (reproduce 2026-10-07).
+    /^Messages and calls are secured with end-to-end encryption\.?$/i,
+    /^Messages and calls are end-to-end encrypted\.?$/i,
 
     // Footer, Privacy & Links
     /^Tìm hiểu thêm$/i,

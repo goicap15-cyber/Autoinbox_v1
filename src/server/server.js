@@ -7324,9 +7324,10 @@ function startServer() {
   });
 
   // Bật poller đọc sự kiện webhook từ cầu nối hosting (webhook.php) cho Page API
-  pageApiService.startBridgePolling(io, db, 5000);
-  // Tự động đồng bộ hội thoại page 10s/lần — khách nhắn là tin tự về CRM
-  pageApiService.startPageConversationWatcher(io, db, 10000);
+  // 2.5s thay vì 5s — tin khách realtime về CRM trong ~3s sau khi webhook live
+  pageApiService.startBridgePolling(io, db, 2500);
+  // Tự động đồng bộ hội thoại page 6s/lần (fallback khi webhook chưa đăng ký)
+  pageApiService.startPageConversationWatcher(io, db, 6000);
   // Quy tắc: page chỉ tồn tại khi có token (do app tạo ra) — dọn page mồ côi
   pageApiService.removeUntokenedPages(db);
 
@@ -7359,10 +7360,72 @@ function startServer() {
 
     // Dọn dẹp tin nhắn rác từ các nút menu Meta Business Suite & chuẩn hóa lại thứ tự tin nhắn
     db.prepare(`
-      DELETE FROM messages 
+      DELETE FROM messages
       WHERE (content IN ('Meta Business Suite', 'Liên kết', 'Chỉnh sửa', 'Trợ giúp', 'Tùy chọn khác', 'Cài đặt') OR content LIKE '%Meta Business Suite%')
         AND (timestamp_ms IS NULL OR timestamp_ms <= 0)
     `).run();
+
+    // Dọn dẹp notice E2EE bị bắt nhầm thành tin nhắn của khách. Filter cũ thiếu
+    // pattern tiếng Anh "Messages and calls are secured with end-to-end
+    // encryption" - mỗi lần mở app, initial sweep mở từng hội thoại, notice
+    // E2EE (không có mid ổn định nên dedup không chặn) bị insert thành tin mới:
+    // is_unread=1 + unread_manual=1 sai hàng loạt, preview thành chữ bảo mật,
+    // timestamp trùng giờ mở app (reproduce 2026-10-07). Xóa notice, gỡ cờ
+    // chưa đọc cho thread không còn tin khách thật, dựng lại preview +
+    // last_activity từ tin còn lại.
+    const E2EE_NOTICE_PATTERNS = [
+      /^messages and calls are secured with end-to-end encryption\.?$/i,
+      /^messages and calls are end-to-end encrypted\.?$/i,
+      /^personal chats are secured with end-to-end encryption\.?$/i,
+      /^tin nhắn và cuộc gọi (?:đang )?được bảo mật.*$/i,
+      /^bảo mật (?:bằng tính năng mã hóa|đầu cuối).*$/i,
+    ];
+    const noticeCandidates = db.prepare(`
+      SELECT id, thread_id, content FROM messages
+      WHERE is_outgoing = 0
+        AND (
+          content LIKE 'Messages and calls are secured with end-to-end encryption%'
+          OR content LIKE 'Messages and calls are end-to-end encrypted%'
+          OR content LIKE 'Personal chats are secured with end-to-end encryption%'
+          OR content LIKE 'Tin nhắn và cuộc gọi %bảo mật%'
+          OR content LIKE 'bảo mật %'
+        )
+    `).all();
+    const deleteNotice = db.prepare('DELETE FROM messages WHERE id = ?');
+    const noticeThreadIds = new Set();
+    let deletedNoticeCount = 0;
+    for (const row of noticeCandidates) {
+      const noticeText = String(row.content || '').trim();
+      if (!E2EE_NOTICE_PATTERNS.some((pattern) => pattern.test(noticeText))) continue;
+      deleteNotice.run(row.id);
+      noticeThreadIds.add(row.thread_id);
+      deletedNoticeCount++;
+    }
+    for (const noticeThreadId of noticeThreadIds) {
+      const hasRealIncoming = db.prepare(`
+        SELECT 1 FROM messages
+        WHERE thread_id = ? AND is_outgoing = 0
+          AND fb_message_id NOT LIKE 'sidebar_preview_%'
+        LIMIT 1
+      `).get(noticeThreadId);
+      if (!hasRealIncoming) {
+        db.prepare('UPDATE threads SET is_unread = 0, unread_manual = 0 WHERE id = ?').run(noticeThreadId);
+      }
+      const remaining = db.prepare(`
+        SELECT content, COALESCE(timestamp_ms, 0) AS ts FROM messages
+        WHERE thread_id = ? AND fb_message_id NOT LIKE 'sidebar_preview_%'
+        ORDER BY COALESCE(timestamp_ms, 0) DESC, id DESC LIMIT 1
+      `).get(noticeThreadId);
+      if (remaining) {
+        db.prepare('UPDATE threads SET last_message = ?, last_activity = ? WHERE id = ?')
+          .run(remaining.content, new Date(remaining.ts).toISOString(), noticeThreadId);
+      } else {
+        db.prepare('UPDATE threads SET last_message = NULL WHERE id = ?').run(noticeThreadId);
+      }
+    }
+    if (deletedNoticeCount > 0) {
+      console.log(`[DB] 🧹 Đã xóa ${deletedNoticeCount} notice E2EE bị bắt nhầm thành tin nhắn (touch ${noticeThreadIds.size} thread)`);
+    }
 
     const activeThreads = db.prepare('SELECT DISTINCT thread_id FROM messages').all();
     for (const { thread_id } of activeThreads) {

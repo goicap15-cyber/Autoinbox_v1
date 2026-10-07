@@ -24,6 +24,11 @@ const SYSTEM_PATTERNS = [
   /Tin nhắn và cuộc gọi (?:đang )?được bảo mật/i,
   /bảo mật bằng tính năng mã hóa/i,
   /bảo mật đầu cuối/i,
+  // Notice E2EE thật trong tab hội thoại Messenger tiếng Anh - filter cũ chỉ
+  // có bản VN và mẫu "Personal chats..." (sai chữ) nên notice bị bắt nhầm
+  // thành tin của khách mỗi lần initial sweep mở thread (reproduce 2026-10-07).
+  /^Messages and calls are secured with end-to-end encryption\.?$/i,
+  /^Messages and calls are end-to-end encrypted\.?$/i,
 
   // Footer, Privacy & Links
   /^Tìm hiểu thêm$/i,
@@ -180,7 +185,11 @@ const SYSTEM_CONVERSATION_NOTICE_PATTERNS = [
   /^Cuộc gọi (?:thoại|video) đã kết thúc\.?$/i,
   /^.{1,60} đã rời khỏi nhóm\.?$/i,
   /^Bạn đã gửi \d+ (?:ảnh|video)\.?$/i,
-  /^.{1,60} đã gửi một nhãn dán\.?$/i
+  /^.{1,60} đã gửi một nhãn dán\.?$/i,
+  // Notice E2EE (bản tiếng Anh) - bộ heal sidebar (server.js SYNC_THREADS_RESULT)
+  // cần nhận ra nó để gỡ unread sai cho thread chưa có tin khách thật.
+  /^Messages and calls are secured with end-to-end encryption\.?$/i,
+  /^Messages and calls are end-to-end encrypted\.?$/i
 ];
 
 function isSystemConversationNotice(text) {
