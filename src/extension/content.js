@@ -1393,6 +1393,51 @@
   // tin nhắn nhân đôi.
   let lastThreadAttachAt = 0;
 
+  // ── Link profile của khách (hội thoại cá nhân) ────────────────────────────
+  // Thread id E2EE (/messages/e2ee/t/<id>) KHÔNG phải UID profile của khách,
+  // nên client không được phịa profile.php?id=<thread id> (link sai - chết,
+  // reproduce 2026-10-07). Chỉ gửi link khi tìm thấy anchor thật dạng
+  // profile.php?id=<digits> trong DOM (right rail → header → vùng chat);
+  // không đoán vanity link vì dễ trúng đường hệ thống.
+  const CONTACT_PROFILE_HREF_ID_RE = /[?&]id=(\d{6,18})/;
+  const sentThreadProfileUrls = new Map();
+  function extractCustomerProfileUrlFromDom() {
+    const scopes = [
+      document.querySelector('div[role="complementary"]'),
+      document.querySelector('div[role="main"] header'),
+      document.querySelector('div[role="main"]')
+    ].filter(Boolean);
+    for (const scope of scopes) {
+      for (const a of scope.querySelectorAll('a[href*="profile.php?id="]')) {
+        const match = (a.getAttribute('href') || '').match(CONTACT_PROFILE_HREF_ID_RE);
+        if (match) return `https://www.facebook.com/profile.php?id=${match[1]}`;
+      }
+    }
+    return null;
+  }
+  function maybeSendCustomerProfileUrl(thread_id) {
+    if (String(thread_id) !== String(currentBaselineThreadId)) return;
+    const profileUrl = extractCustomerProfileUrlFromDom();
+    if (!profileUrl || sentThreadProfileUrls.get(thread_id) === profileUrl) return;
+    sentThreadProfileUrls.set(thread_id, profileUrl);
+    if (sentThreadProfileUrls.size > 400) sentThreadProfileUrls.delete(sentThreadProfileUrls.keys().next().value);
+    try {
+      if (chrome?.runtime?.id) {
+        chrome.runtime.sendMessage({
+          type: 'UPDATE_THREAD_METADATA',
+          data: { thread_id, profile_url: profileUrl }
+        });
+        console.log(`[CRM] Đã gửi link profile của khách cho backend: ${profileUrl}`);
+      }
+    } catch (_) {}
+  }
+  function scheduleCustomerProfileUrlScan(thread_id) {
+    // DOM hydrate lệch nên quét vài nhịp; tìm thấy sớm thì các nhịp sau bỏ qua.
+    [800, 2500, 6000].forEach((delay) => setTimeout(() => {
+      try { maybeSendCustomerProfileUrl(thread_id); } catch (_) {}
+    }, delay));
+  }
+
   function makeDomMessageId(thread_id, parsed) {
     // Real Facebook native id (data-message-id/data-id/mid.*) is always the
     // most stable identifier when present. Facebook can place several
@@ -1603,6 +1648,7 @@
       // Do not replay that tail through realtime: history sync owns these rows.
       seedBaseline(thread_id);
       lastThreadAttachAt = Date.now();
+      scheduleCustomerProfileUrlScan(thread_id);
       observerPaused = false;
     }
 
@@ -1812,6 +1858,7 @@
     // Already-mounted history is seeded, not replayed as realtime.
     seedBaseline(initialThreadId);
     lastThreadAttachAt = Date.now();
+    scheduleCustomerProfileUrlScan(initialThreadId);
   }
   chatObserver.observe(document.body, {
     childList: true,

@@ -843,7 +843,11 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
           const explicitUrl = contactInfo?.profile_url;
           const isNumericUid = /^\d{10,18}$/.test(fbId);
           const fallbackUidUrl = isNumericUid ? 'https://www.facebook.com/profile.php?id=' + fbId : null;
-          const profileUrl = explicitUrl || (isPage ? fallbackUidUrl : (/^\d+$/.test(fbId) ? 'https://www.facebook.com/profile.php?id=' + fbId : null));
+          // Thread id E2EE cá nhân (/messages/e2ee/t/<id>) KHÔNG phải UID của
+          // khách - phịa profile.php?id=<thread id> cho link chết (reproduce
+          // 2026-10-07). Hội thoại cá nhân chỉ hiện nút khi extension đã gửi
+          // link profile thật (THREAD_METADATA_UPDATED -> contacts.profile_url).
+          const profileUrl = explicitUrl || (isPage ? fallbackUidUrl : null);
           if (!profileUrl) return null;
           return (
             <div className="mt-2 flex items-center justify-center gap-1.5 flex-wrap">

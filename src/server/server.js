@@ -2041,7 +2041,7 @@ wss.on('connection', (ws, req) => {
               INSERT INTO contacts (thread_id, name, profile_url)
               VALUES (?, ?, ?)
               ON CONFLICT(thread_id) DO UPDATE SET
-                profile_url = excluded.profile_url
+                profile_url = COALESCE(contacts.profile_url, excluded.profile_url)
             `).run(tidStr, updatedName || 'Khách hàng', updatedProfileUrl);
           }
 
