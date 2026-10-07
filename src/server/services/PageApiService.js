@@ -869,14 +869,26 @@ function startPageConversationWatcher(io, database = getDb(), intervalMs = 10000
         SELECT id, external_id, display_name, owner_account_id FROM inbox_sources
         WHERE source_type = 'page_messenger' AND status = 'ACTIVE' AND access_token_encrypted IS NOT NULL
       `).all();
-      for (const s of sources) {
-        try {
-          await watchPageConversations(s, io, database);
-        } catch (err) {
-          watcherLog('CHU KỲ LỖI page ' + s.external_id + ': ' + String(err && (err.stack || err.message || err)).slice(0, 400));
+      // Quét SONG SONG 5 page/lượt thay vì lần lượt: 18 page tuần tự mất
+      // ~12-25s/vòng -> tin khách về chậm tới nửa phút; song song còn ~4-6s
+      // (reproduce 2026-10-07 17:07: tin khách về sau ~12s chờ). Mỗi page vẫn
+      // try/catch riêng - một page lỗi không ảnh hưởng page khác.
+      const WATCHER_CONCURRENCY = 5;
+      let pageCursor = 0;
+      const watcherWorker = async () => {
+        while (pageCursor < sources.length) {
+          const s = sources[pageCursor++];
+          try {
+            await watchPageConversations(s, io, database);
+          } catch (err) {
+            watcherLog('CHU KỲ LỖI page ' + s.external_id + ': ' + String(err && (err.stack || err.message || err)).slice(0, 400));
+          }
+          await new Promise((r2) => setTimeout(r2, 120));
         }
-        await new Promise((r2) => setTimeout(r2, 120));
-      }
+      };
+      const workers = [];
+      for (let i = 0; i < Math.min(WATCHER_CONCURRENCY, sources.length); i++) workers.push(watcherWorker());
+      await Promise.all(workers);
     } catch (err) {
       watcherLog('CHU KỲ LỖI chung: ' + String(err && (err.stack || err.message || err)).slice(0, 400));
     }
