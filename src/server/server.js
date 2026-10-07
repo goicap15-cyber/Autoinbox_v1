@@ -7505,9 +7505,41 @@ function startServer() {
     }
     healTouchedThreads(sepThreadIds);
 
-    const totalJunk = deletedNoticeCount + dupThreadIds.size + sepThreadIds.size;
+    // (4) Like/reaction emoji bị lưu thành mojibake: literal hỏng encoding
+    // trong extractBubbleEmoji của các build trước trả về chuỗi latin1 thay
+    // vì emoji (reproduce 2026-10-07: like 👍 của khách thành "Ã°...").
+    // Giải mã ngược latin1 -> utf8, chỉ nhận khi kết quả là emoji thuần.
+    const fixMojibakeEmoji = (content) => {
+      const trimmed = String(content || '').trim();
+      if (!trimmed) return null;
+      try {
+        const decoded = Buffer.from(trimmed, 'latin1').toString('utf8');
+        if (/^[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(decoded) && /\p{Extended_Pictographic}/u.test(decoded)) {
+          return decoded;
+        }
+      } catch (_) {}
+      return null;
+    };
+    const mojibakeCandidates = db.prepare(`
+      SELECT id, thread_id, content FROM messages
+      WHERE (media_type IS NULL OR media_type = 'text')
+        AND LENGTH(content) <= 8
+        AND unicode(substr(trim(content), 1, 1)) > 127
+    `).all();
+    const setMsgContent = db.prepare('UPDATE messages SET content = ? WHERE id = ?');
+    const setThreadPreview = db.prepare('UPDATE threads SET last_message = ? WHERE id = ? AND last_message = ?');
+    let fixedMojibakeCount = 0;
+    for (const row of mojibakeCandidates) {
+      const fixed = fixMojibakeEmoji(row.content);
+      if (!fixed || fixed === row.content) continue;
+      setMsgContent.run(fixed, row.id);
+      setThreadPreview.run(fixed, row.thread_id, row.content);
+      fixedMojibakeCount++;
+    }
+
+    const totalJunk = deletedNoticeCount + dupThreadIds.size + sepThreadIds.size + fixedMojibakeCount;
     if (totalJunk > 0) {
-      console.log(`[DB] 🧹 Heal tin rác/nhân đôi: ${deletedNoticeCount} notice E2EE, ${dupThreadIds.size} bubble dom_ trùng mid thật, ${sepThreadIds.size} separator thời gian (${totalJunk} thread bị đụng tới)`);
+      console.log(`[DB] 🧹 Heal tin rác/nhân đôi: ${deletedNoticeCount} notice E2EE, ${dupThreadIds.size} bubble dom_ trùng mid thật, ${sepThreadIds.size} separator thời gian, ${fixedMojibakeCount} emoji mojibake (${totalJunk} vị trí)`);
     }
 
     const activeThreads = db.prepare('SELECT DISTINCT thread_id FROM messages').all();

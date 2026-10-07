@@ -857,7 +857,7 @@
     for (const element of candidates) {
       const exactReceivedLikeTitle = element.tagName === 'TITLE'
         && /^(?:k\u00fd hi\u1ec7u gi\u01a1 ng\u00f3n tay c\u00e1i|thumbs up symbol)$/i.test(String(element.textContent || '').trim());
-      if (exactReceivedLikeTitle) return 'Ã°Å¸â€˜Â';
+      if (exactReceivedLikeTitle) return '\u{1F44D}';
       // Controls for Like/reaction are UI, not message content.
       if (element.matches?.('[role="button"], button') || element.closest?.('[role="button"], button')) continue;
       // Messenger's Like glyph is currently an SVG whose human label lives in
@@ -875,7 +875,7 @@
       // Match the exact SVG <title> used by Messenger's received Like.
       // The hover control remains excluded above because it is a button.
       if (/(?:giơ ngón tay cái|thumbs?\s*up|\blike\b|thích|Ã°Å¸â€˜Â)/i.test(value)
-        && (element.matches?.('img, svg, title, [role="img"]') || element.closest?.('svg'))) return 'Ã°Å¸â€˜Â';    }
+        && (element.matches?.('img, svg, title, [role="img"]') || element.closest?.('svg'))) return '\u{1F44D}';    }
     // Fallback: textContent of container itself is a single pictographic character
     const directText = (container.textContent || '').trim();
     if (directText.length <= 4 && /^\p{Extended_Pictographic}+$/u.test(directText)) return directText;
