@@ -5988,10 +5988,17 @@ app.post('/api/page-api/import-tokens', async (req, res) => {
   const tokens = [...new Set(raw.split(/[\s,;]+/).map((t) => t.trim()).filter((t) => t.length >= 20))];
   if (!tokens.length) return res.status(400).json({ success: false, error: 'Chưa có token hợp lệ nào (token thường dài hơn 20 ký tự)' });
   if (tokens.length > 50) return res.status(400).json({ success: false, error: 'Tối đa 50 token mỗi lần dán' });
+  // Gán page import về account đang mở modal (nếu có) — nếu không, danh sách
+  // page lọc theo owner_account_id sẽ không hiện page mới lên (reproduce: ✅
+  // ADSUP Agency import xong nhưng list 0/0 vì owner NULL).
+  let importAccountId = req.body?.account_id ? String(req.body.account_id) : null;
+  if (importAccountId && !enterpriseAccess.canAccessAccount(req.user, importAccountId)) {
+    importAccountId = null;
+  }
   const mask = (t) => `${String(t).slice(0, 8)}…${String(t).slice(-6)}`;
 
   const importOnePage = (pageId, pageName, pageToken) => {
-    pageApiService.savePages(null, [{ id: String(pageId), name: String(pageName || 'Facebook Page'), token: pageToken }], db);
+    pageApiService.savePages(importAccountId, [{ id: String(pageId), name: String(pageName || 'Facebook Page'), token: pageToken }], db);
     const src = db.prepare("SELECT id FROM inbox_sources WHERE source_type = 'page_messenger' AND external_id = ?").get(String(pageId));
     if (src) {
       // Backfill chạy nền: kéo toàn bộ hội thoại cũ; tin mới do watcher 6s tự bắt

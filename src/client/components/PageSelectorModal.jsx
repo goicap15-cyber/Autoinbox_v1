@@ -91,7 +91,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       const res = await fetch('/api/page-api/import-tokens', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tokens: text }),
+        body: JSON.stringify({ tokens: text, account_id: accountId }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) throw new Error(data.error || `HTTP ${res.status}`);
