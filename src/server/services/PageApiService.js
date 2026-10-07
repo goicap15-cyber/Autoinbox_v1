@@ -422,7 +422,7 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
 
         for (const msg of (msgData.data || []).reverse()) {
           await enrichAttachmentUrls(msg, token, database);
-          const inserted = insertGraphMessage(thread.id, source, msg, database);
+          const inserted = insertGraphMessage(thread.id, source, msg, database, { markUnread: true });
           if (inserted != null) insertedNew++;
           else if (backfillMediaUrlOnExistingRow(msg, database)) insertedNew++;
         }
@@ -485,6 +485,13 @@ function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}
   );
 
   database.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP WHERE id = ?').run(threadId);
+
+  // Tin khách đến REALTIME (watcher/webhook): đánh dấu chưa đọc để hội thoại
+  // đẩy lên đầu danh sách (sort unread-first phía client). Backfill lịch sử
+  // KHÔNG đánh dấu - import page không làm unread hàng loạt.
+  if (opts.markUnread && !isOutgoing) {
+    database.prepare("UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?").run(threadId);
+  }
 
   // Webhook event có thể về TRỄ (poll 5s + latency Meta) — tin gửi trước đang
   // chờ xử lý làm tin khách bị append SAI VỊ TRÍ (dưới tin operator gửi sau).
@@ -832,7 +839,7 @@ async function watchPageConversations(source, io, database) {
       if (!thread) { failed++; watcherLog('conv ' + conv.id + ': ensurePageThread trả null (psid=' + psid + ')'); continue; }
       for (const msg of (msgData.data || []).reverse()) {
         await enrichAttachmentUrls(msg, token, database);
-        const id = insertGraphMessage(thread.id, source, msg, database);
+        const id = insertGraphMessage(thread.id, source, msg, database, { markUnread: true });
         if (id != null) insertedNew++;
         else if (backfillMediaUrlOnExistingRow(msg, database)) insertedNew++;
       }
