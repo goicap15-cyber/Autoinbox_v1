@@ -797,6 +797,62 @@
     ].join('|');
   }
 
+  // ===== Bản dùng thật của createBubbleFamilyTracker trong domMessageDedup.js
+  // ===== (mirror chỉ để test - PHẢI ĐỒNG BỘ khi sửa).
+  // bubble_idx là chỉ số VỊ TRÍ trong lần quét, không phải định danh bền vững:
+  // React hydrate lại article bằng lá dir="auto tạm thời, observer bắt node lá
+  // nhỏ hơn article, hay đợt re-read muộn hơn đều làm CÙNG MỘT bong bóng vật
+  // lý đổi chỉ số (mid.x <-> mid.x__bubble_1) giữa các lần quét. Hai id khác
+  // nhau khiến guard theo id ở dưới và UNIQUE(fb_message_id) của máy chủ cùng
+  // mù -> dòng tin ma nhân đôi (hội thoại "Yến", 08-10-2026). Định danh bền
+  // vững: family (mid gốc) + chữ ký + slot thứ tự chữ ký đó trong đợt quét.
+  function createBubbleFamilyTracker() {
+    const seen = new Map(); // "familyId\u0000sig\u0000slot" -> true
+    const MAX_SEEN = 20000;
+    function markSeen(key) {
+      if (!key || seen.has(key)) return;
+      seen.set(key, true);
+      if (seen.size > MAX_SEEN) seen.delete(seen.keys().next().value);
+    }
+    function resolveBatch(items) {
+      const results = items.map((item) => ({
+        id: String(item?.proposedId ?? ''),
+        key: null,
+        duplicate: false
+      }));
+      const byFamily = new Map();
+      items.forEach((item, index) => {
+        const nativeId = String(item?.nativeId || '');
+        if (!/^mid\./.test(nativeId)) return;
+        const familyId = nativeId.replace(/__bubble_\d+$/, '');
+        if (!byFamily.has(familyId)) byFamily.set(familyId, []);
+        byFamily.get(familyId).push({ index, sig: String(item?.sig ?? '') });
+      });
+      byFamily.forEach((observations, familyId) => {
+        const slots = new Map(); // sig -> slot kế tiếp
+        for (const obs of observations) {
+          const slot = slots.get(obs.sig) || 0;
+          slots.set(obs.sig, slot + 1);
+          const key = `${familyId}\u0000${obs.sig}\u0000${slot}`;
+          results[obs.index].key = key;
+          results[obs.index].duplicate = seen.has(key);
+        }
+      });
+      return results;
+    }
+    return { resolveBatch, markSeen };
+  }
+
+  const bubbleFamilyTracker = createBubbleFamilyTracker();
+
+  function toTrackerItems(thread_id, parsedList) {
+    return parsedList.map((parsed) => ({
+      nativeId: parsed.native_id,
+      proposedId: makeDomMessageId(thread_id, parsed),
+      sig: domObservationSignature(parsed)
+    }));
+  }
+
   function extractThreadIdFromUrl() {
     const match = document.location.href.match(/\/messages\/(?:e2ee\/)?t\/(\d+)/) || 
                   document.location.href.match(/\/messages\/t\/(\d+)/);
@@ -1597,13 +1653,20 @@
   }
   function seedBaseline(thread_id) {
     const existingRows = document.querySelectorAll('div[role="row"], div[role="article"], div[data-scope="messages_table"] div[dir="auto"]');
+    const baselineParsed = [];
     existingRows.forEach(row => {
       const parsedMessages = parseMessagesFromDOMNode(row);
       parsedMessages.forEach(p => {
         markDomOccurrence(p, row);
         lastObservedMessages.set(makeDomMessageId(thread_id, p), domObservationSignature(p));
+        baselineParsed.push(p);
       });
     });
+    // Baseline phải chốt cả slot family để lần quét sau đọc lại cùng bong bóng
+    // với bubble_idx trôi (hydrate trễ) không thành tin ma __bubble_N.
+    for (const verdict of bubbleFamilyTracker.resolveBatch(toTrackerItems(thread_id, baselineParsed))) {
+      bubbleFamilyTracker.markSeen(verdict.key);
+    }
     while (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
   }
 
@@ -1617,7 +1680,11 @@
     if (!main) return;
     const rows = Array.from(main.querySelectorAll('div[role=row], div[role=article]')).slice(-32);
     for (const row of rows) {
-      for (const parsed of parseMessagesFromDOMNode(row, true)) {
+      const rowParsed = parseMessagesFromDOMNode(row, true);
+      const rowVerdicts = bubbleFamilyTracker.resolveBatch(toTrackerItems(thread_id, rowParsed));
+      for (let parsedIdx = 0; parsedIdx < rowParsed.length; parsedIdx++) {
+        const parsed = rowParsed[parsedIdx];
+        const verdict = rowVerdicts[parsedIdx];
         if (!parsed.native_id) continue;
         // This recovery pass is incoming-only. Never forward an outgoing DOM bubble as CONTACT.
         // The previous hard-coded is_outgoing:false here manufactured the ghost text.
@@ -1629,11 +1696,13 @@
         // server tự khớp theo fb_message_id (reconcile spec 019). Check cũ
         // nuốt tin thật của khách trùng text (hoa/thường) với tin operator.
         markDomOccurrence(parsed, row);
-        const fbMessageId = makeDomMessageId(thread_id, parsed);
+        const fbMessageId = verdict.id;
         const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
         const observationSignature = domObservationSignature(parsed);
+        if (verdict.duplicate) continue;
         if (lastObservedMessages.get(fbMessageId) === observationSignature) continue;
         lastObservedMessages.set(fbMessageId, observationSignature);
+        bubbleFamilyTracker.markSeen(verdict.key);
 
         let timestampMs = null;
         const timeMatch = String(parsed.effective_label || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
@@ -1825,12 +1894,17 @@
 
       const contactAvatar = extractContactAvatarFromNode(node);
 
-      activeParsed.forEach((parsed) => {
+      // markDomOccurrence trước khi tính id: dom_ hash id có hậu tố _occ_N,
+      // idempotent theo anchor nên lần gọi trong vòng dưới vẫn như cũ.
+      activeParsed.forEach((parsed) => markDomOccurrence(parsed, node));
+      const batchVerdicts = bubbleFamilyTracker.resolveBatch(toTrackerItems(thread_id, activeParsed));
+      activeParsed.forEach((parsed, parsedIdx) => {
         // Every physical bubble gets its own identity. Content/time based
         // cooldowns incorrectly collapsed rapid messages such as c, c, c.
         markDomOccurrence(parsed, node);
 
-        const fbMessageId = makeDomMessageId(thread_id, parsed);
+        const verdict = batchVerdicts[parsedIdx];
+        const fbMessageId = verdict.id;
         const domPosition = getDomMessagePosition(node, thread_id, fbMessageId);
 
         // Skip only if THIS exact reading (same id, same direction) was already
@@ -1839,8 +1913,10 @@
         // reconcile/hysteresis path (spec 019) can settle it, rather than a new
         // duplicate row being created or the correction being silently dropped.
         const observationSignature = domObservationSignature(parsed);
+        if (verdict.duplicate) return;
         if (lastObservedMessages.get(fbMessageId) === observationSignature) return;
         lastObservedMessages.set(fbMessageId, observationSignature);
+        bubbleFamilyTracker.markSeen(verdict.key);
         if (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
 
         let tsMs = null;
@@ -1891,17 +1967,21 @@
               let toForward = parsed;
               let idToUse = fbMessageId;
               let positionToUse = domPosition;
+              let deferredVerdict = null;
               const reread = parseMessagesFromDOMNode(node, true)
                 .find((item) => !item.is_outgoing && String(item.content || '') === String(parsed.content || ''));
               if (reread && reread.native_id) {
                 markDomOccurrence(reread, node);
                 toForward = reread;
-                idToUse = makeDomMessageId(thread_id, reread);
+                deferredVerdict = bubbleFamilyTracker.resolveBatch(toTrackerItems(thread_id, [reread]))[0];
+                idToUse = deferredVerdict.id;
                 positionToUse = getDomMessagePosition(node, thread_id, idToUse);
               }
               const deferredSignature = domObservationSignature(toForward);
+              if (deferredVerdict && deferredVerdict.duplicate) return;
               if (lastObservedMessages.get(idToUse) !== deferredSignature) {
                 lastObservedMessages.set(idToUse, deferredSignature);
+                bubbleFamilyTracker.markSeen(deferredVerdict ? deferredVerdict.key : null);
                 forwardIncomingDomObservation(thread_id, toForward, idToUse, contactAvatar, positionToUse);
               }
             } catch (_) {
@@ -1929,7 +2009,11 @@
     if (!log) return;
     const rows = Array.from(log.querySelectorAll('div[role="row"], div[role="article"]')).slice(-24);
     for (const row of rows) {
-      for (const parsed of parseMessagesFromDOMNode(row, true)) {
+      const rowParsed = parseMessagesFromDOMNode(row, true);
+      const rowVerdicts = bubbleFamilyTracker.resolveBatch(toTrackerItems(thread_id, rowParsed));
+      for (let parsedIdx = 0; parsedIdx < rowParsed.length; parsedIdx++) {
+        const parsed = rowParsed[parsedIdx];
+        const verdict = rowVerdicts[parsedIdx];
         markDomOccurrence(parsed, row);
         // Tail reconciliation is hydration recovery, so require Facebook's
         // durable identity. Virtualized history without a native id can remount
@@ -1946,9 +2030,10 @@
         // The periodic tail pass then provides the confirmation that clears
         // the CRM pending spinner. Plain outgoing text remains on its existing path.
         if (parsed.is_outgoing && !isCallRow && !isMediaRow) continue;
-        const fbMessageId = makeDomMessageId(thread_id, parsed);
+        const fbMessageId = verdict.id;
         const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
         const observationSignature = domObservationSignature(parsed);
+        if (verdict.duplicate) continue;
         if (lastObservedMessages.get(fbMessageId) === observationSignature) continue;
         let tsMs = null;
         const timeMatch = String(parsed.effective_label || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
@@ -1964,6 +2049,7 @@
           tsMs = observed.getTime();
         }
         lastObservedMessages.set(fbMessageId, observationSignature);
+        bubbleFamilyTracker.markSeen(verdict.key);
         try {
           if (chrome?.runtime?.id) chrome.runtime.sendMessage({
             type: 'NEW_MESSAGE_FROM_FB',

@@ -7748,6 +7748,47 @@ function startServer() {
     }
     healTouchedThreads(orphanPreviewThreadIds);
 
+    // (2c) Phantom __bubble_N: bubble_idx chỉ là chỉ số VỊ TRÍ trong lần quét
+    // DOM - đợt hydrate trễ/lá dir=auto tạm thời đánh lại chỉ số của CÙNG MỘT
+    // bong bóng (mid.x <-> mid.x__bubble_1) thành hai id, UNIQUE(fb_message_id)
+    // không thấy -> hai row trùng text (reproduce 2026-10-08 hội thoại "Yến").
+    // Guard tracker phía extension chặn từ nay về sau; ở đây dọn row cũ.
+    // Chỉ xoá row CÓ HẬU TỐ (row base không bao giờ bị đụng). Like-group THẬT
+    // (FB gộp N like giống nhau vào 1 article) cũng trùng text+ts, nhưng được
+    // forward theo thứ tự leaf: base trước, __bubble_1 ngay sau -> nếu row base
+    // cùng nội dung nằm ngay trước (rowid chênh ≤ 4, chịu lẫn insert thread
+    // khác) thì giữ. Mọi cặp phantom quan sát được đều vi phạm mẫu này.
+    const bubbleRows = db.prepare(`
+      SELECT id, thread_id, fb_message_id, content, is_outgoing, media_type, media_url,
+        timestamp_ms FROM messages WHERE fb_message_id LIKE '%__bubble_%'
+    `).all();
+    const familyMembers = db.prepare(`
+      SELECT id, fb_message_id, content, is_outgoing, media_type, media_url, timestamp_ms
+      FROM messages WHERE thread_id = ? AND fb_message_id IN (${[...new Array(50)].map(() => '?').join(',')})
+    `);
+    const deletePhantomBubble = db.prepare('DELETE FROM messages WHERE id = ?');
+    const phantomThreadIds = new Set();
+    for (const m of bubbleRows) {
+      if ((m.media_type && m.media_type !== 'text') || m.media_url) continue;
+      if (!/__bubble_\d+$/.test(String(m.fb_message_id || ''))) continue;
+      const familyId = String(m.fb_message_id).replace(/__bubble_\d+$/, '');
+      const members = familyMembers.all(m.thread_id, familyId, m.fb_message_id,
+        ...[...new Array(48)].map(() => '?'));
+      const sameBubble = (twin) => twin.id !== m.id
+        && (!twin.media_type || twin.media_type === 'text') && !twin.media_url
+        && String(twin.content || '') === String(m.content || '')
+        && Number(twin.is_outgoing) === Number(m.is_outgoing)
+        && Math.abs(Number(twin.timestamp_ms || 0) - Number(m.timestamp_ms || 0)) <= 2000;
+      const isProtected = members.some((twin) => sameBubble(twin)
+        && !/__bubble_\d+$/.test(String(twin.fb_message_id || ''))
+        && twin.id < m.id && m.id - twin.id <= 4);
+      if (isProtected) continue;
+      if (!members.some(sameBubble)) continue;
+      deletePhantomBubble.run(m.id);
+      phantomThreadIds.add(m.thread_id);
+    }
+    healTouchedThreads(phantomThreadIds);
+
     // (3) Separator thời gian dạng tắt ("9w", "2d"...) bị bắt nhầm thành
     // bubble - chỉ tồn tại dưới id dom_ (separator không có data-message-id).
     const COMPACT_RELATIVE_RE = /^\d{1,2}\s?(?:s|sec|m|min|h|hr|d|w|mo|y)$/i;
