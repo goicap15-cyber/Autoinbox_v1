@@ -538,6 +538,18 @@ class ConversationRepository {
           }
         }
         let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+        // Multi-account: mid này đã thuộc thread của acc khác -> dùng bản sao
+        // mirror (mid::thread) thay vì UPSERT nhầm row của acc kia (mất tin
+        // hội thoại bên acc này, reproduce 2026-10-08 18:09).
+        {
+          const midOwnerRow = stableId
+            ? database.prepare('SELECT thread_id FROM messages WHERE fb_message_id = ?').get(stableId)
+            : null;
+          if (midOwnerRow && midOwnerRow.thread_id !== threadId) {
+            stableId = `${stableId}::${threadId}`;
+            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+          }
+        }
         let promotedSidebarPreview = false;
         // If the incoming message has an official fb_message_id but the DB only
         // knows a pending_client_* placeholder, upgrade the pending row in-place

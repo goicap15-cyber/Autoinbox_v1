@@ -41,3 +41,29 @@ test('offline-read retains persisted rows after database reopen', () => {
   db.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// Multi-account: hai acc cùng đăng nhập quan sát CÙNG một tin vật lý (cùng
+// mid) trong 2 hội thoại khác nhau. UNIQUE(fb_message_id) toàn cục từng nuốt
+// quan sát của thread sau -> hội thoại bên acc kia mất tin (reproduce
+// 2026-10-08 18:09 "alo"×3 giữa 2 acc, 2/3 mid chỉ còn ở thread acc khách).
+test('cross-thread mid collision stores a per-thread mirror instead of dropping', () => withDatabase((db) => {
+  db.prepare('INSERT INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-1', 'A', '/tmp/a');
+  db.prepare('INSERT INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-2', 'B', '/tmp/b');
+  ConversationRepository.upsertThread({ id: 'thread-1', account_id: 'acct-1', contact_name: 'Other side' }, db);
+  ConversationRepository.upsertThread({ id: 'thread-2', account_id: 'acct-2', contact_name: 'Other side' }, db);
+  ConversationRepository.saveMessagesTransaction('thread-1', [
+    { fb_message_id: 'mid.SAME', sender_id: 'acct-1', content: 'alo', timestamp_ms: 1000, is_outgoing: true }
+  ], db);
+  ConversationRepository.saveMessagesTransaction('thread-2', [
+    { fb_message_id: 'mid.SAME', sender_id: 'acct-1', content: 'alo', timestamp_ms: 1000, is_outgoing: false }
+  ], db);
+  const ids = db.prepare('SELECT thread_id, fb_message_id, is_outgoing FROM messages ORDER BY thread_id').all();
+  assert.deepEqual(ids, [
+    { thread_id: 'thread-1', fb_message_id: 'mid.SAME', is_outgoing: 1 },
+    { thread_id: 'thread-2', fb_message_id: 'mid.SAME::thread-2', is_outgoing: 0 }
+  ]);
+  ConversationRepository.saveMessagesTransaction('thread-2', [
+    { fb_message_id: 'mid.SAME', sender_id: 'acct-1', content: 'alo', timestamp_ms: 1000, is_outgoing: false }
+  ], db);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM messages').get().count, 2);
+}));

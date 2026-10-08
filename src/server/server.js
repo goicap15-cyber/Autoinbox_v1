@@ -2921,12 +2921,39 @@ wss.on('connection', (ws, req) => {
               realtimeSequence = targetSequence;
             }
           }
-          const insertMsgResult = db.prepare(`
+          let insertMsgResult = db.prepare(`
             INSERT OR IGNORE INTO messages
               (thread_id, fb_message_id, sender_id, content, media_type, media_url, local_media_path, is_outgoing, direction_status, sequence_order, timestamp_ms, timestamp_source, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(m.thread_id, stableMessageId, safeSenderId, m.content,
             m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt);
+
+          // Multi-account: cùng một tin vật lý được mọi tab acc đăng nhập quan
+          // sát với CÙNG mid, nhưng UNIQUE(fb_message_id) toàn cục chỉ cho một
+          // thread giữ row — tab forward sau bị IGNORE câm và hội thoại bên
+          // acc kia mất tin (reproduce 2026-10-08 18:09: 2/3 "alo" giữa 2 acc
+          // chỉ còn ở thread acc khách). Bản sao cho thread này dùng id suy
+          // dẫn deterministic (mid::thread) để lần quét sau vẫn khớp row cũ.
+          if (insertMsgResult.changes === 0) {
+            const midOwnerRow = db.prepare('SELECT thread_id FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+            if (midOwnerRow && midOwnerRow.thread_id !== m.thread_id) {
+              const mirrorMessageId = `${stableMessageId}::${m.thread_id}`;
+              insertMsgResult = db.prepare(`
+                INSERT OR IGNORE INTO messages
+                  (thread_id, fb_message_id, sender_id, content, media_type, media_url, local_media_path, is_outgoing, direction_status, sequence_order, timestamp_ms, timestamp_source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).run(m.thread_id, mirrorMessageId, safeSenderId, m.content,
+                m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt);
+              stableMessageId = mirrorMessageId;
+              if (insertMsgResult.changes > 0) {
+                syncDebug('WS_MIRROR_CROSS_ACCOUNT', {
+                  thread: m.thread_id,
+                  owner_thread: midOwnerRow.thread_id,
+                  fb_message_id: String(mirrorMessageId).substring(0, 70)
+                });
+              }
+            }
+          }
 
           let wasNewMessage = insertMsgResult.changes > 0;
           if (wasNewMessage && !String(stableMessageId).endsWith('_media')) {
