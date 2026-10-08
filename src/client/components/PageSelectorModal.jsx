@@ -367,7 +367,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4 backdrop-blur-sm" onClick={handleBackdrop}>
       <div
-        className="w-full max-w-xl bg-[var(--color-bg-panel,#0f1b2b)] border border-[var(--color-border,#284057)] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh] animate-in fade-in zoom-in-95 duration-150"
+        className="w-full max-w-3xl bg-[var(--color-bg-panel,#0f1b2b)] border border-[var(--color-border,#284057)] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[88vh] animate-in fade-in zoom-in-95 duration-150"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -730,7 +730,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
 
                 <div className="min-w-0 flex-1">
                   <span className="text-xs font-bold text-[var(--color-text-primary,#f8fafc)] truncate block">{p.name}</span>
-                  <div className="flex items-center gap-2 mt-0.5 text-[10px] text-[var(--color-text-muted,#7f95aa)]">
+                  <div className="flex items-center flex-wrap gap-x-2.5 gap-y-1 mt-1 text-[10px] text-[var(--color-text-muted,#7f95aa)]">
                     <span className="font-mono">ID: {p.page_id}</span>
                     {p.token && (
                       <button
