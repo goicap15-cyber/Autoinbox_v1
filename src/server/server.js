@@ -2609,8 +2609,9 @@ wss.on('connection', (ws, req) => {
               }
             }
             if (isOutgoing) {
-              // Operator trả lời = đã đọc hội thoại: gỡ mọi cờ đánh tay.
-              db.prepare('UPDATE threads SET is_unread = 0, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
+              // Operator trả lời = đã đọc hội thoại: ghim -1 để chấm xanh
+              // còn treo ở Messenger không đánh dấu lại "chưa đọc" khi sync.
+              db.prepare('UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?').run(String(canonicalThreadId));
             } else {
               // Tin mới của khách: bật chưa đọc + GẮN CỜ DÍNH, vì tab Facebook
               // có thể đang đậu đúng thread này nên Facebook tự báo "đã đọc"
@@ -4640,10 +4641,25 @@ wss.on('connection', (ws, req) => {
               const atMs = Number(pm?.timestamp_ms) || Date.parse(pm?.created_at || '') || 0;
               return atMs >= Date.now() - 10 * 60 * 1000;
             });
+            // Tin khách MỚI HƠN tin trả lời cuối của operator mới đủ điều kiện
+            // đè cờ ghim -1: passive batch relay lại tin cũ đã trả lời (chỉ
+            // trong cửa sổ 10') không được bật lại chưa đọc.
+            const lastOutgoingTsRow = db.prepare('SELECT MAX(COALESCE(timestamp_ms, 0)) AS ts FROM messages WHERE thread_id = ? AND is_outgoing = 1').get(canonicalThreadId);
+            const lastOutgoingTs = Number(lastOutgoingTsRow?.ts || 0);
+            const hasNewerIncomingPage = !lastOutgoingTs ? hasRecentIncomingPage : (Array.isArray(envelope.messages) && envelope.messages.some((pm) => {
+              if (pm.is_outgoing === true || pm.is_outgoing === 1) return false;
+              const atMs = Number(pm?.timestamp_ms) || Date.parse(pm?.created_at || '') || 0;
+              return atMs > lastOutgoingTs;
+            }));
             let pageUnreadState;
             if (pageManual === 1) pageUnreadState = 1;
-            else if (pageManual === -1) pageUnreadState = 0;
+            else if (pageManual === -1 && !hasNewerIncomingPage) pageUnreadState = 0;
             else pageUnreadState = hasRecentIncomingPage ? 1 : undefined;
+            // Tin khách mới hơn lời trả lời cuối đè cờ ghim -1: mở lại cơ chế
+            // tự động, nếu không mọi tin sau của khách luôn ẩn chưa đọc.
+            if (pageManual === -1 && hasNewerIncomingPage) {
+              db.prepare('UPDATE threads SET unread_manual = 0 WHERE id = ?').run(canonicalThreadId);
+            }
             ConversationRepository.upsertThread({
               id: canonicalThreadId,
               external_thread_id: pageThreadId,
@@ -6619,6 +6635,11 @@ app.post('/api/threads/:id/unread', (req, res) => {
       // unread_manual 3 trạng thái: 1 = đánh tay CHƯA ĐỌC, -1 = đánh tay ĐÃ ĐỌC
       // (dính cả hai chiều, sync sidebar không được đè), 0 = tự động theo FB.
       db.prepare('UPDATE threads SET is_unread = ?, unread_manual = ? WHERE id = ?').run(next, next ? 1 : -1, id);
+    } else if (desired !== null && next === 0) {
+      // Mở hội thoại khi DB đã là đã-đọc: vẫn ghim -1, không thì cờ manual=0
+      // giữ nguyên và sync sau quét lại chấm xanh còn treo trên Messenger
+      // sẽ nổi chưa đọc trở lại (đúng triệu chứng user báo 2026-10-08).
+      db.prepare('UPDATE threads SET unread_manual = -1 WHERE id = ?').run(id);
     }
     io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(id), is_unread: next });
     res.json({ success: true, id: String(id), is_unread: next });
