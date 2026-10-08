@@ -7554,8 +7554,9 @@ function startServer() {
   // Re-subscribe webhook fields mọi page có token (thêm field mới như
   // messaging_referrals thì page cũ phải re-subscribe mới nhận event).
   pageApiService.resubscribeAllPages(db).catch(() => {});
-  // Quy tắc: page chỉ tồn tại khi có token (do app tạo ra) — dọn page mồ côi
-  pageApiService.removeUntokenedPages(db);
+  // BỎ dọn page chưa có token lúc khởi động (2026-10-08): page được "Đồng bộ"
+  // phát hiện mà chưa tạo token là trạng thái hợp lệ — xóa là mất page khỏi
+  // popup sau mỗi lần tắt/mở app. App bị gỡ đã có removeAccountPages dọn sạch.
 
     // Dọn dẹp các tên rác hệ thống (ví dụ: "Tất cả tin nhắn", "Hộp thư đến", "Tin nhắn") đã lưu vào CSDL trước đây
   try {

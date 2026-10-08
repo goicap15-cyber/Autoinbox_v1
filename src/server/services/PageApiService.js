@@ -304,33 +304,6 @@ function removeAccountPages(accountId, database = getDb()) {
   return { sources: srcs.length, threads };
 }
 
-// Quy tắc: page CHỈ tồn tại khi được app tạo ra (có Page Access Token).
-// Page chưa có token (quét/Dồng bộ để lộ lại, app đã gỡ...) → xóa luôn kèm
-// hội thoại. Chạy lúc server khởi động + sau khi gỡ app.
-// NGOẠI LỆ: page ĐANG CÓ HỘI THOẠI (khách đã nhắn thật — webhook tự hồi phục
-// tạo ra) thì GIỮ, xóa là mất lịch sử khách (báo lỗi 2026-10-06).
-function removeUntokenedPages(database = getDb()) {
-  const srcs = database.prepare(`
-    SELECT s.id FROM inbox_sources s
-    WHERE s.source_type = 'page_messenger' AND s.access_token_encrypted IS NULL
-      AND NOT EXISTS (SELECT 1 FROM threads t WHERE t.source_id = s.id)
-  `).all();
-  let threads = 0;
-  database.transaction(() => {
-    for (const s of srcs) {
-      threads += database.prepare('DELETE FROM threads WHERE source_id = ?').run(s.id).changes;
-    }
-    database.prepare(`
-      DELETE FROM inbox_sources WHERE source_type = 'page_messenger' AND access_token_encrypted IS NULL
-        AND NOT EXISTS (SELECT 1 FROM threads t WHERE t.source_id = inbox_sources.id)
-    `).run();
-  })();
-  if (srcs.length) {
-    console.log(`[PageApi] 🧹 Dọn ${srcs.length} page trống chưa có token (+ ${threads} hội thoại) — page đang có khách chat thì giữ lại.`);
-  }
-  return { sources: srcs.length, threads };
-}
-
 // Danh sách page id ĐÃ CÓ trong hệ thống (mọi owner, mọi trạng thái) —
 // dùng bởi "Đồng bộ page mới": chỉ thêm page chưa thấy, bỏ qua page đã cào.
 function knownPageIds(database = getDb()) {
@@ -1015,7 +988,6 @@ module.exports = {
   resubscribeAllPages,
   clearPageTokens,
   removeAccountPages,
-  removeUntokenedPages,
   knownPageIds,
   backfillConversations,
   handleWebhookBody,
