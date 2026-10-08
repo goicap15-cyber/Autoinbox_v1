@@ -163,6 +163,14 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
     return () => clearInterval(t);
   }, [job?.sync_id, job?.status]);
 
+  // Thông báo thành công tự tắt sau 8s (yêu cầu 2026-10-08: hiện xong đừng
+  // đứng mãi trong modal) — muốn tắt sớm thì bấm dấu X trên banner.
+  useEffect(() => {
+    if (!successMsg) return;
+    const t = setTimeout(() => setSuccessMsg(''), 8000);
+    return () => clearTimeout(t);
+  }, [successMsg]);
+
   // Bấm "Tạo app & Webhook" → mở popup khai báo tên + email
   const handleCreateApp = () => {
     setErrorMsg(''); setSuccessMsg('');
@@ -647,13 +655,21 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
         {errorMsg && (
           <div className="mx-5 mt-3 p-2.5 bg-red-500/10 border border-red-500/20 rounded-xl text-xs text-red-400 flex items-center gap-2">
             <AlertCircle size={15} className="shrink-0" />
-            <span>{errorMsg}</span>
+            <span className="flex-1 min-w-0">{errorMsg}</span>
+            <button onClick={() => setErrorMsg('')} title="Tắt thông báo"
+              className="shrink-0 p-1 rounded-lg text-red-400/70 hover:text-red-300 hover:bg-red-500/10 transition-colors">
+              <X size={14} />
+            </button>
           </div>
         )}
         {successMsg && (
           <div className="mx-5 mt-3 p-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-xs text-emerald-400 flex items-center gap-2">
             <CheckCircle2 size={15} className="shrink-0" />
-            <span>{successMsg}</span>
+            <span className="flex-1 min-w-0">{successMsg}</span>
+            <button onClick={() => setSuccessMsg('')} title="Tắt thông báo"
+              className="shrink-0 p-1 rounded-lg text-emerald-400/70 hover:text-emerald-300 hover:bg-emerald-500/10 transition-colors">
+              <X size={14} />
+            </button>
           </div>
         )}
 
