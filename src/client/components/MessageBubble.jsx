@@ -144,6 +144,16 @@ export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenBy
     /^\s*(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?(?:\d{1,2}(?::\d{2})?(?:\s*(?:ch|sa|am|pm))?\s+)?\d{1,2}\s+(?:Tháng|thg)\s+\d{1,2}(?:,?\s*\d{4})?\s*$/i.test(String(content || '').trim())
   );
   const visibleContent = (hasMedia && (isOutgoing || isMediaPlaceholderText)) ? '' : content;
+  // 2026-10-08: tin "X đã trả lời một quảng cáo." kéo từ Graph watcher chỉ là
+  // text trơ — link bài quảng cáo bắt từ webhook messaging_referrals lúc mở
+  // hội thoại (lưu trên thread). Có link thì render card bấm được thay text.
+  const isAdNotice = !isOutgoing && !hasMedia && (
+    /^\s*\S.{0,120}\sđã trả lời (?:một )?quảng cáo\.?\s*$/i.test(String(visibleContent || '').trim()) ||
+    /^\s*\S.{0,120}?\sreplied to (?:an |your )?ad\b\.?\s*$/i.test(String(visibleContent || '').trim())
+  );
+  const threadAdLink = isAdNotice ? activeThread?.ad_post_link : null;
+  const threadAdTitle = isAdNotice ? activeThread?.ad_title : null;
+  const threadAdPhoto = isAdNotice ? activeThread?.ad_photo_url : null;
   const isLikeText = (content?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(content?.trim() || '')) ||
                      (visibleContent?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(visibleContent?.trim() || ''));
   const isQuickLike = !isCallMessage && !isUnsent && !hasMedia && isLikeText;
@@ -251,7 +261,34 @@ export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenBy
                     </a>
                   )}
                   <MediaViewer mediaType={mediaType} mediaUrl={mediaUrl} localMediaPath={msg.local_media_path} />
-                  {visibleContent && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words select-text ${hasMedia ? 'mt-1.5' : ''}`}>{renderRichContent(visibleContent)}</p>}
+                  {isAdNotice && threadAdLink ? (
+                    <a
+                      href={threadAdLink}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={threadAdLink}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        try { window.open(threadAdLink, '_blank'); } catch (_) {}
+                      }}
+                      className="block rounded-xl overflow-hidden border border-black/10 bg-black/5 dark:bg-white/5 hover:opacity-90 transition-opacity cursor-pointer"
+                    >
+                      {threadAdPhoto && (
+                        <img
+                          src={threadAdPhoto}
+                          alt=""
+                          className="w-full max-h-56 object-cover"
+                          onError={(ev) => { ev.currentTarget.style.display = 'none'; }}
+                        />
+                      )}
+                      <div className="px-2.5 py-1.5">
+                        <div className="text-[11px] font-semibold leading-snug line-clamp-2">{threadAdTitle || 'Bài viết quảng cáo'}</div>
+                        <div className="text-[10px] opacity-60 truncate mt-0.5">facebook.com</div>
+                      </div>
+                    </a>
+                  ) : (
+                    visibleContent && <p className={`text-inherit leading-relaxed whitespace-pre-wrap break-words select-text ${hasMedia ? 'mt-1.5' : ''}`}>{renderRichContent(visibleContent)}</p>
+                  )}
                 </>
               )}
             </>

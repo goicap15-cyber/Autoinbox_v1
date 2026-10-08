@@ -1305,6 +1305,24 @@ const migrations = [
         db.pragma('legacy_alter_table = OFF');
       }
     }
+  },
+  {
+    // 2026-10-08: khách nhắn từ quảng cáo — webhook messaging_referrals cho
+    // post_id/ad_id của bài quảng cáo; lưu link + title + ảnh lên THREAD để
+    // bubble "X đã trả lời một quảng cáo." (tin text từ Graph, không có referral)
+    // render thành card link bài viết thay vì text trơ.
+    version: 20261008001,
+    name: 'add_threads_ad_referral',
+    up: (db) => {
+      for (const col of ['ad_post_link TEXT', 'ad_title TEXT', 'ad_photo_url TEXT']) {
+        try {
+          db.exec(`ALTER TABLE threads ADD COLUMN ${col};`);
+        } catch (e) {
+          console.log(`[DB] Migration v20261008001: threads.${col.split(' ')[0]} already exists, skipped.`);
+        }
+      }
+      console.log('[DB] Migration v20261008001: Added threads.ad_post_link/ad_title/ad_photo_url.');
+    }
   }
 ];
 

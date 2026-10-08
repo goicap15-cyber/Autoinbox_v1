@@ -2442,7 +2442,7 @@ async function graphSubscribePage(pageId, token) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        subscribed_fields: 'messages,messaging_postbacks,message_reads,message_deliveries,message_reactions',
+        subscribed_fields: 'messages,messaging_postbacks,message_reads,message_deliveries,message_reactions,messaging_referrals',
         access_token: token,
       }),
     });

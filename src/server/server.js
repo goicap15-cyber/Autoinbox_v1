@@ -7540,6 +7540,9 @@ function startServer() {
   // Graph tăng gấp đôi — nếu Meta báo rate limit (watcher log "CHU KỲ LỖI")
   // thì trả về 6000. Page có webhook vẫn đi cầu nối 2.5s nhanh hơn.
   pageApiService.startPageConversationWatcher(io, db, 3000);
+  // Re-subscribe webhook fields mọi page có token (thêm field mới như
+  // messaging_referrals thì page cũ phải re-subscribe mới nhận event).
+  pageApiService.resubscribeAllPages(db).catch(() => {});
   // Quy tắc: page chỉ tồn tại khi có token (do app tạo ra) — dọn page mồ côi
   pageApiService.removeUntokenedPages(db);
 

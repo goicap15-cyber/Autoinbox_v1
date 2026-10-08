@@ -250,7 +250,10 @@ function bareThreadId(threadId) {
 // ── Đăng ký page vào webhook của app (bằng Page token qua Graph) ──
 // Đây là bước QUYẾT ĐỊNH để Meta đẩy tin khách về webhook — thiếu bước này thì
 // gửi tin được nhưng khách nhắn không bao giờ về CRM (báo lỗi 2026-10-05).
-const PAGE_SUBSCRIBE_FIELDS = ['messages', 'messaging_postbacks', 'message_reads', 'message_deliveries', 'message_reactions'];
+// messaging_referrals: Meta đẩy event referral khi khách bấm quảng cáo mở hội
+// thoại — payload có post_id/ad_id để dựng link bài viết quảng cáo hiển thị
+// thay cho text "X đã trả lời một quảng cáo." (yêu cầu 2026-10-08).
+const PAGE_SUBSCRIBE_FIELDS = ['messages', 'messaging_postbacks', 'message_reads', 'message_deliveries', 'message_reactions', 'messaging_referrals'];
 
 async function subscribePage(sourceId, database = getDb()) {
   const source = InboxSourceService.getSourceById(sourceId, database);
@@ -609,6 +612,7 @@ function handleWebhookBody(body, io, database = getDb()) {
     }
     for (const event of (entry.messaging || [])) {
       try {
+        applyAdReferral(event, source, io, database);
         const out = processMessagingEvent(event, source, io, database);
         if (out) result.processed++;
       } catch (err) {
@@ -618,6 +622,76 @@ function handleWebhookBody(body, io, database = getDb()) {
     }
   }
   return result;
+}
+
+// ── Referral quảng cáo (messaging_referrals) ──
+// Khách bấm quảng cáo mở hội thoại: Meta đẩy event referral (dạng referral-only,
+// postback, hoặc message kèm referral). Lưu link bài viết quảng cáo lên THREAD —
+// tin "X đã trả lời một quảng cáo." kéo về từ Graph watcher chỉ là text trơ
+// không có thông tin quảng cáo, nên link phải bắt từ webhook lúc mở hội thoại.
+// Chạy TRƯỚC processMessagingEvent vì event referral-only không có message.
+function buildAdPostLink(referral, pageId) {
+  if (!referral) return null;
+  const ctx = referral.ads_context_data || {};
+  const postId = String(ctx.post_id || referral.post_id || '').trim();
+  const adId = String(referral.ad_id || ctx.ad_id || '').trim();
+  if (postId) {
+    if (postId.includes('_')) {
+      const [owner, story] = postId.split('_');
+      return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(story)}&id=${encodeURIComponent(owner)}`;
+    }
+    if (pageId) {
+      return `https://www.facebook.com/permalink.php?story_fbid=${encodeURIComponent(postId)}&id=${encodeURIComponent(String(pageId))}`;
+    }
+  }
+  if (adId) return `https://www.facebook.com/ads/library/?id=${encodeURIComponent(adId)}`;
+  return null;
+}
+
+function applyAdReferral(event, source, io, database) {
+  try {
+    const referral = event.referral || event.postback?.referral || event.message?.referral || null;
+    if (!referral || String(referral.source || '').toUpperCase() !== 'ADS') return false;
+    const contactPsid = String(event.sender?.id || '');
+    if (!contactPsid) return false;
+    const ctx = referral.ads_context_data || {};
+    const link = buildAdPostLink(referral, source.external_id);
+    const title = String(ctx.ad_title || '').trim();
+    const photo = String(ctx.photo_url || ctx.picture || '').trim();
+    if (!link && !title && !photo) return false;
+    const thread = ensurePageThread(source, contactPsid, null, database);
+    if (!thread) return false;
+    database.prepare(`
+      UPDATE threads SET
+        ad_post_link = COALESCE(NULLIF(?, ''), ad_post_link),
+        ad_title = COALESCE(NULLIF(?, ''), ad_title),
+        ad_photo_url = COALESCE(NULLIF(?, ''), ad_photo_url)
+      WHERE id = ?
+    `).run(link || '', title, photo, thread.id);
+    console.log('[PageApi] 📣 Referral quảng cáo: thread=' + thread.id + ' link=' + (link || '(không rõ)'));
+    if (io) io.emit('THREAD_LIST_UPDATED', { thread_id: thread.id, account_id: thread.account_id });
+    return true;
+  } catch (err) {
+    console.warn('[PageApi] Lỗi xử lý referral quảng cáo: ' + (err && err.message));
+    return false;
+  }
+}
+
+// Đăng ký LẠI webhook fields cho mọi page có token khi server khởi động —
+// thêm field mới (messaging_referrals) thì page cũ phải re-subscribe mới nhận
+// event; page mới gắn sau này đã được subscribePage trong backfill lo.
+async function resubscribeAllPages(database = getDb()) {
+  const sources = database.prepare(`
+    SELECT id FROM inbox_sources
+    WHERE source_type = 'page_messenger' AND status = 'ACTIVE' AND access_token_encrypted IS NOT NULL
+  `).all();
+  let ok = 0;
+  for (const s of sources) {
+    const r = await subscribePage(s.id, database).catch(() => ({ ok: false }));
+    if (r && r.ok) ok++;
+  }
+  console.log(`[PageApi] 📡 Re-subscribe webhook fields: ${ok}/${sources.length} page OK.`);
+  return { total: sources.length, ok };
 }
 
 function processMessagingEvent(event, source, io, database) {
@@ -938,12 +1012,15 @@ module.exports = {
   savePages,
   sendPageMessage,
   subscribePage,
+  resubscribeAllPages,
   clearPageTokens,
   removeAccountPages,
   removeUntokenedPages,
   knownPageIds,
   backfillConversations,
   handleWebhookBody,
+  buildAdPostLink,
+  applyAdReferral,
   startBridgePolling,
   startPageConversationWatcher,
   watchPageConversations,
