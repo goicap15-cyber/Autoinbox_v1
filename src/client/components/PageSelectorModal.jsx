@@ -13,6 +13,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
   const accountId = String(account?.id || '');
   const [pages, setPages] = useState([]);
   const [app, setApp] = useState(null);
+  const [apps, setApps] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIds, setSelectedIds] = useState(new Set());
@@ -39,8 +40,9 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
   const [createName, setCreateName] = useState('CRM Page');
   const [createEmail, setCreateEmail] = useState('');
 
-  // Xóa app Facebook (kèm dọn token page của account)
-  const [appToDelete, setAppToDelete] = useState(false);
+  // Xóa app Facebook (kèm dọn token page của account) — lưu cả OBJECT app đang
+  // chọn xóa vì giờ popup liệt kê ĐỦ các app, không chỉ app mới nhất
+  const [appToDelete, setAppToDelete] = useState(null);
   const [deletingApp, setDeletingApp] = useState(false);
 
   // Token tools: copy token từng page + dán token NGOÀI để nhận diện & đồng bộ
@@ -60,6 +62,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       if (res.ok && data.success) {
         setPages(data.pages || []);
         setApp(data.app || null);
+        setApps(data.apps || (data.app ? [data.app] : []));
         const pre = new Set();
         (data.pages || []).forEach((p) => { if (p.has_token) pre.add(String(p.page_id)); });
         setSelectedIds(pre);
@@ -255,11 +258,11 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       const res = await fetch(`/api/page-api/accounts/${encodeURIComponent(accountId)}/delete-app`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ appId: app?.app_id })
+        body: JSON.stringify({ appId: appToDelete?.app_id || app?.app_id })
       });
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Không thể bắt đầu xóa app');
-      setAppToDelete(false);
+      setAppToDelete(null);
       setJob({ sync_id: data.sync_id, status: 'starting', message: 'Đang mở Chrome để gỡ ứng dụng…' });
     } catch (err) {
       setErrorMsg(err.message);
@@ -654,20 +657,32 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
           </div>
         )}
 
-        {/* App hiện có */}
-        {app?.app_id && (
-          <div className="mx-5 mt-3 p-2.5 bg-[var(--color-bg-surface,#132235)] border border-[var(--color-border,#284057)] rounded-xl text-[11px] text-[var(--color-text-muted,#7f95aa)] flex items-center gap-2">
-            <Database size={13} className="shrink-0 text-[var(--color-accent,#0ea5e9)]" />
-            <span className="truncate flex-1">
-              App: <strong className="text-[var(--color-text-primary,#f8fafc)]">{app.name || 'CRM'}</strong>
-              {' '}• App ID <span className="font-mono">{app.app_id}</span>
-              {app.status === 'error' ? ' • Lần tạo cuối lỗi' : ''}
-            </span>
-            <button type="button" onClick={() => setAppToDelete(true)} disabled={jobRunning}
-              className="shrink-0 p-1.5 rounded-lg text-red-400 hover:bg-red-500/10 border border-transparent hover:border-red-500/30 transition-colors disabled:opacity-40"
-              title="Xóa app này trên Facebook (Chrome tự động hóa) và dọn token page trong CRM">
-              <Trash2 size={13} />
-            </button>
+        {/* Các app đã tạo — liệt kê ĐỦ, box có scroll riêng nên app dưới cùng luôn xem được */}
+        {apps.length > 0 && (
+          <div className="mx-5 mt-3 p-2.5 bg-[var(--color-bg-surface,#132235)] border border-[var(--color-border,#284057)] rounded-xl text-[11px] text-[var(--color-text-muted,#7f95aa)]">
+            <div className="flex items-center gap-2 mb-1.5">
+              <Database size={13} className="shrink-0 text-[var(--color-accent,#0ea5e9)]" />
+              <span className="font-semibold text-[var(--color-text-secondary,#cbd5e1)]">
+                App đã tạo ({apps.length}) — app đầu là app đang dùng
+              </span>
+            </div>
+            <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
+              {apps.map((a, i) => (
+                <div key={a.app_id || i} className="flex items-center gap-2 min-w-0">
+                  <span className="shrink-0 w-4 text-center font-mono text-[10px] opacity-70">{i + 1}</span>
+                  <span className="truncate flex-1 min-w-0">
+                    <strong className="text-[var(--color-text-primary,#f8fafc)]">{a.name || 'CRM'}</strong>
+                    {' '}• App ID <span className="font-mono">{a.app_id}</span>
+                    {a.status === 'error' ? ' • Lần tạo cuối lỗi' : ''}
+                  </span>
+                  <button type="button" onClick={() => setAppToDelete(a)} disabled={jobRunning}
+                    className="shrink-0 p-1.5 rounded-lg text-red-400 hover:bg-red-500/10 border border-transparent hover:border-red-500/30 transition-colors disabled:opacity-40"
+                    title={`Xóa app "${a.name || a.app_id}" trên Facebook (Chrome tự động hóa) và dọn token page trong CRM`}>
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -836,10 +851,10 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       </div>
 
       <ConfirmModal
-        isOpen={appToDelete}
+        isOpen={!!appToDelete}
         title="Xóa ứng dụng Facebook"
         message={
-          `Chrome sẽ tự động mở developers.facebook.com và gỡ app "${app?.name || ''}" (App ID: ${app?.app_id}).\n\n` +
+          `Chrome sẽ tự động mở developers.facebook.com và gỡ app "${appToDelete?.name || ''}" (App ID: ${appToDelete?.app_id}).\n\n` +
           '• Danh sách Fanpage và hội thoại của các page thuộc account này sẽ bị xóa khỏi CRM.\n' +
           '• Muốn dùng lại, hãy tạo app mới rồi bấm "Đồng bộ" + "Lấy token".'
         }
@@ -848,7 +863,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
         variant="danger"
         isLoading={deletingApp}
         onConfirm={handleDeleteApp}
-        onClose={() => !deletingApp && setAppToDelete(false)}
+        onClose={() => !deletingApp && setAppToDelete(null)}
       />
     </div>
   );

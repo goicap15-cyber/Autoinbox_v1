@@ -5826,6 +5826,7 @@ app.get('/api/page-api/accounts/:id/pages', (req, res) => {
     connected_at: r.created_at,
   }));
   const latestApp = pageApiService.appGetLatest(accountId);
+  const allApps = pageApiService.appList(accountId);
   res.json({
     success: true,
     account_id: accountId,
@@ -5838,6 +5839,16 @@ app.get('/api/page-api/accounts/:id/pages', (req, res) => {
       webhook_url: latestApp.webhookUrl || null,
       created_at: latestApp.createdAt,
     } : null,
+    // Trả ĐỦ danh sách app đã tạo (mới nhất trước) — trước đây chỉ trả 1 app
+    // nên tạo app lần 2 là app cũ biến mất khỏi popup.
+    apps: allApps.map((a) => ({
+      app_id: a.appId,
+      name: a.name,
+      status: a.status,
+      note: a.note || '',
+      webhook_url: a.webhookUrl || null,
+      created_at: a.createdAt,
+    })),
   });
 });
 
