@@ -64,6 +64,29 @@ test('content observer has no delayed startup or thread-change baseline window',
   assert.match(source, /chatObserver\.observe\(document\.body[\s\S]*observerPaused = false;/);
 });
 
+// ===== "alo" x2 chi con 1 (2026-10-08): reread timer tim nham article khac
+// cung noi dung + echo suppression 90s nut tin khach mang label ro rang. =====
+
+test('reread timer re-parses the exact bubble anchor, not the mutation root', () => {
+  const source = fs.readFileSync('src/extension/content.js', 'utf8');
+  assert.match(source, /const rereadScope = parsed\.dom_anchor \|\| node;/);
+  assert.match(source, /rereadAll\.find\(\(item\) => rereadContentMatch\(item\)\s*&& \(Number\(item\.bubble_idx\) \|\| 0\) === \(Number\(parsed\.bubble_idx\) \|\| 0\)\)/);
+  assert.doesNotMatch(source, /const reread = parseMessagesFromDOMNode\(node, true\)/);
+});
+
+test('echo suppression exempts rows whose label proves an incoming customer sender', () => {
+  const source = fs.readFileSync('src/extension/content.js', 'utf8');
+  assert.match(source, /const labelProvesIncoming = \/Tin nhắn do \.\+ gửi lúc\/i\.test/);
+  assert.match(source, /!parsed\.native_id && !parsed\.is_outgoing && !labelProvesIncoming/);
+});
+
+test('loss-path diagnostics are instrumented for composer-debug', () => {
+  const source = fs.readFileSync('src/extension/content.js', 'utf8');
+  assert.match(source, /stage: 'TRACKER_DUPLICATE'/);
+  assert.match(source, /stage: 'ECHO_SUPPRESSED'/);
+  assert.match(source, /stage: deferredVerdict \? 'REREAD_NATIVE_ID' : 'REREAD_SYNTHETIC'/);
+});
+
 // ===== createBubbleFamilyTracker: phantom __bubble_N khi bubble_idx trôi giữa
 // các lần quét (hội thoại "Yến" 2026-10-08 - cùng một bong bóng vật lý bị
 // đánh số lại mid.x <-> mid.x__bubble_1 -> hai id -> hai row CRM). =====

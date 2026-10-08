@@ -797,6 +797,13 @@
     ].join('|');
   }
 
+  function obsDebug(info) {
+    try {
+      if (!chrome?.runtime?.id) return;
+      chrome.runtime.sendMessage({ type: 'CONTENT_DEBUG', data: { kind: 'obs', ...info } }).catch(() => {});
+    } catch (_) {}
+  }
+
   // ===== Bản dùng thật của createBubbleFamilyTracker trong domMessageDedup.js
   // ===== (mirror chỉ để test - PHẢI ĐỒNG BỘ khi sửa).
   // bubble_idx là chỉ số VỊ TRÍ trong lần quét, không phải định danh bền vững:
@@ -1772,9 +1779,19 @@
     // nuốt tin thật của khách ("alo" của operator vs "Alo" của khách -
     // reproduce 2026-10-07). MIỄN TRỪ emoji-thuần: khách trả lời 👍 ngay sau
     // khi operator gửi 👍 là bình thường, không được drop.
-    if (!parsed.native_id && !parsed.is_outgoing
+    // Label "Tin nhắn do <tên khách> gửi lúc" là bằng chứng chiều DÒNG: echo
+    // bubble của chính mình khi hydrate trễ thì hoặc is_outgoing=true (không
+    // bao giờ vào được đây) hoặc chưa có label. Row còn nhãn khách mà chưa kịp
+    // có native id phải đi tiếp - window 90s từng nuốt tin thật của khách
+    // trùng nội dung tin operator vừa gửi ("alo" -> khách "alo" lại).
+    const labelProvesIncoming = /Tin nhắn do .+ gửi lúc/i.test(String(parsed.effective_label || ''))
+      && !/Tin nhắn do (?:Bạn|You) gửi/i.test(String(parsed.effective_label || ''));
+    if (!parsed.native_id && !parsed.is_outgoing && !labelProvesIncoming
       && !/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(String(parsed.content || ''))
-      && isRecentObservedOutgoing(thread_id, parsed.content)) return;
+      && isRecentObservedOutgoing(thread_id, parsed.content)) {
+      obsDebug({ stage: 'ECHO_SUPPRESSED', thread: String(thread_id), content: String(parsed.content || '').substring(0, 40) });
+      return;
+    }
 
     let tsMs = null;
     let tsSource = 'realtime_fallback';
@@ -1913,7 +1930,20 @@
         // reconcile/hysteresis path (spec 019) can settle it, rather than a new
         // duplicate row being created or the correction being silently dropped.
         const observationSignature = domObservationSignature(parsed);
-        if (verdict.duplicate) return;
+        if (verdict.duplicate) {
+          // Chỉ log khi tracker là lý do DUY NHẤT chặn tin (lastObserved chưa
+          // ghi cùng chữ ký) - còn lại là re-scan bình thường của tin đã
+          // forward, không đáng log.
+          if (lastObservedMessages.get(fbMessageId) !== observationSignature) {
+            obsDebug({
+              stage: 'TRACKER_DUPLICATE',
+              thread: String(thread_id),
+              id: String(fbMessageId || '').substring(0, 50),
+              content: String(parsed.content || '').substring(0, 30)
+            });
+          }
+          return;
+        }
         if (lastObservedMessages.get(fbMessageId) === observationSignature) return;
         lastObservedMessages.set(fbMessageId, observationSignature);
         bubbleFamilyTracker.markSeen(verdict.key);
@@ -1968,8 +1998,18 @@
               let idToUse = fbMessageId;
               let positionToUse = domPosition;
               let deferredVerdict = null;
-              const reread = parseMessagesFromDOMNode(node, true)
-                .find((item) => !item.is_outgoing && String(item.content || '') === String(parsed.content || ''));
+              // Re-parse đúng article của bong bóng này (parsed.dom_anchor),
+              // KHÔNG re-parse mutation root: root chứa 2 tin giống nhau đã
+              // khiến find() trả bubble #1 cho CẢ HAI timer - lần forward thứ
+              // hai dùng lại id của tin đầu và server gộp cặp tin thành 1 row
+              // (reproduce 2026-10-08: nhắn "alo" 2 lần chỉ còn 1).
+              const rereadScope = parsed.dom_anchor || node;
+              const rereadAll = parseMessagesFromDOMNode(rereadScope, true);
+              const rereadContentMatch = (item) => !item.is_outgoing
+                && String(item.content || '') === String(parsed.content || '');
+              const reread = rereadAll.find((item) => rereadContentMatch(item)
+                  && (Number(item.bubble_idx) || 0) === (Number(parsed.bubble_idx) || 0))
+                || rereadAll.find(rereadContentMatch);
               if (reread && reread.native_id) {
                 markDomOccurrence(reread, node);
                 toForward = reread;
@@ -1977,6 +2017,11 @@
                 idToUse = deferredVerdict.id;
                 positionToUse = getDomMessagePosition(node, thread_id, idToUse);
               }
+              obsDebug({
+                stage: deferredVerdict ? 'REREAD_NATIVE_ID' : 'REREAD_SYNTHETIC',
+                thread: String(thread_id),
+                id: String(idToUse || '').substring(0, 50)
+              });
               const deferredSignature = domObservationSignature(toForward);
               if (deferredVerdict && deferredVerdict.duplicate) return;
               if (lastObservedMessages.get(idToUse) !== deferredSignature) {
