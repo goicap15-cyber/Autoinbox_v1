@@ -2880,8 +2880,7 @@ wss.on('connection', (ws, req) => {
               threadId: m.thread_id,
               fbMessageId: m.fb_message_id,
               content: m.content,
-              isOutgoing: false,
-              timestampMs: tsMs
+              isOutgoing: false
             }, db);
             if (promotedPreview) stableMessageId = promotedPreview.fbMessageId;
           }
@@ -7670,6 +7669,48 @@ function startServer() {
       dupThreadIds.add(row.thread_id);
     }
     healTouchedThreads(dupThreadIds);
+
+    // (2b) Cặp nhân đôi preview ↔ tin thật: bong bóng provisional
+    // (sidebar_preview_, giờ quan sát) chưa được claim vì operator click trễ
+    // hoặc preview bị Messenger cắt ngắn, rồi history sync chèn thêm row thật
+    // cùng nội dung. Heal (2) chỉ dọn cặp dom_ ↔ tin thật, không đụng preview.
+    // Row thật (mid/dom) là bản chính thức - xóa preview mồ côi.
+    const previewRows = db.prepare(`
+      SELECT p.id, p.thread_id, p.content,
+        (SELECT COUNT(*) FROM messages real
+          WHERE real.thread_id = p.thread_id AND real.is_outgoing = 0
+            AND real.id != p.id AND real.fb_message_id NOT LIKE 'sidebar_preview_%'
+            AND COALESCE(real.content, '') != '') AS realIncomingCount
+      FROM messages p
+      WHERE p.is_outgoing = 0 AND p.fb_message_id LIKE 'sidebar_preview_%'
+    `).all();
+    const realIncomingByThread = new Map();
+    const deleteOrphanPreview = db.prepare('DELETE FROM messages WHERE id = ?');
+    const orphanPreviewThreadIds = new Set();
+    for (const preview of previewRows) {
+      if (!Number(preview.realIncomingCount)) continue;
+      if (!realIncomingByThread.has(preview.thread_id)) {
+        realIncomingByThread.set(preview.thread_id, db.prepare(`
+          SELECT content FROM messages
+          WHERE thread_id = ? AND is_outgoing = 0
+            AND fb_message_id NOT LIKE 'sidebar_preview_%'
+            AND COALESCE(content, '') != ''
+        `).all(preview.thread_id));
+      }
+      const previewText = String(preview.content || '').trim();
+      if (!previewText) continue;
+      const truncated = previewText.replace(/(?:\u2026|\.{3})$/, '').trimEnd();
+      const isPrefixTwin = truncated.length >= 24;
+      const matched = realIncomingByThread.get(preview.thread_id).some((row) => {
+        const realText = String(row.content || '');
+        return realText === previewText || (isPrefixTwin && realText.startsWith(truncated));
+      });
+      if (matched) {
+        deleteOrphanPreview.run(preview.id);
+        orphanPreviewThreadIds.add(preview.thread_id);
+      }
+    }
+    healTouchedThreads(orphanPreviewThreadIds);
 
     // (3) Separator thời gian dạng tắt ("9w", "2d"...) bị bắt nhầm thành
     // bubble - chỉ tồn tại dưới id dom_ (separator không có data-message-id).

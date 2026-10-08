@@ -128,20 +128,45 @@ class ConversationRepository {
     return result;
   }
 
-  static promoteSidebarPreview({ threadId, fbMessageId, content, isOutgoing, timestampMs }, database = getDefaultDb()) {
+  // Claim a provisional sidebar row for the durable message that just arrived.
+  // The preview id is deterministic (sha1 account|thread|content) so at most one
+  // preview row per content can exist, and previews are only created when the
+  // content was NOT already in the thread. Therefore any later same-content
+  // incoming row IS that message, no matter how much time passed before the
+  // operator opened the thread - a timestamp window here is what let the
+  // preview and the history row coexist as a visible duplicate (reproduced in
+  // simulation 2026-10-08: ts drift / late click -> 2 rows).
+  static promoteSidebarPreview({ threadId, fbMessageId, content, isOutgoing }, database = getDefaultDb()) {
     if (!threadId || !fbMessageId || !content || String(fbMessageId).startsWith('sidebar_preview_')) return null;
-    const observedTimestamp = Number(timestampMs) || 0;
     const candidates = database.prepare(`
       SELECT id, fb_message_id FROM messages
       WHERE thread_id = ? AND fb_message_id LIKE 'sidebar_preview_%'
         AND is_outgoing = ? AND COALESCE(content, '') = COALESCE(?, '')
-        AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 120000)
       ORDER BY id DESC LIMIT 2
-    `).all(threadId, isOutgoing ? 1 : 0, content, observedTimestamp, observedTimestamp);
-    if (candidates.length !== 1) return null;
+    `).all(threadId, isOutgoing ? 1 : 0, content);
+    let chosen = candidates.length === 1 ? candidates[0] : null;
+    if (!chosen) {
+      // Messenger can truncate long sidebar previews, so the stored preview text
+      // may be a prefix of the real message text. Require a long-enough prefix
+      // and exactly one candidate so a short repeat ("ok") can never claim it.
+      const incomingText = String(content).trim();
+      if (incomingText.length >= 24) {
+        const previews = database.prepare(`
+          SELECT id, fb_message_id, content FROM messages
+          WHERE thread_id = ? AND fb_message_id LIKE 'sidebar_preview_%' AND is_outgoing = ?
+          ORDER BY id DESC LIMIT 20
+        `).all(threadId, isOutgoing ? 1 : 0);
+        const matches = previews.filter((row) => {
+          const previewText = String(row.content || '').trim().replace(/(?:\u2026|\.{3})$/, '').trimEnd();
+          return previewText.length >= 24 && incomingText.startsWith(previewText);
+        });
+        if (matches.length === 1) chosen = matches[0];
+      }
+    }
+    if (!chosen) return null;
     try {
-      database.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?').run(String(fbMessageId), candidates[0].id);
-      return { id: candidates[0].id, previousFbMessageId: candidates[0].fb_message_id, fbMessageId: String(fbMessageId) };
+      database.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?').run(String(fbMessageId), chosen.id);
+      return { id: chosen.id, previousFbMessageId: chosen.fb_message_id, fbMessageId: String(fbMessageId) };
     } catch (_) {
       return null;
     }
@@ -554,8 +579,7 @@ class ConversationRepository {
         }
         if (!existing && msg.fb_message_id) {
           const promoted = ConversationRepository.promoteSidebarPreview({
-            threadId, fbMessageId: msg.fb_message_id, content, isOutgoing,
-            timestampMs: observedTimestampMs
+            threadId, fbMessageId: msg.fb_message_id, content, isOutgoing
           }, database);
           if (promoted) {
             stableId = promoted.fbMessageId;

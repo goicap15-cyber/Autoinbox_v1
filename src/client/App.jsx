@@ -1254,7 +1254,6 @@ export default function App() {
       }
       setHistorySyncingThreadId((current) => String(current || '') === tidStr ? null : current);
       if (history_completed !== undefined) {
-        setSelectedThread((prev) => prev && String(prev.id) === tidStr ? { ...prev, history_completed } : prev);
         setThreads((prev) => prev.map((t) => String(t.id) === tidStr ? { ...t, history_completed } : t));
       }
       setMessages(prev => {
@@ -1583,13 +1582,11 @@ export default function App() {
 
     socket.on('THREAD_HISTORY_COMPLETED', ({ thread_id }) => {
       const tid = String(thread_id || '');
-      setSelectedThread((prev) => prev && String(prev.id) === tid ? { ...prev, history_completed: 1 } : prev);
       setThreads((prev) => prev.map((t) => String(t.id) === tid ? { ...t, history_completed: 1 } : t));
     });
 
     socket.on('THREAD_HISTORY_RESET', ({ thread_id }) => {
       const tid = String(thread_id || '');
-      setSelectedThread((prev) => prev && String(prev.id) === tid ? { ...prev, history_completed: 0 } : prev);
       setThreads((prev) => prev.map((t) => String(t.id) === tid ? { ...t, history_completed: 0 } : t));
     });
 
@@ -1809,7 +1806,6 @@ export default function App() {
       const res = await fetch(`/api/threads/${encodeURIComponent(threadIdStr)}/resync`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data?.success) {
-        setSelectedThread((prev) => prev && String(prev.id) === threadIdStr ? { ...prev, history_completed: 0 } : prev);
         setThreads((prev) => prev.map((t) => String(t.id) === threadIdStr ? { ...t, history_completed: 0 } : t));
         requestThreadMessageSync(threadIdStr, 'older', -500);
       }
