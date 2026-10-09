@@ -849,10 +849,10 @@ function ensurePageThread(source, contactPsid, contactName, database) {
 function watcherLog(msg) {
   console.log('[PageApi] 👀 ' + msg);
   try {
-    const fs = require('fs');
     const path = require('path');
     const { APP_DATA_ROOT } = require('../utils/appDataRoot');
-    fs.appendFileSync(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status: 'watcher', note: String(msg).slice(0, 300) }) + '\n');
+    const { appendRotating } = require('../utils/rotatingDebugLog');
+    appendRotating(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status: 'watcher', note: String(msg).slice(0, 300) }) + '\n', 10 * 1024 * 1024);
   } catch (_) {}
 }
 

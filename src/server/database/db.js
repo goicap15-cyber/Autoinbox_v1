@@ -1398,7 +1398,10 @@ if (adminCheck.count === 0) {
 }
 
 try {
-  db.prepare("DELETE FROM messages WHERE content LIKE '%Chưa có tin nhắn%' OR content LIKE '%ChÃ%' OR (content LIKE '%tin nh%' AND content LIKE '%n%')").run();
+  // Chỉ xóa placeholder do chính app ghi (Chưa có tin nhắn) + tin bị mojibake
+  // (ChÃ). Không dùng pattern chung chung: từng xóa nhầm cả tin thật chứa
+  // "tin nhắn"/"tin nhắn..." mỗi lần khởi động server.
+  db.prepare("DELETE FROM messages WHERE content LIKE '%Chưa có tin nhắn%' OR content LIKE '%ChÃ%'").run();
   db.prepare("UPDATE threads SET last_message = 'Chưa có tin nhắn' WHERE last_message LIKE '%ChÃ%'").run();
 } catch (e) {}
 

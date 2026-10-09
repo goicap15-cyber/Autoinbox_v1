@@ -22,6 +22,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { isLoopbackAddress, isLocalDevRequest } = require('./utils/localDevAccess');
 const { APP_DATA_ROOT } = require('./utils/appDataRoot');
+const { appendRotating } = require('./utils/rotatingDebugLog');
 const OutboundAttachmentRepository = require('./repositories/OutboundAttachmentRepository');
 const OutboundAttemptRepository = require('./repositories/OutboundAttemptRepository');
 const OutboundAttachmentService = require('./services/OutboundAttachmentService');
@@ -778,9 +779,11 @@ function sanitizeLog(str, maxLen = 120) {
 
 // Đo từng chặng đường realtime hint (observer -> bg -> server) trong
 // composer-debug.log để so latency với bgDebug/obsDebug phía extension.
+// Chỉ bật khi SYNC_DEBUG=1 — mặc định tắt vì ghi ~2 dòng/giây/tài khoản.
 function syncDebug(stage, data = {}) {
+  if (!process.env.SYNC_DEBUG) return;
   try {
-    fs.appendFileSync(
+    appendRotating(
       path.join(APP_DATA_ROOT, 'composer-debug.log'),
       JSON.stringify({ at: new Date().toISOString(), source: 'SYNC_DEBUG', stage, ...data }) + '\n'
     );
@@ -1240,7 +1243,7 @@ setupAutomation.configurePageSetupAutomation({
   getCookies: (accountId) => requestExtensionCookies(accountId),
   getOrCreateVerifyToken: () => pageApiService.getOrCreateVerifyToken(),
   recordRun: (status, note) => {
-    try { fs.appendFileSync(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status, note: String(note || '').slice(0, 300) }) + '\n'); } catch (_) {}
+    try { appendRotating(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status, note: String(note || '').slice(0, 300) }) + '\n', 10 * 1024 * 1024); } catch (_) {}
   },
   upsertPages: (accountId, pages) => pageApiService.upsertPages(accountId, pages),
   listPages: (accountId) => pageApiService.listPages(accountId),
@@ -1255,7 +1258,7 @@ setupAutomation.configurePageSetupAutomation({
   knownPageIds: () => pageApiService.knownPageIds(),
   log: (message) => {
     console.log('[PageSetup]', message);
-    try { fs.appendFileSync(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status: 'step', note: String(message || '').slice(0, 300) }) + '\n'); } catch (_) {}
+    try { appendRotating(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status: 'step', note: String(message || '').slice(0, 300) }) + '\n', 10 * 1024 * 1024); } catch (_) {}
   },
   onStatus: (job) => {
     if (!io) return;
@@ -1952,7 +1955,7 @@ wss.on('connection', (ws, req) => {
           // as media, relayed here since the extension's own console isn't
           // reachable during live debugging. Remove once T020 is closed.
           try {
-            fs.appendFileSync(
+            appendRotating(
               path.join(APP_DATA_ROOT, 'composer-debug.log'),
               JSON.stringify({ at: new Date().toISOString(), source: 'CONTENT_DEBUG', ...msg.data }) + '\n'
             );
@@ -1985,7 +1988,7 @@ wss.on('connection', (ws, req) => {
           // here instead. Appended as one JSON line per event; remove once
           // T020 is confirmed fixed by a live send.
           try {
-            fs.appendFileSync(
+            appendRotating(
               path.join(APP_DATA_ROOT, 'composer-debug.log'),
               JSON.stringify({ at: new Date().toISOString(), ...msg.data }) + '\n'
             );
@@ -3935,8 +3938,12 @@ wss.on('connection', (ws, req) => {
                 || syncedExternalIds.has(String(thread.id || ''))
               )
             : allThreads;
-          io.emit('THREADS_SYNCED', { account_id, threads: emittedThreads });
-          console.log(`[WS] Đã emit THREADS_SYNCED lên frontend: ${allThreads.length} threads`);
+          // Nhịp realtime_hint rỗng (0 hàng thay đổi) bỏ emit hoàn toàn -
+          // tránh loadWaitingCount + setState cả danh sách mỗi 2s bên client.
+          if (emittedThreads.length > 0 || !isRealtimeSidebarHint) {
+            io.emit('THREADS_SYNCED', { account_id, threads: emittedThreads });
+            console.log(`[WS] Đã emit THREADS_SYNCED lên frontend: ${emittedThreads.length} threads (full=${allThreads.length})`);
+          }
           if (process.env.FB_CRM_DISABLE_INITIAL_SWEEP !== '1' && (partial !== true || Boolean(msg.data?.page_id))) {
             InitialMessageSweepService.start(account_id);
           }
@@ -5484,7 +5491,7 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('[Socket] Lỗi gửi tin nhắn:', err.message);
       try {
-        fs.appendFileSync(
+        appendRotating(
           path.join(APP_DATA_ROOT, 'composer-debug.log'),
           JSON.stringify({
             at: new Date().toISOString(),

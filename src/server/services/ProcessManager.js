@@ -255,15 +255,20 @@ function cleanStaleInstalledExtension(profileDir) {
 
 // Chrome bị kill (taskkill/restart app) ghi exit_type='Crashed' -> lần mở sau
 // hiện popup "Restore pages?" (cửa sổ phụ gây màn hình đen thứ 2). Đặt lại
-// exit_type='Normal' + launch kèm flag chặn bubble => hết popup.
+// exit_type='Normal' + exited_cleanly=true + launch kèm flag chặn bubble
+// => hết popup + không restore tab phiên cũ.
 function suppressCrashRestoreBubble(profileDir) {
   try {
     const prefsPath = path.join(profileDir, 'Default', 'Preferences');
     if (!fs.existsSync(prefsPath)) return;
     const prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8'));
-    if (prefs.profile && prefs.profile.exit_type && prefs.profile.exit_type !== 'Normal') {
-      prefs.profile.exit_type = 'Normal';
+    if (!prefs.profile) prefs.profile = {};
+    const changed = prefs.profile.exit_type !== 'Normal' || prefs.profile.exited_cleanly !== true;
+    prefs.profile.exit_type = 'Normal';
+    prefs.profile.exited_cleanly = true;
+    if (changed) {
       fs.writeFileSync(prefsPath, JSON.stringify(prefs));
+      console.log('[ProcessManager] Ghi cờ exit sạch vào Preferences: Chrome sẽ không restore tab phiên cũ.');
     }
   } catch (_) {}
 }
@@ -426,7 +431,6 @@ class ProcessManager {
     }
     ensureProfilePermissions(profileDir);
     cleanStaleInstalledExtension(profileDir);
-    suppressCrashRestoreBubble(profileDir);
 
     const chromeExecutable = this.getInteractiveSetupChromeExecutable();
     const absExtPath = path.resolve(this.extensionPath).replace(/\\/g, '/');
@@ -465,6 +469,10 @@ class ProcessManager {
       console.log(`[ProcessManager] Dùng lại Chrome đang chạy cho account ${accountId} (PID ${runningProfilePid}).`);
       return true;
     }
+
+    // Ghi cờ exit sạch ngay trước launch (sau check Chrome đang chạy): Chrome
+    // ghi đè Preferences khi tắt, ghi trước sẽ bị xóa mất.
+    suppressCrashRestoreBubble(profileDir);
 
     console.log(`[ProcessManager] Khởi chạy Chrome Stable + tự cài extension cho account ${accountId} (Profile: ${absProfileDir})...`);
     try {
@@ -525,15 +533,9 @@ class ProcessManager {
       // 3 tab/4s nen toi da 4 tab tai cung luc), goto chiu gioi han 8s.
       const messagesLoad = page.goto('https://www.facebook.com/messages/', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
 
-      // Chính sách "1 account = 1 Chrome": mở thêm tab Business Suite cho từng
-      // Page ACTIVE của account ngay trong Chrome này (không còn Chrome riêng
-      // cho từng Page - đã gỡ 2026-09-19).
-      // 2026-09-30: mở THEO ĐỢT (3 tab / 4 giây) thay vì 13 tab cùng lúc -
-      // 13 tab Facebook tải đồng thời lúc khởi động = spike CPU/RAM làm máy đơ.
-      if (!String(accountId || '').startsWith('pending_')) {
-        const activePageIds = this.getActivePageIdsForAccount(accountId);
-        this.schedulePageTabBatches(accountId, activePageIds);
-      }
+      // Đã tắt batch mở tab Business Suite lúc khởi động (2026-10-08): ~25 tab
+      // BS tải đồng thời = spike CPU/RAM làm máy đơ. Tab Page chỉ mở khi
+      // bấm nút thủ công (openBusinessTabForPage).
       await Promise.race([messagesLoad, new Promise((resolve) => setTimeout(resolve, 8000))]);
 
       console.log(`[ProcessManager] Chrome Stable [PID ${child.pid}] đã tự cài extension cho account ${accountId}.`);
@@ -541,18 +543,6 @@ class ProcessManager {
     } catch (err) {
       console.error(`[ProcessManager] Lỗi khởi chạy Chrome cho ${accountId}:`, err.message);
       return false;
-    }
-  }
-
-  // Danh sách Page ACTIVE đang sở hữu bởi account (nguồn sự thật: inbox_sources).
-  getActivePageIdsForAccount(accountId) {
-    try {
-      return db.prepare(`
-        SELECT external_id FROM inbox_sources
-        WHERE source_type = 'page_messenger' AND owner_account_id = ? AND status = 'ACTIVE'
-      `).all(String(accountId || '')).map((r) => String(r.external_id)).filter(Boolean);
-    } catch (_) {
-      return [];
     }
   }
 
@@ -609,32 +599,6 @@ class ProcessManager {
     } catch (_) {
       return false;
     }
-  }
-
-  // 2026-09-30: mở tab page THEO ĐỢT (3 tab / 4 giây) thay vì 13 tab tải đồng
-  // thời lúc khởi động - spike CPU/RAM đầu giờ đến từ đây (reproduce: mở app
-  // 20 page đơ vài giây). Tab đã tồn tại thì openBusinessTabForPage tự
-  // kích hoạt lại (không mở trùng).
-  schedulePageTabBatches(accountId, pageIds) {
-    const ids = (Array.isArray(pageIds) ? pageIds : []).filter(Boolean);
-    if (ids.length === 0) return 0;
-    const BATCH_SIZE = 3;
-    const BATCH_DELAY_MS = 4000;
-    const batches = [];
-    for (let i = 0; i < ids.length; i += BATCH_SIZE) batches.push(ids.slice(i, i + BATCH_SIZE));
-    let delay = 0;
-    for (const batch of batches) {
-      const timer = setTimeout(async () => {
-        const entry = this.processes.get(String(accountId || ''));
-        if (!entry || entry.status !== 'RUNNING') return; // Chrome đã tắt -> bỏ lô
-        for (const pid of batch) {
-          try { await this.openBusinessTabForPage(pid, String(accountId || '')); } catch (_) {}
-        }
-      }, delay);
-      if (typeof timer.unref === 'function') timer.unref();
-      delay += BATCH_DELAY_MS;
-    }
-    return batches.length;
   }
 
   // Mở (hoặc kích hoạt) tab Business Suite cho 1 Page TRONG Chrome cá nhân của
@@ -774,7 +738,6 @@ class ProcessManager {
     }
     ensureProfilePermissions(profileDir);
     cleanStaleInstalledExtension(profileDir);
-    suppressCrashRestoreBubble(profileDir);
 
     const chromeExecutable = this.getInteractiveSetupChromeExecutable();
     const absExtPath = path.resolve(this.extensionPath).replace(/\\/g, '/');
@@ -807,6 +770,8 @@ class ProcessManager {
       console.log(`[ProcessManager] Reused pending Chrome ${pendingKey} (PID ${runningProfilePid}).`);
       return true;
     }
+
+    suppressCrashRestoreBubble(profileDir);
 
     console.log(`[ProcessManager] Khởi chạy Chrome Stable + tự cài extension cho phiên [${pendingKey}]: ${chromeExecutable}`);
     try {

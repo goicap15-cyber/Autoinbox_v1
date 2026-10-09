@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Giới thiệu MISSPRICE CRM — Quản lý tin nhắn Facebook & Fanpage</title>
+<style>
+  :root {
+    --bg: #0b1220;
+    --bg-soft: #111a2c;
+    --card: #131e33;
+    --border: #24334d;
+    --text: #e8eef8;
+    --muted: #9fb0c9;
+    --blue: #3b82f6;
+    --blue-2: #2563eb;
+    --purple: #8b5cf6;
+    --green: #22c55e;
+    --orange: #f59e0b;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  img { display: block; max-width: 100%; }
+
+  /* ===== Header ===== */
+  header {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(11, 18, 32, 0.92);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+  }
+  .header-inner {
+    max-width: 1140px; margin: 0 auto; padding: 12px 20px;
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; color: #fff; }
+  .logo .mark {
+    width: 34px; height: 34px; border-radius: 9px; flex: none;
+    background: linear-gradient(135deg, var(--blue), var(--purple));
+    display: grid; place-items: center;
+  }
+  nav { display: flex; gap: 4px; flex-wrap: wrap; }
+  nav a {
+    color: var(--muted); padding: 7px 12px; border-radius: 8px; font-size: 14.5px;
+  }
+  nav a:hover { color: #fff; background: var(--bg-soft); }
+  .header-actions { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 18px; border-radius: 10px; font-size: 14.5px; font-weight: 600;
+    border: 1px solid transparent; cursor: pointer; transition: all .15s;
+  }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--blue), var(--blue-2)); color: #fff;
+    box-shadow: 0 4px 14px rgba(59, 130, 246, .35);
+  }
+  .btn-primary:hover { filter: brightness(1.1); }
+  .btn-ghost { background: transparent; color: var(--muted); border-color: var(--border); }
+  .btn-ghost:hover { color: #fff; border-color: var(--blue); }
+  .btn-danger { background: transparent; color: #f87171; border-color: rgba(248,113,113,.4); }
+  .btn-danger:hover { background: rgba(248,113,113,.12); border-color: #f87171; }
+
+  /* ===== Hero ===== */
+  .hero {
+    max-width: 1140px; margin: 0 auto; padding: 72px 20px 56px; text-align: center;
+  }
+  .hero .badge {
+    display: inline-block; padding: 6px 16px; border-radius: 999px;
+    background: rgba(59, 130, 246, .12); color: #7db2ff;
+    border: 1px solid rgba(59, 130, 246, .35); font-size: 13.5px; font-weight: 600;
+    margin-bottom: 20px;
+  }
+  .hero h1 {
+    font-size: clamp(28px, 4.5vw, 46px); line-height: 1.25; font-weight: 800;
+    background: linear-gradient(120deg, #ffffff 30%, #93c5fd 70%, #c4b5fd);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    margin-bottom: 18px;
+  }
+  .hero p.sub { color: var(--muted); font-size: 17px; max-width: 720px; margin: 0 auto 32px; }
+  .hero .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .hero-stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 14px; max-width: 780px; margin: 48px auto 0;
+  }
+  .hero-stats .stat {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px 12px;
+  }
+  .hero-stats .stat b { display: block; font-size: 24px; color: #fff; }
+  .hero-stats .stat span { color: var(--muted); font-size: 13.5px; }
+
+  /* ===== Sections ===== */
+  section { max-width: 1140px; margin: 0 auto; padding: 56px 20px; }
+  .sec-head { text-align: center; margin-bottom: 40px; }
+  .sec-head .kicker {
+    color: #7db2ff; font-size: 13px; font-weight: 700; letter-spacing: 2px;
+    text-transform: uppercase; margin-bottom: 8px;
+  }
+  .sec-head h2 { font-size: clamp(24px, 3vw, 34px); font-weight: 800; color: #fff; }
+  .sec-head p { color: var(--muted); margin-top: 10px; max-width: 640px; margin-left: auto; margin-right: auto; }
+
+  .intro-cards {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 16px; margin-top: 32px;
+  }
+  .intro-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 24px;
+  }
+  .intro-card h3 { font-size: 16.5px; color: #fff; margin-bottom: 8px; display: flex; align-items: center; gap: 10px; }
+  .intro-card p { color: var(--muted); font-size: 14.5px; }
+  .intro-card .ico {
+    width: 36px; height: 36px; border-radius: 10px; flex: none;
+    display: grid; place-items: center; background: rgba(59,130,246,.12); color: #7db2ff;
+  }
+
+  /* Features grid */
+  .feat-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(255px, 1fr)); gap: 16px;
+  }
+  .feat {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 24px; transition: transform .15s, border-color .15s;
+  }
+  .feat:hover { transform: translateY(-3px); border-color: var(--blue); }
+  .feat .ico {
+    width: 44px; height: 44px; border-radius: 12px; margin-bottom: 14px;
+    display: grid; place-items: center; font-size: 20px;
+  }
+  .feat h3 { font-size: 16px; color: #fff; margin-bottom: 8px; }
+  .feat p { color: var(--muted); font-size: 14px; }
+  .ico-blue { background: rgba(59,130,246,.14); color: #7db2ff; }
+  .ico-purple { background: rgba(139,92,246,.14); color: #c4b5fd; }
+  .ico-green { background: rgba(34,197,94,.14); color: #86efac; }
+  .ico-orange { background: rgba(245,158,11,.14); color: #fcd34d; }
+  .ico-pink { background: rgba(236,72,153,.14); color: #f9a8d4; }
+  .ico-cyan { background: rgba(6,182,212,.14); color: #67e8f9; }
+
+  /* ===== Steps ===== */
+  .step {
+    display: grid; grid-template-columns: 1fr 1.15fr; gap: 36px; align-items: start;
+    padding: 40px 0; border-top: 1px solid var(--border);
+  }
+  .step:first-of-type { border-top: none; }
+  .step .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 42px; height: 42px; border-radius: 12px; font-weight: 800; font-size: 17px;
+    background: linear-gradient(135deg, var(--blue), var(--purple)); color: #fff;
+    margin-bottom: 16px;
+  }
+  .step h3 { font-size: 22px; color: #fff; margin-bottom: 12px; }
+  .step .desc { color: var(--muted); margin-bottom: 16px; }
+  .step ul { list-style: none; }
+  .step ul li {
+    padding-left: 26px; position: relative; margin-bottom: 9px;
+    color: #c7d4e8; font-size: 14.5px;
+  }
+  .step ul li::before {
+    content: ""; position: absolute; left: 4px; top: 8px;
+    width: 9px; height: 9px; border-radius: 3px;
+    background: linear-gradient(135deg, var(--blue), var(--purple));
+  }
+  .step ul li b { color: #fff; }
+  .tip-line {
+    margin-top: 14px; padding: 12px 16px; border-radius: 10px; font-size: 13.5px;
+    background: rgba(245, 158, 11, .08); border: 1px solid rgba(245, 158, 11, .25);
+    color: #fcd34d;
+  }
+
+  /* Screenshot frames */
+  .shots { display: flex; flex-direction: column; gap: 18px; }
+  .shot {
+    background: #0e1626; border: 1px solid var(--border); border-radius: 12px;
+    overflow: hidden; box-shadow: 0 12px 34px rgba(0,0,0,.45);
+  }
+  .shot .bar {
+    display: flex; align-items: center; gap: 6px; padding: 9px 12px;
+    background: #16203a; border-bottom: 1px solid var(--border);
+  }
+  .shot .bar i { width: 10px; height: 10px; border-radius: 50%; background: #2c3a55; }
+  .shot .bar i:nth-child(1) { background: #f87171; }
+  .shot .bar i:nth-child(2) { background: #fbbf24; }
+  .shot .bar i:nth-child(3) { background: #34d399; }
+  .shot .bar span {
+    margin-left: 10px; font-size: 11.5px; color: var(--muted);
+    background: var(--bg-soft); padding: 3px 10px; border-radius: 6px;
+  }
+  .shot img { width: 100%; height: auto; }
+  .shot .cap {
+    padding: 8px 14px; font-size: 12.5px; color: var(--muted);
+    border-top: 1px solid var(--border); background: #0e1626;
+  }
+
+  /* Extras grid */
+  .extra-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px;
+  }
+
+  /* Tips */
+  .tips { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+  .tip {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 22px;
+  }
+  .tip .t-ico { font-size: 22px; margin-bottom: 10px; }
+  .tip h3 { font-size: 15.5px; color: #fff; margin-bottom: 8px; }
+  .tip p { color: var(--muted); font-size: 14px; }
+
+  /* FAQ */
+  .faq { max-width: 820px; margin: 0 auto; }
+  .faq details {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 22px; margin-bottom: 12px;
+  }
+  .faq summary {
+    cursor: pointer; font-weight: 600; color: #fff; font-size: 15.5px;
+    list-style: none; display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq summary::after { content: "+"; font-size: 20px; color: var(--blue); }
+  .faq details[open] summary::after { content: "–"; }
+  .faq details p { color: var(--muted); font-size: 14.5px; margin-top: 12px; }
+
+  footer {
+    border-top: 1px solid var(--border); margin-top: 40px; padding: 34px 20px;
+    text-align: center; color: var(--muted); font-size: 13.5px;
+  }
+  footer .f-logo { font-weight: 700; color: #fff; margin-bottom: 6px; }
+
+  /* ===== Hiệu ứng ===== */
+  .reveal { opacity: 0; transform: translateY(22px); transition: opacity .6s ease, transform .6s ease; }
+  .reveal.visible { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) {
+    .reveal { opacity: 1; transform: none; transition: none; }
+  }
+
+  /* Số đếm */
+  .hero-stats .stat b { display: block; font-size: 26px; color: #fff; }
+
+  /* Lightbox */
+  .shot img { cursor: zoom-in; }
+  .lightbox {
+    position: fixed; inset: 0; z-index: 100; background: rgba(4, 8, 16, .94);
+    display: none; align-items: center; justify-content: center; padding: 30px;
+  }
+  .lightbox.open { display: flex; }
+  .lightbox img {
+    max-width: 92vw; max-height: 84vh; border-radius: 12px;
+    box-shadow: 0 24px 70px rgba(0,0,0,.6); border: 1px solid var(--border);
+  }
+  .lb-btn {
+    position: absolute; z-index: 2; background: rgba(255,255,255,.08); color: #fff;
+    border: 1px solid rgba(255,255,255,.18); border-radius: 50%;
+    width: 44px; height: 44px; font-size: 22px; line-height: 1; cursor: pointer;
+    display: grid; place-items: center; transition: background .15s;
+  }
+  .lb-btn:hover { background: rgba(255,255,255,.2); }
+  .lb-close { top: 18px; right: 18px; }
+  .lb-prev { left: 14px; top: 50%; transform: translateY(-50%); }
+  .lb-next { right: 14px; top: 50%; transform: translateY(-50%); }
+  .lb-cap {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+    background: rgba(13, 20, 36, .9); border: 1px solid var(--border);
+    color: var(--muted); font-size: 13px; padding: 8px 16px; border-radius: 999px;
+    max-width: 80vw; text-align: center;
+  }
+
+  /* Carousel */
+  .carousel .c-slide { display: none; }
+  .carousel .c-slide.active { display: block; }
+  .c-dots { display: flex; justify-content: center; gap: 8px; padding: 10px 0 12px; background: #0e1626; border-top: 1px solid var(--border); }
+  .c-dots button {
+    width: 9px; height: 9px; border-radius: 999px; border: none; cursor: pointer;
+    background: #2c3a55; transition: all .25s; padding: 0;
+  }
+  .c-dots button.active { width: 26px; background: var(--blue); }
+
+  @media (max-width: 900px) {
+    .step { grid-template-columns: 1fr; gap: 22px; }
+    nav { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="logo">
+      <span class="mark">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      </span>
+      MISSPRICE CRM
+    </div>
+    <nav>
+      <a href="#gioi-thieu">Giới thiệu</a>
+      <a href="#chuc-nang">Chức năng</a>
+      <a href="#huong-dan">Hướng dẫn</a>
+      <a href="#meo">Mẹo</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <div class="header-actions">
+      <a class="btn btn-primary" href="/">Vào CRM</a>
+      <button class="btn btn-ghost" id="authBtn" style="display:none;">Đăng xuất</button>
+    </div>
+  </div>
+</header>
+
+<div class="hero">
+  <span class="badge">Phần mềm quản lý tin nhắn Facebook &amp; Fanpage</span>
+  <h1>Mọi tin nhắn Facebook &amp; Fanpage<br>gọn trên một màn hình</h1>
+  <p class="sub">
+    MISSPRICE CRM giúp bạn xem, trả lời, gắn nhãn, nhắc việc và gửi tin hàng loạt cho khách hàng
+    từ nhiều tài khoản Facebook và Fanpage — không cần mở nhiều tab, không bỏ sót tin nhắn.
+  </p>
+  <div class="cta">
+    <a class="btn btn-primary" href="/">Vào CRM ngay →</a>
+    <a class="btn btn-ghost" href="#huong-dan">Xem hướng dẫn sử dụng</a>
+  </div>
+  <div class="hero-stats" id="heroStats">
+    <div class="stat"><b><span class="count" data-target="7">0</span>+</b><span>tài khoản Facebook quản lý cùng lúc</span></div>
+    <div class="stat"><b><span class="count" data-target="19">0</span>+</b><span>Fanpage kết nối có token</span></div>
+    <div class="stat"><b><span class="count" data-target="8">0</span></b><span>chức năng chính trong app</span></div>
+    <div class="stat"><b><span class="count" data-target="6">0</span></b><span>bước làm quen trên trang này</span></div>
+  </div>
+</div>
+
+<section id="gioi-thieu">
+  <div class="sec-head">
+    <div class="kicker">Giới thiệu</div>
+    <h2>Dành cho ai?</h2>
+    <p>Ứng dụng chạy ngay trên máy tính của bạn, kết nối trực tiếp với Facebook — dữ liệu nằm trên máy, an toàn và chủ động.</p>
+  </div>
+  <div class="intro-cards">
+    <div class="intro-card reveal">
+      <h3><span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg></span> Bán hàng online</h3>
+      <p>Nhiều Fanpage bán hàng, khách nhắn liên tục — cần một chỗ gom hết hội thoại để không sót khách.</p>
+    </div>
+    <div class="intro-card reveal">
+      <h3><span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span> Đội nhóm chăm sóc khách</h3>
+      <p>Nhiều nhân viên, mỗi người quản lý tài khoản Facebook riêng — phân công rõ ràng, gắn nhãn khách.</p>
+    </div>
+    <div class="intro-card reveal">
+      <h3><span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span> Người chạy chiến dịch tin nhắn</h3>
+      <p>Gửi tin giới thiệu chương trình tới danh sách khách, theo dõi ai đã trả lời, ai để lại số điện thoại.</p>
+    </div>
+  </div>
+</section>
+
+<section id="chuc-nang">
+  <div class="sec-head">
+    <div class="kicker">Chức năng</div>
+    <h2>8 chức năng chính</h2>
+    <p>Tất cả đều thao tác ngay trên giao diện — không cần mở Facebook riêng.</p>
+  </div>
+  <div class="feat-grid">
+    <div class="feat reveal">
+      <div class="ico ico-blue"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+      <h3>1. Hộp thư tập trung</h3>
+      <p>Tin nhắn từ mọi Fanpage và Messenger cá nhân gom về một danh sách, đánh dấu chưa xử lý, tìm kiếm nhanh.</p>
+    </div>
+    <div class="feat reveal">
+      <div class="ico ico-purple"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+      <h3>2. Đa tài khoản Facebook</h3>
+      <p>Thêm nhiều tài khoản, quản lý trạng thái kết nối, xử lý Checkpoint/OTP ngay trong app.</p>
+    </div>
+    <div class="feat reveal">
+      <div class="ico ico-green"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></div>
+      <h3>3. Kết nối Fanpage tự động</h3>
+      <p>Tạo app &amp; webhook, đồng bộ token cho từng Fanpage, lấy hội thoại về CRM chỉ với vài nút bấm.</p>
+    </div>
+    <div class="feat reveal">
+      <div class="ico ico-orange"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M14 2h2"/></svg></div>
+      <h3>4. Trả lời tự động</h3>
+      <p>Đặt quy tắc theo từ khóa khách nhắn (ví dụ "báo giá"), tự chèn tên khách vào mẫu tin trả lời.</p>
+    </div>
+    <div class="feat reveal">
+      <div class="ico ico-pink"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg></div>
+      <h3>5. Chiến dịch gửi tin hàng loạt</h3>
+      <p>Chọn hội thoại từ inbox làm snapshot người nhận, soạn tin, gửi tuần tự có nghỉ giữa các tin.</p>
+    </div>
+    <div class="feat reveal">
+      <div class="ico ico-cyan"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><path d="M7 7h.01"/></svg></div>
+      <h3>6. Gắn nhãn, trạng thái, nhắc việc</h3>
+      <p>Gắn nhãn khách cho từng nhân viên, đặt trạng thái chăm sóc, đặt nhắc để không quên khách.</p>
+    </div>
+    <div class="feat reveal">
+      <div class="ico ico-blue"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></div>
+      <h3>7. Thống kê phản hồi chiến dịch</h3>
+      <p>Đếm khách đã trả lời, đã để lại số điện thoại, chưa trả lời — đo tỷ lệ phản hồi từng chiến dịch.</p>
+    </div>
+    <div class="feat reveal">
+      <div class="ico ico-purple"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></div>
+      <h3>8. Xuất Excel/CSV &amp; quản lý nhân viên</h3>
+      <p>Xuất dữ liệu khách ra Excel/CSV, tạo tài khoản nhân viên và cấp tài khoản Facebook cho từng người.</p>
+    </div>
+  </div>
+</section>
+
+<section id="huong-dan">
+  <div class="sec-head">
+    <div class="kicker">Hướng dẫn</div>
+    <h2>6 bước sử dụng cơ bản</h2>
+    <p>Làm theo thứ tự từ trên xuống là bắt đầu dùng được ngay.</p>
+  </div>
+
+  <!-- Bước 1 -->
+  <div class="step reveal">
+    <div>
+      <div class="num">1</div>
+      <h3>Mở app &amp; đăng nhập</h3>
+      <p class="desc">Mở ứng dụng MISSPRICE CRM trên máy. Nếu chưa có tài khoản, chuyển sang tab <b>Đăng ký</b> để tạo bằng Gmail + mã OTP.</p>
+      <ul>
+        <li>Nhập <b>tên đăng nhập hoặc Gmail</b> và <b>mật khẩu</b>, bấm <b>Đăng nhập</b>.</li>
+        <li>Đăng ký mới: nhập Gmail → bấm <b>Lấy OTP</b> → nhập 6 số gửi về mail → đặt mật khẩu → <b>Tạo tài khoản</b>.</li>
+        <li>Quên mật khẩu: bấm "Quên mật khẩu?" ngay dưới ô mật khẩu.</li>
+      </ul>
+    </div>
+    <div class="shots">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Màn đăng nhập</span></div>
+        <img src="gioi-thieu/login.png" alt="Màn hình đăng nhập MISSPRICE CRM">
+        <div class="cap">Đăng nhập bằng tài khoản CRM hoặc Gmail.</div>
+      </div>
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Màn đăng ký</span></div>
+        <img src="gioi-thieu/register.png" alt="Màn hình đăng ký tài khoản với mã OTP">
+        <div class="cap">Tạo tài khoản nhân viên bằng Gmail + mã OTP.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bước 2 -->
+  <div class="step reveal">
+    <div>
+      <div class="num">2</div>
+      <h3>Kết nối Fanpage</h3>
+      <p class="desc">Để đọc và gửi tin qua Fanpage, mở <b>Quản lý → Fanpage</b> và cấp token cho từng trang.</p>
+      <ul>
+        <li>Vào mục <b>Quản lý</b> ở menu trái → chọn <b>Fanpage</b>.</li>
+        <li>Bấm <b>Tạo app &amp; Webhook</b> (hoặc <b>Nhập token</b> nếu đã có sẵn), rồi bấm <b>Đồng bộ</b>.</li>
+        <li>Đợi danh sách hiện <b>19/19 trang có token</b> — nghĩa là tất cả Fanpage đã sẵn sàng.</li>
+        <li>Tích chọn các trang cần quản lý → bấm <b>Lấy hội thoại</b> để kéo tin nhắn về CRM.</li>
+      </ul>
+      <div class="tip-line">Mẹo: nếu khung chat báo "chưa có Page Access Token", quay lại bước này và đồng bộ lại token.</div>
+    </div>
+    <div class="shots">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Quản lý → Fanpage</span></div>
+        <img src="gioi-thieu/fanpage.png" alt="Danh sách Fanpage đã có token">
+        <div class="cap">Danh sách Fanpage đã có token, tích chọn rồi bấm "Lấy hội thoại".</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bước 3 -->
+  <div class="step reveal">
+    <div>
+      <div class="num">3</div>
+      <h3>Xem &amp; trả lời tin nhắn</h3>
+      <p class="desc">Màn hình chính chia 3 cột: danh sách hội thoại, khung chat, thông tin khách.</p>
+      <ul>
+        <li><b>Cột trái</b>: mọi hội thoại từ Fanpage + Messenger, kèm nhãn <b>Chưa xử lý</b>, số tin chưa đọc.</li>
+        <li><b>Khung giữa</b>: trò chuyện với khách — soạn tin, gửi ảnh, gửi emoji như bình thường.</li>
+        <li><b>Cột phải</b>: thông tin khách với các nút nhanh <b>Gọi</b>, <b>VIP</b>, <b>Nhắc</b>, <b>Lưu</b>; xuất danh sách ra <b>Excel/CSV</b>.</li>
+        <li>Tìm khách nhanh bằng ô <b>Tìm kiếm hội thoại</b> phía trên.</li>
+      </ul>
+    </div>
+    <div class="shots">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Màn hình chính — hộp thư tập trung</span></div>
+        <img src="gioi-thieu/inbox.png" alt="Giao diện chính 3 cột của CRM">
+        <div class="cap">Trái: hội thoại · Giữa: khung chat · Phải: thông tin khách.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bước 4 -->
+  <div class="step reveal">
+    <div>
+      <div class="num">4</div>
+      <h3>Gửi tin hàng loạt bằng chiến dịch</h3>
+      <p class="desc">Tạo chiến dịch để gửi một mẫu tin cho nhiều khách cùng lúc, có kiểm soát tốc độ.</p>
+      <ul>
+        <li>Menu trái → <b>Chiến dịch</b> → chọn hội thoại từ inbox (danh sách lưu thành <b>snapshot</b> cố định).</li>
+        <li><b>Đặt tên chiến dịch</b> (khách không nhìn thấy tên này) và <b>viết tin nhắn</b> gửi đi.</li>
+        <li><b>Cấu hình gửi</b>: thứ tự tăng dần, nghỉ giữa các tin (ví dụ 5 giây) để tránh bị Facebook hạn chế.</li>
+        <li>Bấm <b>Tạo snapshot</b>, xem lại trước khi gửi thật, rồi theo dõi tiến độ từng người nhận.</li>
+      </ul>
+    </div>
+    <div class="shots">
+      <div class="shot carousel" id="campaignCarousel">
+        <div class="c-slide active">
+          <div class="bar"><i></i><i></i><i></i><span>Tạo chiến dịch mới</span></div>
+          <img src="gioi-thieu/campaign-create.png" alt="Form tạo chiến dịch tin nhắn">
+          <div class="cap">1/3 · Chọn người nhận từ inbox, đặt tên và soạn tin.</div>
+        </div>
+        <div class="c-slide">
+          <div class="bar"><i></i><i></i><i></i><span>Chi tiết chiến dịch</span></div>
+          <img src="gioi-thieu/campaign-detail.png" alt="Chi tiết chiến dịch với tiến độ gửi">
+          <div class="cap">2/3 · Theo dõi tiến độ và kết quả theo từng người nhận.</div>
+        </div>
+        <div class="c-slide">
+          <div class="bar"><i></i><i></i><i></i><span>Thống kê phản hồi</span></div>
+          <img src="gioi-thieu/campaign-stats.png" alt="Thống kê phản hồi chiến dịch">
+          <div class="cap">3/3 · Đã gửi · Đã trả lời · Đã đưa SĐT · Tỷ lệ phản hồi.</div>
+        </div>
+        <div class="c-dots" id="cDots">
+          <button class="active" aria-label="Ảnh 1"></button>
+          <button aria-label="Ảnh 2"></button>
+          <button aria-label="Ảnh 3"></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bước 5 -->
+  <div class="step reveal">
+    <div>
+      <div class="num">5</div>
+      <h3>Nhắc việc &amp; gắn nhãn khách</h3>
+      <p class="desc">Trên bảng thông tin khách (cột phải), bạn có các công cụ để không bỏ sót khách.</p>
+      <ul>
+        <li>Bấm <b>Nhắc</b> để đặt nhắc việc theo dõi lại khách vào thời điểm cụ thể.</li>
+        <li>Chọn <b>Trạng thái</b> (ví dụ "Chưa đặt", "Đã liên hệ"...) để theo dõi giai đoạn chăm sóc; có thể <b>tạo trạng thái mới</b>.</li>
+        <li>Gắn <b>nhãn nhân viên</b> vào khách để chia việc cho từng người phụ trách.</li>
+        <li>Bấm <b>VIP</b> để đánh dấu khách quan trọng, <b>Lưu</b> để cập nhật thông tin đã sửa.</li>
+      </ul>
+    </div>
+    <div class="shots">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Bảng thông tin khách</span></div>
+        <img src="gioi-thieu/inbox.png" alt="Bảng thông tin khách với các nút Gọi, VIP, Nhắc, Lưu">
+        <div class="cap">Các nút Gọi · VIP · Nhắc · Lưu nằm ngay đầu bảng thông tin.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bước 6 -->
+  <div class="step reveal">
+    <div>
+      <div class="num">6</div>
+      <h3>Trả lời tự động (Auto-reply)</h3>
+      <p class="desc">Đặt quy tắc để CRM tự trả lời khi khách nhắn đúng từ khóa.</p>
+      <ul>
+        <li>Menu trái → <b>Tự động hóa</b> → mở <b>Quản lý phản hồi tự động</b>.</li>
+        <li>Nhập <b>từ khóa kích hoạt</b> (ví dụ: <i>báo giá, địa chỉ, tư vấn...</i>).</li>
+        <li>Soạn <b>nội dung mẫu phản hồi</b>, bấm <b>+ Chèn (ten_khach_hang)</b> để tin tự điền tên khách.</li>
+        <li>Bấm <b>+ Thêm Quy Tắc</b>; mỗi quy tắc có công tắc <b>Đang bật</b> để bật/tắt linh hoạt.</li>
+      </ul>
+    </div>
+    <div class="shots">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Quản lý phản hồi tự động</span></div>
+        <img src="gioi-thieu/autoreply.png" alt="Modal quản lý phản hồi tự động">
+        <div class="cap">Từ khóa "báo giá" kích hoạt tin trả lời mẫu có tên khách.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="tinh-nang-khac">
+  <div class="sec-head">
+    <div class="kicker">Mở rộng</div>
+    <h2>Quản lý tài khoản &amp; bản quyền</h2>
+    <p>Hai màn hình còn lại trong quá trình vận hành: tài khoản Facebook và license.</p>
+  </div>
+  <div class="extra-grid">
+    <div class="shot reveal">
+      <div class="bar"><i></i><i></i><i></i><span>Quản lý tài khoản Facebook &amp; Checkpoint</span></div>
+      <img src="gioi-thieu/accounts.png" alt="Quản lý tài khoản Facebook và Fanpage đang kết nối">
+      <div class="cap">Thêm tài khoản, xem Fanpage đang kết nối, xử lý Checkpoint/OTP.</div>
+    </div>
+    <div class="shot reveal">
+      <div class="bar"><i></i><i></i><i></i><span>Danh sách tài khoản</span></div>
+      <img src="gioi-thieu/account-list.png" alt="Danh sách tài khoản Facebook với nút kết nối">
+      <div class="cap">Mỗi tài khoản có nút "Kết nối Facebook" khi chưa kết nối.</div>
+    </div>
+    <div class="shot reveal">
+      <div class="bar"><i></i><i></i><i></i><span>Quản lý bản quyền</span></div>
+      <img src="gioi-thieu/license-manage.png" alt="Quản lý bản quyền app">
+      <div class="cap">Xem thời hạn, số máy (slot), giải phóng máy khi đổi thiết bị.</div>
+    </div>
+    <div class="shot reveal">
+      <div class="bar"><i></i><i></i><i></i><span>Gia hạn / nâng cấp license</span></div>
+      <img src="gioi-thieu/license-renew.png" alt="Gia hạn license qua VietQR">
+      <div class="cap">Chọn thời hạn, thêm slot máy, thanh toán qua VietQR.</div>
+    </div>
+  </div>
+</section>
+
+<section id="meo">
+  <div class="sec-head">
+    <div class="kicker">Mẹo</div>
+    <h2>Mẹo dùng hiệu quả</h2>
+  </div>
+  <div class="tips">
+    <div class="tip reveal">
+      <div class="t-ico">💬</div>
+      <h3>Viết tin ngắn gọn, thân thiện</h3>
+      <p>Tin nhắn có cảm xúc, rõ ràng dễ được khách đọc và trả lời hơn. Đừng viết quá dài.</p>
+    </div>
+    <div class="tip reveal">
+      <div class="t-ico">🐢</div>
+      <h3>Không spam — nghỉ giữa các tin</h3>
+      <p>Chiến dịch gửi hàng loạt nên để nghỉ ít nhất 5 giây giữa các tin để tránh Facebook hạn chế tài khoản.</p>
+    </div>
+    <div class="tip reveal">
+      <div class="t-ico">🔑</div>
+      <h3>Kiểm tra token trước khi gửi tin Page</h3>
+      <p>Nếu khung chat báo "chưa có Page Access Token", vào Quản lý → Fanpage đồng bộ lại trước khi gửi.</p>
+    </div>
+    <div class="tip reveal">
+      <div class="t-ico">📸</div>
+      <h3>Chụp snapshot trước khi gửi</h3>
+      <p>Danh sách người nhận lưu thành snapshot cố định — gửi xong bạn vẫn biết chính xác đã gửi cho ai.</p>
+    </div>
+    <div class="tip reveal">
+      <div class="t-ico">🛡️</div>
+      <h3>Xử lý Checkpoint kịp thời</h3>
+      <p>Tài khoản bị Facebook hỏi xác minh sẽ hiện trong mục Quản lý tài khoản — xử lý sớm để không gián đoạn nhận tin.</p>
+    </div>
+    <div class="tip reveal">
+      <div class="t-ico">⏰</div>
+      <h3>Dùng nút Nhắc cho khách hẹn lại</h3>
+      <p>Khách nói "để mai em xem" — bấm Nhắc đặt lịch, hôm sau CRM sẽ nhắc bạn theo dõi lại.</p>
+    </div>
+  </div>
+</section>
+
+<section id="faq">
+  <div class="sec-head">
+    <div class="kicker">FAQ</div>
+    <h2>Câu hỏi thường gặp</h2>
+  </div>
+  <div class="faq">
+    <details class="reveal">
+      <summary>Page không gửi được tin, báo "chưa có Page Access Token"?</summary>
+      <p>Mở <b>Quản lý → Fanpage</b>, bấm <b>Tạo app &amp; Webhook</b> hoặc <b>Nhập token</b>, rồi <b>Đồng bộ</b>. Đợi danh sách hiện "trang có token" rồi bấm <b>Lấy hội thoại</b>.</p>
+    </details>
+    <details class="reveal">
+      <summary>Chiến dịch báo ACCOUNT_NOT_ACTIVE là gì?</summary>
+      <p>Tài khoản Facebook gửi tin chưa kết nối hoặc đã bị ngắt. Vào <b>Quản lý tài khoản</b>, bấm <b>Kết nối Facebook</b> ở tài khoản tương ứng rồi gửi lại.</p>
+    </details>
+    <details class="reveal">
+      <summary>Tài khoản Facebook bị Checkpoint thì làm sao?</summary>
+      <p>Mở <b>Quản lý tài khoản Facebook &amp; Checkpoint</b>, bật <b>Hiện Chrome</b> cho tài khoản đó để mở cửa sổ Facebook và xử lý xác minh/OTP.</p>
+    </details>
+    <details class="reveal">
+      <summary>Quên mật khẩu tài khoản CRM?</summary>
+      <p>Ở màn đăng nhập, bấm <b>Quên mật khẩu?</b> dưới ô mật khẩu và làm theo hướng dẫn, hoặc liên hệ quản trị viên để cấp lại.</p>
+    </details>
+    <details class="reveal">
+      <summary>License hết hạn thì app có dừng không?</summary>
+      <p>Khi gần hết hạn, mở <b>Mua License</b> hoặc <b>Quản lý bản quyền</b> → <b>Mua / Gia hạn bản quyền mới</b> và thanh toán qua VietQR để gia hạn.</p>
+    </details>
+    <details class="reveal">
+      <summary>Gửi tin hàng loạt có bị Facebook khóa không?</summary>
+      <p>CRM gửi tuần tự và nghỉ giữa các tin (mặc định 5 giây). Bạn nên giữ mức nghỉ hợp lý, không gửi dồn dập để tài khoản an toàn.</p>
+    </details>
+  </div>
+</section>
+
+<footer>
+  <div class="f-logo">MISSPRICE CRM</div>
+  <p>Phần mềm quản lý tin nhắn Facebook &amp; Fanpage — tài liệu nội bộ đội nhóm.</p>
+  <p style="margin-top:6px;">© 2026 Missprice CRM. Mọi thông tin trong tài liệu chỉ dành cho nội bộ.</p>
+</footer>
+
+<!-- Lightbox Modal -->
+<div id="lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="Xem ảnh phóng to">
+  <button class="lb-btn lb-close" id="lbClose" aria-label="Đóng">&times;</button>
+  <button class="lb-btn lb-prev" id="lbPrev" aria-label="Ảnh trước">&#10094;</button>
+  <img id="lbImg" src="" alt="Ảnh phóng to">
+  <button class="lb-btn lb-next" id="lbNext" aria-label="Ảnh sau">&#10095;</button>
+  <div class="lb-cap" id="lbCap"></div>
+</div>
+
+<script>
+// Auth check
+(function () {
+  var authBtn = document.getElementById('authBtn');
+  if (!authBtn) return;
+
+  function showLoginState() {
+    authBtn.textContent = 'Đăng nhập';
+    authBtn.className = 'btn btn-ghost';
+    authBtn.onclick = function () { window.location.href = '/'; };
+    authBtn.style.display = '';
+  }
+
+  function showLogoutState() {
+    authBtn.textContent = 'Đăng xuất';
+    authBtn.className = 'btn btn-danger';
+    authBtn.onclick = function () {
+      authBtn.disabled = true;
+      authBtn.textContent = 'Đang đăng xuất...';
+      fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
+        .then(function () { window.location.href = '/'; })
+        .catch(function () { window.location.href = '/'; });
+    };
+    authBtn.style.display = '';
+  }
+
+  fetch('/api/auth/me', { credentials: 'include' })
+    .then(function (r) {
+      if (r.ok) showLogoutState(); else showLoginState();
+    })
+    .catch(showLoginState);
+})();
+
+// 1. Hiện dần khi cuộn (Scroll Reveal)
+(function initScrollReveal() {
+  var reveals = document.querySelectorAll('.reveal');
+  if (!reveals.length) return;
+  if ('IntersectionObserver' in window) {
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.12 });
+    reveals.forEach(function (el) { observer.observe(el); });
+  } else {
+    reveals.forEach(function (el) { el.classList.add('visible'); });
+  }
+})();
+
+// 2. Số đếm chạy tăng dần (Counter Animation)
+(function initCounter() {
+  var counters = document.querySelectorAll('.hero-stats .count');
+  if (!counters.length) return;
+  var started = false;
+
+  function runCounters() {
+    if (started) return;
+    started = true;
+    var duration = 1200;
+    var startTimestamp = null;
+
+    function step(timestamp) {
+      if (!startTimestamp) startTimestamp = timestamp;
+      var progress = Math.min((timestamp - startTimestamp) / duration, 1);
+      var ease = 1 - Math.pow(1 - progress, 3);
+
+      counters.forEach(function (el) {
+        var target = parseInt(el.getAttribute('data-target'), 10) || 0;
+        el.textContent = Math.floor(ease * target);
+      });
+
+      if (progress < 1) {
+        window.requestAnimationFrame(step);
+      } else {
+        counters.forEach(function (el) {
+          el.textContent = el.getAttribute('data-target');
+        });
+      }
+    }
+    window.requestAnimationFrame(step);
+  }
+
+  if ('IntersectionObserver' in window) {
+    var statsEl = document.getElementById('heroStats');
+    if (statsEl) {
+      var obs = new IntersectionObserver(function (entries) {
+        if (entries[0].isIntersecting) {
+          runCounters();
+          obs.disconnect();
+        }
+      }, { threshold: 0.2 });
+      obs.observe(statsEl);
+    } else {
+      runCounters();
+    }
+  } else {
+    runCounters();
+  }
+})();
+
+// 3. Bấm ảnh để phóng to (Lightbox)
+(function initLightbox() {
+  var lightbox = document.getElementById('lightbox');
+  var lbImg = document.getElementById('lbImg');
+  var lbCap = document.getElementById('lbCap');
+  var lbClose = document.getElementById('lbClose');
+  var lbPrev = document.getElementById('lbPrev');
+  var lbNext = document.getElementById('lbNext');
+  if (!lightbox || !lbImg) return;
+
+  var allImages = [];
+  var currentIndex = 0;
+
+  function getImages() {
+    return Array.from(document.querySelectorAll('.shot img'));
+  }
+
+  function showImage(idx) {
+    allImages = getImages();
+    if (!allImages.length) return;
+    if (idx < 0) idx = allImages.length - 1;
+    if (idx >= allImages.length) idx = 0;
+    currentIndex = idx;
+    var targetImg = allImages[currentIndex];
+    lbImg.src = targetImg.src;
+    lbImg.alt = targetImg.alt || '';
+    var parentShot = targetImg.closest('.shot') || targetImg.closest('.c-slide');
+    var capEl = parentShot ? parentShot.querySelector('.cap') : null;
+    lbCap.textContent = capEl ? capEl.textContent : (targetImg.alt || '');
+    lightbox.classList.add('open');
+  }
+
+  function closeLightbox() {
+    lightbox.classList.remove('open');
+    lbImg.src = '';
+  }
+
+  document.addEventListener('click', function (e) {
+    if (e.target.matches('.shot img')) {
+      allImages = getImages();
+      var idx = allImages.indexOf(e.target);
+      if (idx !== -1) {
+        showImage(idx);
+      }
+    }
+  });
+
+  if (lbClose) lbClose.addEventListener('click', closeLightbox);
+  if (lbPrev) lbPrev.addEventListener('click', function (e) { e.stopPropagation(); showImage(currentIndex - 1); });
+  if (lbNext) lbNext.addEventListener('click', function (e) { e.stopPropagation(); showImage(currentIndex + 1); });
+  lightbox.addEventListener('click', function (e) {
+    if (e.target === lightbox) closeLightbox();
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (!lightbox.classList.contains('open')) return;
+    if (e.key === 'Escape') closeLightbox();
+    else if (e.key === 'ArrowLeft') showImage(currentIndex - 1);
+    else if (e.key === 'ArrowRight') showImage(currentIndex + 1);
+  });
+})();
+
+// 4. Ảnh tự chuyển ở bước 4 (Carousel)
+(function initCarousel() {
+  var carousel = document.getElementById('campaignCarousel');
+  if (!carousel) return;
+  var slides = carousel.querySelectorAll('.c-slide');
+  var dots = carousel.querySelectorAll('.c-dots button');
+  if (!slides.length) return;
+
+  var currentIndex = 0;
+  var timer = null;
+
+  function goToSlide(idx) {
+    if (idx < 0) idx = slides.length - 1;
+    if (idx >= slides.length) idx = 0;
+    currentIndex = idx;
+    slides.forEach(function (s, i) {
+      if (i === currentIndex) s.classList.add('active');
+      else s.classList.remove('active');
+    });
+    dots.forEach(function (d, i) {
+      if (i === currentIndex) d.classList.add('active');
+      else d.classList.remove('active');
+    });
+  }
+
+  function nextSlide() {
+    goToSlide(currentIndex + 1);
+  }
+
+  function startAuto() {
+    stopAuto();
+    timer = setInterval(nextSlide, 4000);
+  }
+
+  function stopAuto() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  dots.forEach(function (dot, i) {
+    dot.addEventListener('click', function () {
+      goToSlide(i);
+      startAuto();
+    });
+  });
+
+  carousel.addEventListener('mouseenter', stopAuto);
+  carousel.addEventListener('mouseleave', startAuto);
+
+  startAuto();
+})();
+</script>
+
+</body>
+</html>

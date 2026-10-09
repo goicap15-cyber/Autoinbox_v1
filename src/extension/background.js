@@ -5132,6 +5132,11 @@ function moveMessengerDiscoverySidebar(action = 'step') {
   };
 }
 
+// Nhớ chữ ký preview của từng thread đã gửi ở nhịp realtime gần nhất.
+// Nhịp 2s chỉ gửi hàng có thay đổi (tin mới, cờ chưa đọc, nhãn giờ) -
+// tránh server query + emit lại toàn bộ danh sách mỗi 2s (nguồn lag UI).
+const realtimePreviewSeen = new Map();
+
 async function handleSync100Threads({ account_id, resume = false, scan_mode = 'full', time_budget_ms = 120000, reason = null }) {
   const requestedScan = { account_id, resume, scan_mode, time_budget_ms, reason };
   const requestedAccountKey = String(account_id || '');
@@ -5770,17 +5775,43 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
         page_id: t.page_id || null,
         source_type: t.source_type,
         inbox_folder: t.inbox_folder || 'INBOX',
-        inbox_folder_verified: t.inbox_folder_verified === true
+        inbox_folder_verified: t.inbox_folder_verified === true,
+        row_time_text: t.row_time_text || ''
       };
     }));
 
+    let outboundThreads = processedThreads;
+    let finalSyncStatus = cancelled
+      ? 'cancelled'
+      : (budgetExpired ? 'paused' : (isRealtimeRequestScan ? 'realtime_requests' : 'completed'));
+    // Nhịp realtime inbox: chỉ gửi hàng có chữ ký preview thay đổi so với
+    // nhịp trước. Server đi đường realtime_hint nhẹ (không query lại toàn
+    // bộ thread, không emit THREADS_SYNCED nếu rỗng).
+    if (isRealtimeInboxScan && !budgetExpired && !cancelled) {
+      const changedThreads = [];
+      for (const t of processedThreads) {
+        const key = `${String(account_id || '')}:${t.source_type || 'personal_messenger'}:${t.page_id || ''}:${String(t.thread_id)}`;
+        const sig = [
+          String(t.last_message ?? ''),
+          t.is_unread === true || Number(t.is_unread) === 1 ? '1' : '0',
+          t.preview_is_outgoing === true ? '1' : '0',
+          t.is_like === true ? '1' : '0',
+          String(t.inbox_folder || 'INBOX'),
+          String(t.row_time_text || '')
+        ].join('\u0001');
+        if (realtimePreviewSeen.get(key) !== sig) changedThreads.push(t);
+        realtimePreviewSeen.set(key, sig);
+      }
+      if (realtimePreviewSeen.size > 5000) realtimePreviewSeen.clear();
+      outboundThreads = changedThreads;
+      finalSyncStatus = 'realtime_hint';
+    }
+
     sendToBackend('SYNC_THREADS_RESULT', {
       account_id,
-      threads: processedThreads,
+      threads: outboundThreads,
       partial: budgetExpired || cancelled,
-      sync_status: cancelled
-        ? 'cancelled'
-        : (budgetExpired ? 'paused' : (isRealtimeRequestScan ? 'realtime_requests' : 'completed')),
+      sync_status: finalSyncStatus,
       checkpoint: [...checkpoint.sections.entries()].map(([section, state]) => ({ section, count: state.threads.size, completed: state.completed }))
     });
   } catch (err) {
