@@ -67,3 +67,38 @@ test('cross-thread mid collision stores a per-thread mirror instead of dropping'
   ], db);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM messages').get().count, 2);
 }));
+
+// Phantom __bubble_N tái dùng anchor CŨ: tin outgoing pending được tổng hợp
+// id mid.X__bubble_1 với mid.X là tin cũ cách xa (quét lại gắn nhầm article
+// cũ). Bản thật sẽ tự vào bằng mid riêng vài giây sau -> bỏ bản tổng hợp,
+// nếu không thành row ma trùng lặp mà heal 2c không với tới (ts lệch quá
+// cửa sổ 2s, reproduce 2026-10-08 18:33: alo tái dùng mid 10/06).
+test('outgoing bubble-family id anchored to an old same-text message is skipped', () => withDatabase((db) => {
+  db.prepare('INSERT INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-1', 'A', '/tmp/a');
+  ConversationRepository.upsertThread({ id: 'thread-1', account_id: 'acct-1', contact_name: 'Alice' }, db);
+  const twoDaysAgo = Date.now() - 48 * 3600 * 1000;
+  ConversationRepository.saveMessagesTransaction('thread-1', [
+    { fb_message_id: 'peer@msgr.111', sender_id: 'acct-1', content: 'alo', timestamp_ms: twoDaysAgo, is_outgoing: true }
+  ], db);
+  ConversationRepository.saveMessagesTransaction('thread-1', [
+    { fb_message_id: 'peer@msgr.111__bubble_1', sender_id: 'acct-1', content: 'alo', timestamp_ms: Date.now(), is_outgoing: true }
+  ], db);
+  const rows = db.prepare('SELECT fb_message_id FROM messages ORDER BY id').all();
+  assert.deepEqual(rows, [{ fb_message_id: 'peer@msgr.111' }]);
+}));
+
+// Pending thật nằm CÙNG article anchor (anchor mới hơn 60s) hoặc like-group
+// thật vẫn phải đi qua - guard chỉ bỏ anchor cũ.
+test('recent same-article bubble-family observation is kept', () => withDatabase((db) => {
+  db.prepare('INSERT INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-1', 'A', '/tmp/a');
+  ConversationRepository.upsertThread({ id: 'thread-1', account_id: 'acct-1', contact_name: 'Alice' }, db);
+  const now = Date.now();
+  ConversationRepository.saveMessagesTransaction('thread-1', [
+    { fb_message_id: 'peer@msgr.222', sender_id: 'acct-1', content: 'alo', timestamp_ms: now - 5000, is_outgoing: true }
+  ], db);
+  ConversationRepository.saveMessagesTransaction('thread-1', [
+    { fb_message_id: 'peer@msgr.222__bubble_1', sender_id: 'acct-1', content: 'alo', timestamp_ms: now, is_outgoing: true }
+  ], db);
+  const rows = db.prepare('SELECT fb_message_id FROM messages ORDER BY id').all();
+  assert.deepEqual(rows, [{ fb_message_id: 'peer@msgr.222' }, { fb_message_id: 'peer@msgr.222__bubble_1' }]);
+}));

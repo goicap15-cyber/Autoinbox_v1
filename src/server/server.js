@@ -2876,6 +2876,40 @@ wss.on('connection', (ws, req) => {
 
           // Lưu tin nhắn vào bảng messages
           let stableMessageId = m.fb_message_id || m.client_message_id || ConversationRepository.fingerprint(m.thread_id, m);
+          // Phantom family __bubble_N: id tổng hợp mid.X__bubble_N nhưng row
+          // base mid.X cùng thread tồn tại với nội dung giống nhau. Like-group
+          // thật ở cùng article nên cùng người gửi (không bao giờ lật hướng),
+          // còn pending thật luôn được xác nhận bằng mid riêng vài giây sau:
+          //  - quan sát ĐẾN nhưng base là tin ĐI (hoặc ngược lại) -> phantom
+          //    lật chiều (reproduce 2026-10-08: "nhắn gì đó"/"allo"/"alo" của
+          //    operator hiện thêm bản sao bên trái khách);
+          //  - cùng hướng nhưng base cũ hơn 60s -> pending bị gán nhầm anchor
+          //    cũ (reproduce 18:33: alo tái dùng mid 10/06) - bản thật sẽ tự
+          //    vào DB bằng mid riêng.
+          if (/__bubble_\d+$/.test(String(stableMessageId))
+            && (!m.media_type || m.media_type === 'text') && !m.media_url
+            && !/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(String(m.content || ''))) {
+            const bubbleFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+            const bubbleBaseRow = bubbleFamilyId.length >= 12
+              ? db.prepare(`
+                  SELECT content, is_outgoing, timestamp_ms FROM messages
+                  WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
+                  ORDER BY id DESC LIMIT 1
+                `).get(m.thread_id, bubbleFamilyId, bubbleFamilyId)
+              : null;
+            if (bubbleBaseRow
+              && String(bubbleBaseRow.content || '').trim() === String(m.content || '').trim()
+              && (Number(bubbleBaseRow.is_outgoing) !== (isOutgoing ? 1 : 0)
+                || Math.abs(Number(tsMs || 0) - Number(bubbleBaseRow.timestamp_ms || 0)) > 60000)) {
+              syncDebug('WS_SKIP_BUBBLE_FAMILY_PHANTOM', {
+                thread: m.thread_id,
+                fb_message_id: String(stableMessageId).substring(0, 70),
+                base_outgoing: Number(bubbleBaseRow.is_outgoing),
+                observed_outgoing: isOutgoing ? 1 : 0
+              });
+              break;
+            }
+          }
           if (!isOutgoing && m.fb_message_id) {
             const promotedPreview = ConversationRepository.promoteSidebarPreview({
               threadId: m.thread_id,
@@ -7794,11 +7828,32 @@ function startServer() {
       FROM messages WHERE thread_id = ? AND fb_message_id IN (${[...new Array(50)].map(() => '?').join(',')})
     `);
     const deletePhantomBubble = db.prepare('DELETE FROM messages WHERE id = ?');
+    // (2c-bis) Phantom LẬT CHIỀU: __bubble_N là id tổng hợp của lá KHÔNG có
+    // mid riêng trong article gốc - like-group thật cùng article nên cùng
+    // người gửi, nên row __bubble_N Khác hướng với base cùng nội dung chỉ
+    // có thể là quét lại sai nhãn (reproduce 2026-10-08: "nhắn gì đó"/"allo"
+    // của operator thành tin khách, id ...7513148857660772091__bubble_1).
+    // Base có thể bị rút gọn prefix (7513...__bubble_1 vs peer@msgr.7513...).
+    const familyBaseStmt = db.prepare(`
+      SELECT id, content, is_outgoing FROM messages
+      WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
+      ORDER BY id DESC LIMIT 1
+    `);
     const phantomThreadIds = new Set();
     for (const m of bubbleRows) {
       if ((m.media_type && m.media_type !== 'text') || m.media_url) continue;
       if (!/__bubble_\d+$/.test(String(m.fb_message_id || ''))) continue;
       const familyId = String(m.fb_message_id).replace(/__bubble_\d+$/, '');
+      const familyBase = familyId.length >= 12
+        ? familyBaseStmt.get(m.thread_id, familyId, familyId)
+        : null;
+      if (familyBase
+        && String(familyBase.content || '') === String(m.content || '')
+        && Number(familyBase.is_outgoing) !== Number(m.is_outgoing)) {
+        deletePhantomBubble.run(m.id);
+        phantomThreadIds.add(m.thread_id);
+        continue;
+      }
       const members = familyMembers.all(m.thread_id, familyId, m.fb_message_id,
         ...[...new Array(48)].map(() => '?'));
       const sameBubble = (twin) => twin.id !== m.id

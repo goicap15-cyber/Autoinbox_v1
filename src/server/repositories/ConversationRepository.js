@@ -537,6 +537,29 @@ class ConversationRepository {
             }
           }
         }
+        // Pending outgoing bị tổng hợp id mid.X__bubble_N với anchor CŨ (quét
+        // lại gắn nhầm article cũ cách xa): bản thật tự vào DB bằng mid riêng
+        // vài giây sau, nên bỏ bản tổng hợp - nếu không sẽ thành row ma trùng
+        // lặp mà heal 2c không với tới (ts lệch quá cửa sổ 2s, reproduce
+        // 2026-10-08 18:33: alo tái dùng mid 10/06).
+        if (isOutgoing && /__bubble_\d+$/.test(String(stableId))
+          && mediaType === 'text' && !mediaUrl
+          && !isPureEmojiContent) {
+          const outgoingBubbleFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
+          const outgoingBubbleBase = outgoingBubbleFamilyId.length >= 12
+            ? database.prepare(`
+                SELECT content, timestamp_ms FROM messages
+                WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
+                ORDER BY id DESC LIMIT 1
+              `).get(threadId, outgoingBubbleFamilyId, outgoingBubbleFamilyId)
+            : null;
+          if (outgoingBubbleBase
+            && String(outgoingBubbleBase.content || '').trim() === String(content || '').trim()
+            && Math.abs(observedTimestampMs - Number(outgoingBubbleBase.timestamp_ms || 0)) > 60000) {
+            result.skippedCount += 1;
+            continue;
+          }
+        }
         let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
         // Multi-account: mid này đã thuộc thread của acc khác -> dùng bản sao
         // mirror (mid::thread) thay vì UPSERT nhầm row của acc kia (mất tin
