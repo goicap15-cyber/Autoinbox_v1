@@ -3039,6 +3039,23 @@ wss.on('connection', (ws, req) => {
           }
 
           let wasNewMessage = insertMsgResult.changes > 0;
+          if (wasNewMessage) {
+            // Row ma lật chiều có thể đã chèn TRƯỚC base trong cùng đợt quét
+            // (guard phía trên cần base đã tồn tại) - base vừa đổ vào thì dọn
+            // ngay sibling __bubble_N cùng family khác hướng.
+            try {
+              const healedFlipCount = ConversationRepository.collapseFlippedBubbleSiblings(m.thread_id, stableMessageId, m.content, db);
+              if (healedFlipCount > 0) {
+                syncDebug('WS_HEAL_FLIPPED_BUBBLE_SIBLING', {
+                  thread: m.thread_id,
+                  fb_message_id: String(stableMessageId).substring(0, 70),
+                  healed: healedFlipCount
+                });
+              }
+            } catch (sweepError) {
+              console.warn('[WS] Flipped bubble sibling sweep failed:', sweepError.message);
+            }
+          }
           if (wasNewMessage && !String(stableMessageId).endsWith('_media')) {
             try {
               // A media companion can be observed before the base native row.

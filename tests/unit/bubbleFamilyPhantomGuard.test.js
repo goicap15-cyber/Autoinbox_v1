@@ -63,3 +63,60 @@ test('bare-numeric otid rows claiming incoming are rejected on every save path',
   // guard repo: đối xứng cho đường history
   assert.equal(repo.includes('if (!isOutgoing && /^[0-9]{15,19}(?:__bubble_\\d+)?$/.test(String(stableId))'), true);
 });
+
+// Race cùng đợt quét (reproduce 2026-10-09 04:23:25): row ma lật chiều
+// __bubble_1 out=0 chèn TRƯỚC base out=1 (seq 113 < 114) - guard WS cần base
+// đã tồn tại nên lọt. Base đổ vào 1ms sau phải tự dọn ma.
+test('flipped bubble sibling inserted before its base is collapsed when the base lands', () => {
+  const Database = require('better-sqlite3');
+  const ConversationRepository = require('../../src/server/repositories/ConversationRepository');
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, fb_message_id TEXT UNIQUE, client_message_id TEXT, sender_id TEXT, content TEXT, media_type TEXT, media_url TEXT, timestamp_ms INTEGER, timestamp_source TEXT, is_outgoing INTEGER, sender_role TEXT, sequence_order REAL, direction_status TEXT, created_at TEXT)`);
+  const tid = '61586667541379';
+  const family = 'mid.$cAABi91rGyeqnUCwvTWhHubm8AE_k';
+  const ins = db.prepare(`INSERT INTO messages (thread_id, fb_message_id, content, media_type, is_outgoing, timestamp_ms, created_at) VALUES (?, ?, ?, 'text', ?, ?, ?)`);
+  ins.run(tid, `${family}__bubble_1`, 'alo', 0, 1760000000000, '2026-10-09T04:23:25.424Z');
+  // base chưa vào DB: chưa được xoá gì (ma đứng trước base trong cùng đợt)
+  assert.equal(ConversationRepository.collapseFlippedBubbleSiblings(tid, `${family}__bubble_1`, 'alo', db), 0);
+  ins.run(tid, family, 'alo', 1, 1760000000000, '2026-10-09T04:23:25.423Z');
+  // base đổ vào -> ma cùng family khác hướng cùng nội dung phải bị xoá
+  assert.equal(ConversationRepository.collapseFlippedBubbleSiblings(tid, family, 'alo', db), 1);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM messages WHERE fb_message_id LIKE ?').get('%__bubble_%').c, 0);
+  db.close();
+});
+
+test('same-direction like-group sibling, emoji and media flips are never collapsed', () => {
+  const Database = require('better-sqlite3');
+  const ConversationRepository = require('../../src/server/repositories/ConversationRepository');
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, fb_message_id TEXT UNIQUE, client_message_id TEXT, sender_id TEXT, content TEXT, media_type TEXT, media_url TEXT, timestamp_ms INTEGER, timestamp_source TEXT, is_outgoing INTEGER, sender_role TEXT, sequence_order REAL, direction_status TEXT, created_at TEXT)`);
+  const tid = 't1';
+  const ins = db.prepare(`INSERT INTO messages (thread_id, fb_message_id, content, media_type, media_url, is_outgoing, timestamp_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+  // like-group thật: 2 lá CÙNG hướng như nhau -> giữ nguyên
+  ins.run(tid, 'mid.abc', 'hello', 'text', null, 0, 1000, '2026-01-01T00:00:00Z');
+  ins.run(tid, 'mid.abc__bubble_1', 'hello', 'text', null, 0, 1001, '2026-01-01T00:00:00Z');
+  assert.equal(ConversationRepository.collapseFlippedBubbleSiblings(tid, 'mid.abc', 'hello', db), 0);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM messages WHERE fb_message_id = ?').get('mid.abc__bubble_1').c, 1);
+  // emoji thuần: operator/khách lặp 👍 là bình thường -> miễn trừ
+  db.prepare('DELETE FROM messages').run();
+  ins.run(tid, 'mid.emo', '👍', 'text', null, 1, 1000, '2026-01-01T00:00:00Z');
+  ins.run(tid, 'mid.emo__bubble_1', '👍', 'text', null, 0, 1001, '2026-01-01T00:00:00Z');
+  assert.equal(ConversationRepository.collapseFlippedBubbleSiblings(tid, 'mid.emo', '👍', db), 0);
+  // media: chỉ quét text, ảnh/video của family không bị đụng
+  db.prepare('DELETE FROM messages').run();
+  ins.run(tid, 'mid.img', 'ảnh', 'text', null, 1, 1000, '2026-01-01T00:00:00Z');
+  ins.run(tid, 'mid.img__bubble_1', 'ảnh', 'image', 'http://cdn/a.jpg', 0, 1001, '2026-01-01T00:00:00Z');
+  assert.equal(ConversationRepository.collapseFlippedBubbleSiblings(tid, 'mid.img', 'ảnh', db), 0);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM messages').get().c, 2);
+  db.close();
+});
+
+// Sweep phải được gọi sau MỖI insert thành công ở cả 2 đường (WS realtime +
+// repo history) - nếu không race flip-trước-base sẽ sống cả session.
+test('flipped-sibling sweep is wired after insert on WS and repo paths', () => {
+  const server = fs.readFileSync('src/server/server.js', 'utf8');
+  const repo = fs.readFileSync('src/server/repositories/ConversationRepository.js', 'utf8');
+  assert.equal(server.includes('ConversationRepository.collapseFlippedBubbleSiblings(m.thread_id, stableMessageId, m.content, db)'), true);
+  assert.equal(server.includes("syncDebug('WS_HEAL_FLIPPED_BUBBLE_SIBLING'"), true);
+  assert.equal(repo.includes('ConversationRepository.collapseFlippedBubbleSiblings(threadId, stableId, content, database)'), true);
+});

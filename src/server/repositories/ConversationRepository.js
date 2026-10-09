@@ -235,6 +235,42 @@ class ConversationRepository {
     return candidates.some((row) => String(row.content || '')
       .replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN') === normalizedContent);
   }
+
+  // Row ma lật chiều vào TRƯỚC row base trong cùng đợt quét (reproduce
+  // 2026-10-09 04:23: alo composer - ma __bubble_1 out=0 seq 113 chèn 1ms
+  // trước base out=1 seq 114): guard WS cần base đã tồn tại nên lọt khi base
+  // chưa vào DB. Gọi sau MỖI lần insert thành công - khi base đổ vào sẽ dọn
+  // sibling __bubble_N cùng family, cùng nội dung, KHÁC hướng đã chèn trước.
+  static collapseFlippedBubbleSiblings(threadId, insertedMessageId, content, database = getDefaultDb()) {
+    const familyId = String(insertedMessageId || '').replace(/__bubble_\d+$/, '');
+    if (!threadId || familyId.length < 12) return 0;
+    const normalized = String(content || '').replace(/\s+/g, ' ').trim();
+    if (!normalized) return 0;
+    if (/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(normalized)) return 0;
+    const baseRow = database.prepare(`
+      SELECT is_outgoing, content, media_type, media_url FROM messages
+      WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
+      ORDER BY id DESC LIMIT 1
+    `).get(threadId, familyId, familyId);
+    if (!baseRow) return 0;
+    if (String(baseRow.content || '').replace(/\s+/g, ' ').trim() !== normalized) return 0;
+    if (baseRow.media_type && baseRow.media_type !== 'text') return 0;
+    const flippedRows = database.prepare(`
+      SELECT id, fb_message_id, content, media_type, media_url FROM messages
+      WHERE thread_id = ? AND is_outgoing != ?
+    `).all(threadId, Number(baseRow.is_outgoing) ? 1 : 0);
+    let deleted = 0;
+    for (const row of flippedRows) {
+      const rowId = String(row.fb_message_id || '');
+      if (!rowId.startsWith(`${familyId}__bubble_`)) continue;
+      if (row.media_type && row.media_type !== 'text') continue;
+      if (row.media_url) continue;
+      if (String(row.content || '').replace(/\s+/g, ' ').trim() !== normalized) continue;
+      database.prepare('DELETE FROM messages WHERE id = ?').run(row.id);
+      deleted += 1;
+    }
+    return deleted;
+  }
   static upsertThread(threadData, database = getDefaultDb()) {
     const { id, account_id, thread_url, contact_name, last_message, is_unread, source_id, inbox_folder } = threadData;
     const external_thread_id = String(threadData.external_thread_id || threadData.thread_id || id);
@@ -724,6 +760,11 @@ class ConversationRepository {
         }
         insertMsg.run(threadId, stableId, senderId, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
         result.insertedIds.push(stableId);
+        // Batch có thể mang row ma lật chiều ĐỨNG TRƯỚC base (guard 513 cần
+        // base đã tồn tại) - base vừa insert thì dọn sibling __bubble_N.
+        try {
+          ConversationRepository.collapseFlippedBubbleSiblings(threadId, stableId, content, database);
+        } catch (_) { /* sweep là lành hóa, không chặn persist */ }
       }
       return result;
     });
