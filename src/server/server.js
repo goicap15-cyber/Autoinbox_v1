@@ -1163,15 +1163,57 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
     trace('BACKEND_DISPATCHED_EXTENSION');
 
     // Never leave the CRM bubble pending forever when an extension handler
-    // stalls before returning SEND_MESSAGE_RESULT.
+    // stalls before returning SEND_MESSAGE_RESULT. Xoá row ở đây từng là
+    // THỦ PHẠM MẤT TIN: flow composer có thể vẫn đã gõ + gửi xong bên
+    // Messenger trong khi mọi đường xác nhận (COMPOSER_DISPATCHED, echo DOM,
+    // history) tới muộn hoặc bị nuốt — reproduce 2026-10-09 12:54: 4 tin
+    // "alo" nhắn liên tiếp chỉ còn 1 row, 3 row pending bị xoá đúng 30s sau
+    // khi dispatch dù Messenger có đủ 4 bubble. Chỉ xoá khi tin chắc chắn đã
+    // được lưu ở chỗ khác (row mid thật cùng nội dung); còn lại GIỮ row.
     setTimeout(() => {
-      const pending = db.prepare(`
-        SELECT id FROM messages
+      const ackPending = db.prepare(`
+        SELECT id, fb_message_id, content, created_at FROM messages
         WHERE client_message_id = ? AND delivery_status = 'pending'
       `).get(clientMsgId);
-      if (!pending) return;
+      if (!ackPending) return;
       const timeoutError = 'Extension không xác nhận kết quả gửi trong 30 giây';
-      deleteOutboundMessageRows({ messageId: pending.id });
+      syncDebug('OUT_ACK_TIMEOUT', { thread: String(thread_id), client_message_id: clientMsgId, fb_message_id: String(ackPending.fb_message_id || '').substring(0, 40) });
+      // Echo-merge đã ghép mid thật vào row (còn đứng ở pending) => tin đã
+      // lên Messenger, chỉ thiếu cờ sent.
+      if (ackPending.fb_message_id && !String(ackPending.fb_message_id).startsWith('pending_')) {
+        db.prepare(`UPDATE messages SET delivery_status = 'sent', delivery_error = NULL WHERE id = ?`).run(ackPending.id);
+        io.emit('MESSAGE_SENT', { thread_id, client_message_id: clientMsgId, fb_message_id: ackPending.fb_message_id, status: 'sent' });
+        syncDebug('OUT_ACK_TIMEOUT_MID_ATTACHED', { thread: String(thread_id), client_message_id: clientMsgId });
+        return;
+      }
+      // Tin đã được lưu bằng mid thật riêng (echo/history bắt được) -> row
+      // optimistic này là bản thừa, xoá an toàn (đúng mục đích gốc của sweeper).
+      const capturedElsewhere = db.prepare(`
+        SELECT id FROM messages
+        WHERE thread_id = ? AND is_outgoing = 1 AND id != ?
+          AND COALESCE(content, '') = COALESCE(?, '')
+          AND (fb_message_id LIKE 'mid.%' OR fb_message_id LIKE '%@msgr.%')
+          AND datetime(created_at) >= datetime(?)
+        LIMIT 1
+      `).get(thread_id, ackPending.id, ackPending.content, ackPending.created_at);
+      if (capturedElsewhere) {
+        deleteOutboundMessageRows({ messageId: ackPending.id });
+        io.emit('MESSAGE_SEND_FAILED', {
+          thread_id,
+          client_message_id: clientMsgId,
+          success: false,
+          status: 'failed',
+          error: timeoutError,
+          error_code: 'EXTENSION_ACK_TIMEOUT'
+        });
+        syncDebug('OUT_ACK_TIMEOUT_DEDUPED', { thread: String(thread_id), client_message_id: clientMsgId, kept_row: capturedElsewhere.id });
+        return;
+      }
+      // Chưa có bằng chứng 2 chiều: KHÔNG xoá. Đánh dấu failed để UI hiển thị,
+      // đồng thời bắn 1 job crawl thread + chờ thêm 45s - echo/crawler đến muộn
+      // vẫn ghép được (pending-match nhận cả row failed, fb_message_id còn
+      // pending_%). Hết grace vẫn không có gì mới -> giữ nguyên row failed.
+      db.prepare(`UPDATE messages SET delivery_status = 'failed', delivery_error = ? WHERE id = ?`).run(timeoutError, ackPending.id);
       io.emit('MESSAGE_SEND_FAILED', {
         thread_id,
         client_message_id: clientMsgId,
@@ -1180,6 +1222,63 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
         error: timeoutError,
         error_code: 'EXTENSION_ACK_TIMEOUT'
       });
+      const ackExtWs = extensionConnections.get(String(thread.account_id));
+      if (ackExtWs && ackExtWs.readyState === WebSocket.OPEN) {
+        ackExtWs.send(JSON.stringify({
+          type: 'SYNC_THREAD_MESSAGES',
+          data: {
+            account_id: thread.account_id,
+            thread_id,
+            external_thread_id: thread_id,
+            thread_url: thread.thread_url || null,
+            page_id: null,
+            mode: 'incremental',
+            cursor: null,
+            contact_name: thread.contact_name || null,
+            reason: 'history_retry',
+            allow_navigation: true,
+            scroll_delta: 0
+          }
+        }));
+      }
+      syncDebug('OUT_ACK_TIMEOUT_KEPT', { thread: String(thread_id), client_message_id: clientMsgId });
+      setTimeout(() => {
+        const latePending = db.prepare(`
+          SELECT id, fb_message_id FROM messages
+          WHERE id = ? AND delivery_status IN ('pending', 'failed')
+        `).get(ackPending.id);
+        if (!latePending) return;
+        const lateError = 'Extension không xác nhận kết quả gửi trong 75 giây';
+        if (latePending.fb_message_id && !String(latePending.fb_message_id).startsWith('pending_')) {
+          db.prepare(`UPDATE messages SET delivery_status = 'sent', delivery_error = NULL WHERE id = ?`).run(latePending.id);
+          io.emit('MESSAGE_SENT', { thread_id, client_message_id: clientMsgId, fb_message_id: latePending.fb_message_id, status: 'sent' });
+          syncDebug('OUT_ACK_GRACE_MID_ATTACHED', { thread: String(thread_id), client_message_id: clientMsgId });
+          return;
+        }
+        const lateCaptured = db.prepare(`
+          SELECT id FROM messages
+          WHERE thread_id = ? AND is_outgoing = 1 AND id != ?
+            AND COALESCE(content, '') = COALESCE(?, '')
+            AND (fb_message_id LIKE 'mid.%' OR fb_message_id LIKE '%@msgr.%')
+            AND datetime(created_at) >= datetime(?)
+          LIMIT 1
+        `).get(thread_id, latePending.id, ackPending.content, ackPending.created_at);
+        if (lateCaptured) {
+          deleteOutboundMessageRows({ messageId: latePending.id });
+          io.emit('MESSAGE_SEND_FAILED', {
+            thread_id,
+            client_message_id: clientMsgId,
+            success: false,
+            status: 'failed',
+            error: lateError,
+            error_code: 'EXTENSION_ACK_TIMEOUT'
+          });
+          syncDebug('OUT_ACK_GRACE_DEDUPED', { thread: String(thread_id), client_message_id: clientMsgId, kept_row: lateCaptured.id });
+          return;
+        }
+        db.prepare(`UPDATE messages SET delivery_status = 'failed', delivery_error = ? WHERE id = ?`).run(lateError, latePending.id);
+        syncDebug('OUT_ACK_GRACE_KEPT', { thread: String(thread_id), client_message_id: clientMsgId });
+      }, 45000);
     }, 30000);
   }
 
@@ -1863,6 +1962,7 @@ wss.on('connection', (ws, req) => {
           
           console.log(`[WS] SEND_MESSAGE_RESULT: thread=${thread_id} client_msg_id=${client_message_id} success=${success} fb_msg_id=${officialFbId}`);
           console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_RESULT_RECEIVED', thread_id: String(thread_id), client_message_id, success: !!success, official_fb_id: !!officialFbId, error_code: error_code || null, error: error || null, at: new Date().toISOString() }));
+          syncDebug('OUT_RESULT', { thread: String(thread_id), client_message_id, success: !!success, official_fb_id: !!officialFbId, error_code: error_code || null });
           
           if (success && officialFbId) {
             db.prepare(`
@@ -1875,17 +1975,34 @@ wss.on('connection', (ws, req) => {
             io.emit('MESSAGE_SENT', { thread_id, client_message_id, success: true, fb_message_id: officialFbId, status: 'sent' });
           } else if (error_code === 'COMPOSER_DISPATCHED') {
             // Check if DOM/network confirmation already arrived before this result
-            const existingRow = db.prepare(`SELECT id, fb_message_id, media_type, delivery_status, delivery_error FROM messages WHERE client_message_id = ? OR fb_message_id = ?`).get(client_message_id, `pending_${client_message_id}`);
+            const existingRow = db.prepare(`SELECT id, fb_message_id, media_type, attachment_id, delivery_status, delivery_error FROM messages WHERE client_message_id = ? OR fb_message_id = ?`).get(client_message_id, `pending_${client_message_id}`);
             if (existingRow && existingRow.delivery_status === 'sent') {
               console.log(`[WS] COMPOSER_DISPATCHED arrived but row already sent for ${client_message_id}. No-op.`);
               updateQueueStatusFromClientMessage(client_message_id, 'sent');
               io.emit('MESSAGE_SENT', { thread_id, client_message_id, status: 'sent' });
               console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DISPATCHED_ALREADY_SENT', thread_id: String(thread_id), client_message_id, at: new Date().toISOString() }));
             } else if (existingRow && existingRow.delivery_status === 'failed') {
-              console.log(`[WS] COMPOSER_DISPATCHED arrived but row already failed for ${client_message_id}. No-op.`);
-              const failError = existingRow.delivery_error || 'Previously failed';
-              io.emit('MESSAGE_SEND_FAILED', { thread_id, client_message_id, success: false, status: 'failed', error: failError });
-              console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DISPATCHED_ALREADY_FAILED', thread_id: String(thread_id), client_message_id, at: new Date().toISOString() }));
+              // ACK timeout đã đánh dấu failed trước đó, nhưng composer vừa
+              // xác nhận là nó ĐÃ dispatch (gõ + submit xong). Bằng chứng dương
+              // này đè phán đoán timeout: nâng failed -> sent tạm cho row text.
+              // (reproduce 2026-10-09: flow composer chậm >30s vì tab đang điều
+              // hướng, sweeper kịp đánh dấu failed trước khi result về.)
+              if (existingRow.id && existingRow.attachment_id == null
+                && (!existingRow.media_type || existingRow.media_type === 'text')) {
+                db.prepare(`
+                  UPDATE messages SET delivery_status = 'sent', delivery_error = NULL
+                  WHERE id = ? AND is_outgoing = 1
+                `).run(existingRow.id);
+                updateQueueStatusFromClientMessage(client_message_id, 'sent');
+                io.emit('MESSAGE_SENT', { thread_id, client_message_id, status: 'sent', provisional: true });
+                syncDebug('OUT_LATE_DISPATCH_UPGRADED', { thread: String(thread_id), client_message_id });
+                console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DISPATCHED_LATE_UPGRADED', thread_id: String(thread_id), client_message_id, at: new Date().toISOString() }));
+              } else {
+                console.log(`[WS] COMPOSER_DISPATCHED arrived but row already failed for ${client_message_id}. No-op.`);
+                const failError = existingRow.delivery_error || 'Previously failed';
+                io.emit('MESSAGE_SEND_FAILED', { thread_id, client_message_id, success: false, status: 'failed', error: failError });
+                console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DISPATCHED_ALREADY_FAILED', thread_id: String(thread_id), client_message_id, at: new Date().toISOString() }));
+              }
             } else {
               console.log(`[WS] Composer đã dispatch tin; giữ pending chờ DOM/network confirmation: ${client_message_id}`);
               // A cleared text composer is a successful transport hand-off.
@@ -1908,6 +2025,11 @@ wss.on('connection', (ws, req) => {
                 provisional: true
               });
               console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_CONFIRMATION_GRACE', thread_id: String(thread_id), client_message_id, at: new Date().toISOString() }));
+              syncDebug('OUT_DISPATCH_CONFIRMED', {
+                thread: String(thread_id),
+                client_message_id,
+                row_id: existingRow?.id || null
+              });
             }
           } else {
             // A composer dispatch can be acknowledged provisionally before the
@@ -2542,7 +2664,7 @@ wss.on('connection', (ws, req) => {
             if (echoLabelMatch) echoContent = echoLabelMatch[1].trim();
             if (echoContent) {
               const pendingRow = db.prepare(`
-                SELECT id FROM messages
+                SELECT id, client_message_id FROM messages
                 WHERE thread_id = ? AND is_outgoing = 1
                   AND fb_message_id LIKE 'pending_client_%'
                   AND created_at >= datetime('now', '-2 minutes')
@@ -2550,9 +2672,13 @@ wss.on('connection', (ws, req) => {
                 ORDER BY id ASC LIMIT 1
               `).get(String(canonicalThreadId), echoContent);
               if (pendingRow) {
-                db.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?')
+                // Mid của echo = mid của tin này: gắn luôn cờ sent, nếu không
+                // sweeper ACK-timeout sẽ đánh dấu failed dù tin đã lên Messenger.
+                db.prepare(`UPDATE messages SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL WHERE id = ?`)
                   .run(String(m.fb_message_id), pendingRow.id);
                 console.log(`[WS] 🔗 Ghép echo ${m.fb_message_id} vào row pending #${pendingRow.id} (đúng vị trí gửi) - thread ${canonicalThreadId}`);
+                syncDebug('OUT_ECHO_MERGED', { thread: String(canonicalThreadId), row_id: pendingRow.id, fb_message_id: String(m.fb_message_id).substring(0, 45) });
+                io.emit('MESSAGE_SENT', { thread_id: String(canonicalThreadId), client_message_id: pendingRow.client_message_id, message_id: pendingRow.id, fb_message_id: String(m.fb_message_id), status: 'sent' });
                 io.emit('MESSAGE_UPDATED', { thread_id: String(canonicalThreadId), id: String(pendingRow.id) }).catch?.(() => {});
                 break;
               }
@@ -2743,6 +2869,11 @@ wss.on('connection', (ws, req) => {
                 const existingFbId = db.prepare('SELECT id, is_outgoing, delivery_status FROM messages WHERE fb_message_id = ?').get(m.fb_message_id);
                 if (existingFbId && existingFbId.is_outgoing === 1 && existingFbId.delivery_status === 'sent') {
                   console.log(`[WS] Known confirmed fb_message_id (${m.fb_message_id}); pending recovery found no candidate.`);
+                  syncDebug('OUT_KNOWN_CONFIRMED_SKIP', {
+                    thread: String(internalThreadId),
+                    fb_message_id: String(m.fb_message_id).substring(0, 45),
+                    existing_row_id: existingFbId.id
+                  });
                   break;
                 }
               }
@@ -2770,7 +2901,8 @@ wss.on('connection', (ws, req) => {
                       OR attempt.id = queued.outbound_attempt_id
                     )
                     WHERE outbound.thread_id = ? AND outbound.content = ? AND outbound.is_outgoing = 1
-                      AND outbound.delivery_status = 'pending'
+                      AND outbound.delivery_status IN ('pending', 'failed')
+                      AND outbound.fb_message_id LIKE 'pending_%'
                       AND outbound.attachment_id IS NULL AND (outbound.media_type IS NULL OR outbound.media_type = 'text')
                       AND (queued.id IS NULL OR (queued.attachment_id IS NULL AND queued.manifest_id IS NULL))
                     ORDER BY outbound.id ASC LIMIT 1

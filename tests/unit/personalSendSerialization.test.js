@@ -130,6 +130,7 @@ test('hydrated outgoing video confirms pending state without replaying anonymous
   const reconcile = source.slice(reconcileStart, reconcileEnd);
   assert.match(reconcile, /if \(!parsed\.native_id\) continue;/);
   assert.match(reconcile, /const isMediaRow = Boolean/);
-  assert.match(reconcile, /if \(parsed\.is_outgoing && !isCallRow && !isMediaRow\) continue;/);
+  assert.match(reconcile, /if \(parsed\.is_outgoing && !isCallRow && !isMediaRow && !hasDurableMidId\) continue;/);
+  assert.match(reconcile, /const hasDurableMidId = \/\^mid\\\.\//);
   assert.doesNotMatch(source, /callLogObserver\.observe\(document\.body/);
 });

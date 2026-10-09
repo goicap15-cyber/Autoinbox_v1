@@ -2097,8 +2097,14 @@
         // Outgoing media is required here: MutationObserver often sees the
         // video shell before Facebook hydrates its native id/media element.
         // The periodic tail pass then provides the confirmation that clears
-        // the CRM pending spinner. Plain outgoing text remains on its existing path.
-        if (parsed.is_outgoing && !isCallRow && !isMediaRow) continue;
+        // the CRM pending spinner. Plain outgoing text vẫn bỏ qua KHI CHƯA có
+        // mid thật: otid/dom_ là id tạm, đường realtime đảm nhiệm. Nhưng bubble
+        // mang mid.$ mà realtime đã lỡ bỏ (tab đang điều hướng, xác nhận chậm)
+        // phải được lượt quét đuôi này cứu - server khớp theo mid nên không thể
+        // thành ghost (reproduce 2026-10-09 12:54: 3/4 tin "alo" mất vì echo
+        // không bao giờ tới server).
+        const hasDurableMidId = /^mid\./.test(String(parsed.native_id || ''));
+        if (parsed.is_outgoing && !isCallRow && !isMediaRow && !hasDurableMidId) continue;
         const fbMessageId = verdict.id;
         const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
         const observationSignature = domObservationSignature(parsed);

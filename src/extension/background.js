@@ -2252,6 +2252,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           || (isExplicitIncoming && FbCrmMessengerTabRoles.canForwardIncomingRealtime?.(senderRole)));
       if (!mayForward) {
         console.log(`[FB Engine] Skip NEW_MESSAGE_FROM_FB from role=${senderRole || 'unregistered'} tab=${sender?.tab?.id || 'unknown'}`);
+        try {
+          if (chrome?.runtime?.id) sendToBackend('CONTENT_DEBUG', {
+            at: new Date().toISOString(),
+            source: 'bg_send',
+            stage: 'BG_SKIP_ROLE',
+            role: senderRole || 'unregistered',
+            tab: sender?.tab?.id || 'unknown',
+            thread: String(message.data?.thread_id || '').substring(0, 30),
+            mid: String(message.data?.fb_message_id || '').substring(0, 45),
+            out: message.data?.is_outgoing ? 1 : 0
+          });
+        } catch (_) {}
         return;
       }
       let msgData = message.data;
@@ -3405,7 +3417,23 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
     return handleSendPersonalMessageWithAttachment({ thread_id, recipient_thread_id, thread_url, expected_contact_name, strict_recipient_identity, content: messageText, attachment, attachmentManifest, client_message_id, account_id, tab_role });
   }
   let lastSendError = null;
-  const trace = (stage, extra = {}) => console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage, thread_id: String(thread_id), client_message_id, at: new Date().toISOString(), ...extra }));
+  const trace = (stage, extra = {}) => {
+    console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage, thread_id: String(thread_id), client_message_id, at: new Date().toISOString(), ...extra }));
+    // stdout của app đóng gói bị mất -> relay kèm CONTENT_DEBUG để lần đo
+    // sau nhìn thấy hành trình gửi trong composer-debug.log (mất tin 12:54
+    // không xác định được vì mọi trace của flow này chỉ vào console).
+    try {
+      if (chrome?.runtime?.id) sendToBackend('CONTENT_DEBUG', {
+        at: new Date().toISOString(),
+        source: 'bg_send',
+        stage: 'SEND_TRACE',
+        send_stage: stage,
+        thread: String(thread_id || '').substring(0, 30),
+        cmid: String(client_message_id || '').substring(0, 45),
+        ...Object.fromEntries(Object.entries(extra || {}).map(([k, v]) => [k, typeof v === 'string' ? v.substring(0, 60) : v]))
+      });
+    } catch (_) { /* relay best-effort */ }
+  };
   const confirmFromRenderedBubble = async (tabId, stage) => {
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {
