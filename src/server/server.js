@@ -2927,6 +2927,23 @@ wss.on('connection', (ws, req) => {
               break;
             }
           }
+          // Otid thuần số + out=0: otid do client MÌNH sinh khi gửi (top 41
+          // bit = ms gửi thật - đo DB sống (id>>22) khớp giây gửi); tin khách
+          // đến qua server luôn mang <uid>@msgr.N hoặc mid.$. Id số trần
+          // tuyên bố incoming chỉ có thể là nhãn "Tin nhắn do X gửi lúc"
+          // gán nhầm anchor cho lá tin mình (reproduce 2026-10-09: "sdsdsd"
+          // nhắn tay hiện thêm bản sao bên trái khách; DB 5/5 row số+out=0
+          // đều là tin user tự gõ). Mid rút gọn của khách đã được ghép về
+          // dạng đầy đủ ở trên nên không dính guard này.
+          const otidFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+          if (!isOutgoing && /^\d{15,19}$/.test(otidFamilyId)
+            && (!m.media_type || m.media_type === 'text') && !m.media_url) {
+            syncDebug('WS_SKIP_OTID_FLIPPED', {
+              thread: m.thread_id,
+              fb_message_id: String(stableMessageId).substring(0, 70)
+            });
+            break;
+          }
           if (!isOutgoing && m.fb_message_id) {
             const promotedPreview = ConversationRepository.promoteSidebarPreview({
               threadId: m.thread_id,
@@ -7861,6 +7878,14 @@ function startServer() {
       if ((m.media_type && m.media_type !== 'text') || m.media_url) continue;
       if (!/__bubble_\d+$/.test(String(m.fb_message_id || ''))) continue;
       const familyId = String(m.fb_message_id).replace(/__bubble_\d+$/, '');
+      // (2c-ter) Otid thuần số + out=0: otid do client MÌNH sinh khi gửi,
+      // tin khách luôn mang <uid>@msgr.N / mid.$. Không cần base cùng family
+      // (base thật mang mid khác family nên 2c-bis không với tới).
+      if (Number(m.is_outgoing) === 0 && /^\d{15,19}$/.test(familyId)) {
+        deletePhantomBubble.run(m.id);
+        phantomThreadIds.add(m.thread_id);
+        continue;
+      }
       const familyBase = familyId.length >= 12
         ? familyBaseStmt.get(m.thread_id, familyId, familyId)
         : null;

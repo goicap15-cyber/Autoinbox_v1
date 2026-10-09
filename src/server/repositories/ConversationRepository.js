@@ -560,6 +560,15 @@ class ConversationRepository {
             continue;
           }
         }
+        // Otid thuần số + out=0: đối xứng guard WS — otid do client MÌNH sinh
+        // khi gửi; khách đến luôn mang <uid>@msgr.N / mid.$. Mid rút gọn của
+        // khách đã được ghép về dạng đầy đủ ở trên nên không dính guard này
+        // (reproduce 2026-10-09: "sdsdsd" nhắn tay hiện bản sao bên trái khách).
+        if (!isOutgoing && /^[0-9]{15,19}(?:__bubble_\d+)?$/.test(String(stableId))
+          && mediaType === 'text' && !mediaUrl && !isPureEmojiContent) {
+          result.skippedCount += 1;
+          continue;
+        }
         let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
         // Multi-account: mid này đã thuộc thread của acc khác -> dùng bản sao
         // mirror (mid::thread) thay vì UPSERT nhầm row của acc kia (mất tin

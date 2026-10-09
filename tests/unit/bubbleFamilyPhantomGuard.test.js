@@ -45,3 +45,21 @@ test('Messenger-typed outgoing text passes all three gates when it has a real mi
   // nhánh khớp nội dung 300s vẫn còn cho echo không có mid thật + page
   assert.equal(/AND datetime\(created_at\) >= datetime\('now', '-300 seconds'\)/.test(server), true);
 });
+
+// Otid thuần số (id 15-19 chữ số, không @msgr./mid.): client MỌI tin ĐI tự
+// sinh, tin khách luôn mang <uid>@msgr.N / mid.$. Đo DB sống 2026-10-09:
+// 7 row số trần - 2 out=1 là tin thật, 5 out=0 TOÀN ma lật chiều ("alo"/
+// "sdsdsd" user tự gõ). (id>>22) decode khớp giây gửi thật.
+test('bare-numeric otid rows claiming incoming are rejected on every save path', () => {
+  const server = fs.readFileSync('src/server/server.js', 'utf8');
+  const repo = fs.readFileSync('src/server/repositories/ConversationRepository.js', 'utf8');
+  // guard WS: chặn trước promoteSidebarPreview
+  assert.equal(server.includes("syncDebug('WS_SKIP_OTID_FLIPPED'"), true);
+  assert.equal(server.includes('const otidFamilyId = String(stableMessageId).replace(/__bubble_'), true);
+  assert.equal(server.includes('if (!isOutgoing && /^\\d{15,19}$/.test(otidFamilyId)'), true);
+  // heal 2c-ter: xoá row __bubble_N family số trần out=0 không cần base
+  assert.equal(server.includes('(2c-ter) Otid thuần số'), true);
+  assert.equal(server.includes('if (Number(m.is_outgoing) === 0 && /^\\d{15,19}$/.test(familyId))'), true);
+  // guard repo: đối xứng cho đường history
+  assert.equal(repo.includes('if (!isOutgoing && /^[0-9]{15,19}(?:__bubble_\\d+)?$/.test(String(stableId))'), true);
+});
