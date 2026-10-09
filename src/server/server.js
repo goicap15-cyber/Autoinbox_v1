@@ -3038,6 +3038,42 @@ wss.on('connection', (ws, req) => {
             }
           }
 
+          // Row ma lật chiều SINH TRƯỚC base có thể đã chiếm đứt id tổng hợp
+          // mid.$X__bubble_N (guard b54 cần base tồn tại, sweep b58 chỉ chạy
+          // khi base đổ vào - base chưa từng vào DB thì không gì dọn). Reading
+          // THẬT sau này quay lại với CÙNG id nhưng chiều khác: reading sau
+          // hydrate đủ label tin cậy hơn, sửa chiều row squat thay vì để
+          // INSERT OR IGNORE nuốt câm tin thật (reproduce 2026-10-09 12:00:
+          // bắn 4 "alo" chỉ 1 vào DB, row ma mid.$UE5vv__bubble_1 out=0 đứng
+          // yên). Chỉ flip IN->OUT trên row squat sinh trong 15 phút; chiều
+          // ngược lại bị reconcileExistingMessage chặn cứng như cũ.
+          if (insertMsgResult.changes === 0 && /__bubble_\d+$/.test(String(stableMessageId))) {
+            const squatterRow = db.prepare(`
+              SELECT id, is_outgoing FROM messages
+              WHERE fb_message_id = ? AND thread_id = ?
+                AND datetime(created_at) >= datetime('now', '-900 seconds')
+            `).get(stableMessageId, m.thread_id);
+            if (squatterRow
+              && Number(squatterRow.is_outgoing) === 0
+              && isOutgoing && directionStatus === 'confirmed') {
+              db.prepare(`
+                UPDATE messages SET is_outgoing = 1, sender_role = 'operator',
+                  direction_status = 'confirmed', sender_id = ?
+                WHERE id = ?
+              `).run(safeSenderId, squatterRow.id);
+              syncDebug('WS_FIX_FLIPPED_SQUATTER', {
+                thread: m.thread_id,
+                fb_message_id: String(stableMessageId).substring(0, 70)
+              });
+              // Nhánh !wasNewMessage phía dưới sẽ break ở reconcile no_change
+              // nên phải tự báo client vẽ lại thread ngay.
+              io.emit('THREAD_MESSAGES_UPDATED', {
+                thread_id: m.thread_id,
+                account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null
+              });
+            }
+          }
+
           let wasNewMessage = insertMsgResult.changes > 0;
           if (wasNewMessage) {
             // Row ma lật chiều có thể đã chèn TRƯỚC base trong cùng đợt quét

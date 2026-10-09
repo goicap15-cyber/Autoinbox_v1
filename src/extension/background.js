@@ -2261,9 +2261,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // tin nhắn tay trong Messenger nhờ vậy được lưu thay vì mất
       // (reproduce 2026-10-09: 5 tin "alo" nhắn tay chỉ còn 1 vào CRM).
       const echoMid = String(msgData?.fb_message_id || '');
-      const echoHasRealMid = Boolean(echoMid)
-        && !/^(?:dom_|pending_|history_)/.test(echoMid)
-        && !/__bubble_\d+$/.test(echoMid);
+      // mid.$X__bubble_N là LÁ THẬT của tin đã hydrate (like-group hoặc
+      // bubble_idx trôi), không phải echo optimistic của composer - strip
+      // hậu tố trước khi test "có mid thật", nếu không tin thật bị nuốt câm
+      // ở cổng này (reproduce 2026-10-09 12:00: bắn 4 "alo" chỉ 1 vào DB,
+      // reading thật của 2 tin chết đúng cửa này). dom_/pending_/history_
+      // (kể cả khi mang hậu tố __bubble_N) vẫn bị chặn như cũ.
+      const echoFamilyMid = echoMid.replace(/__bubble_\d+$/, '');
+      const echoHasRealMid = Boolean(echoFamilyMid)
+        && !/^(?:dom_|pending_|history_)/.test(echoFamilyMid);
       const isPlainOutgoingDomEcho = Boolean(
         msgData?.is_outgoing
         && String(msgData?.source || '') === 'dom_observer'

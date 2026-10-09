@@ -35,15 +35,34 @@ test('Messenger-typed outgoing text passes all three gates when it has a real mi
   const server = fs.readFileSync('src/server/server.js', 'utf8');
   // gate 1 - observer chỉ nhường khi CHƯA có native id
   assert.equal(/if \(isPlainOutgoingDomText && !parsed\.native_id\) return;/.test(content), true);
-  // gate 2 - bg bỏ qua echo KHÔNG mid thật, echo có mid thật đi tiếp
-  assert.equal(/const echoHasRealMid = Boolean\(echoMid\)/.test(background), true);
-  assert.equal(/&& !\/\^\(\?:dom_\|pending_\|history_\)\/\.test\(echoMid\)/.test(background), true);
+  // gate 2 - bg bỏ qua echo KHÔNG mid thật, echo có mid thật đi tiếp;
+  // mid.$X__bubble_N (lá thật đã hydrate) phải được strip hậu tố trước khi
+  // test, không thì reading thật của tin ĐI bị nuốt câm ở cổng này.
+  assert.equal(/const echoFamilyMid = echoMid\.replace\(\/__bubble_\\d\+\$\/, ''\);/.test(background), true);
+  assert.equal(/const echoHasRealMid = Boolean\(echoFamilyMid\)/.test(background), true);
+  assert.equal(/&& !\/\^\(\?:dom_\|pending_\|history_\)\/\.test\(echoFamilyMid\)/.test(background), true);
   assert.equal(/&& !echoHasRealMid\s*\)/.test(background), true);
   // gate 3 - anti-ghost: dom_observer + mid thật -> khớp theo mid, không khớp nội dung
   assert.equal(/const obsEchoHasRealMid = m\.source === 'dom_observer' && obsEchoMid/.test(server), true);
   assert.equal(/AND is_outgoing = 1 AND fb_message_id = \?/.test(server), true);
   // nhánh khớp nội dung 300s vẫn còn cho echo không có mid thật + page
   assert.equal(/AND datetime\(created_at\) >= datetime\('now', '-300 seconds'\)/.test(server), true);
+});
+
+// Row ma lật chiều sinh TRƯỚC base chiếm đứt id tổng hợp mid.$X__bubble_N:
+// guard b54 cần base, sweep b58 chỉ chạy khi base đổ vào - base chưa từng
+// vào DB thì reading thật quay lại với CÙNG id bị INSERT OR IGNORE nuốt câm
+// (reproduce 2026-10-09 12:00: 4 "alo" chỉ 1 vào DB, row ma out=0 đứng yên).
+test('flipped squatter of a synthetic bubble id is corrected when the real OUT reading arrives', () => {
+  const server = fs.readFileSync('src/server/server.js', 'utf8');
+  // chỉ chạy khi insert bị IGNORE và id là id tổng hợp __bubble_N
+  assert.equal(/if \(insertMsgResult\.changes === 0 && \/__bubble_\\d\+\$\/\.test\(String\(stableMessageId\)\)\)/.test(server), true);
+  // cửa sổ 15 phút: replay lịch sử cũ không được lật tin đã chốt
+  assert.equal(/AND datetime\(created_at\) >= datetime\('now', '-900 seconds'\)/.test(server), true);
+  // chỉ flip IN->OUT (chiều ngược bị reconcile chặn cứng như cũ)
+  assert.equal(/Number\(squatterRow\.is_outgoing\) === 0\s*\n\s*&& isOutgoing && directionStatus === 'confirmed'/.test(server), true);
+  assert.equal(server.includes("syncDebug('WS_FIX_FLIPPED_SQUATTER'"), true);
+  assert.equal(/UPDATE messages SET is_outgoing = 1, sender_role = 'operator',/.test(server), true);
 });
 
 // Otid thuần số (id 15-19 chữ số, không @msgr./mid.): client MỌI tin ĐI tự
