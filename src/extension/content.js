@@ -65,6 +65,25 @@
     }
   } catch (_) {}
 
+  // 2026-10-09: tab ẩn vẫn render liên tục (occlusion bị tắt để quét DOM nền)
+  // -> 1-2 lõi CPU. DOM mutation + observer không cần animation: dừng animation
+  // CSS khi tab hidden, trả lại khi visible. Không đụng logic quét.
+  (function installHiddenTabAnimationPause() {
+    try {
+      const style = document.createElement('style');
+      style.id = 'crm-pause-hidden-anim';
+      style.textContent = 'html[data-crm-hidden="1"] *, html[data-crm-hidden="1"] *::before,'
+        + ' html[data-crm-hidden="1"] *::after { animation-play-state: paused !important; transition: none !important; }';
+      (document.head || document.documentElement).appendChild(style);
+      const applyHiddenAnimState = () => {
+        if (document.visibilityState === 'hidden') document.documentElement.setAttribute('data-crm-hidden', '1');
+        else document.documentElement.removeAttribute('data-crm-hidden');
+      };
+      document.addEventListener('visibilitychange', applyHiddenAnimState);
+      applyHiddenAnimState();
+    } catch (_) {}
+  })();
+
   function stopAllRingtoneAudio() {
     try {
       var mediaEls = document.querySelectorAll('audio, video');

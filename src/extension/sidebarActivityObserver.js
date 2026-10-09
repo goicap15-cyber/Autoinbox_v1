@@ -6,6 +6,8 @@
   }
 
   let lastFingerprint = '';
+  let lastEmitAt = 0;
+  let trailingTimer = null;
   let debounceTimer = null;
 
   // 2026-09-30: chuỗi hint từng lạnh hoàn toàn mà không có dấu vết (background
@@ -95,9 +97,7 @@
       if (!threadId || seen.has(threadId)) continue;
       seen.add(threadId);
       const row = link.closest('[role="row"], [role="listitem"], li') || link.parentElement || link;
-      const text = normalize(row.textContent).slice(0, 320);
       const unread = detectRowUnread(row);
-      rows.push(`${threadId}|${unread ? 1 : 0}|${text}`);
       // Preserve the exact row while it is still mounted. Messenger can
       // virtualize it away between this mutation and background.executeScript.
       // The background parser remains primary; this snapshot is only its
@@ -109,6 +109,13 @@
         line !== name && line.length < 200
         && !/^\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|y)(?:\s*(?:trước|ago))?$/iu.test(line)
       )) || '';
+      // 2026-10-09: fingerprint phải BỀN — text nguyên row trôi theo dòng thời
+      // gian ("Bây giờ"->"1 phút"), bubble "Đang soạn tin...", trạng thái đã xem
+      // khiến observer tưởng có thay đổi và relay ~10 lần/giây, đốt CPU cả chuỗi
+      // bg->server. fp chỉ gồm thread + chấm unread + tên + preview đã lọc
+      // typing; payload gửi đi vẫn giữ dữ liệu thô.
+      const fpPreview = String(lastMessage || '').replace(/(?:đang soạn|đang nhập|typing)\S*/gi, '').slice(0, 120);
+      rows.push(`${threadId}|${unread ? 1 : 0}|${name.slice(0, 48)}|${fpPreview}`);
       const timeLine = [...lines].reverse().find((line) => TIME_LINE_RE.test(line)) || '';
       threads.push({
         thread_id: threadId,
@@ -137,7 +144,18 @@
       return;
     }
     if (fingerprint === lastFingerprint) return;
+    // Trần gửi 1.2s: đợt mutation dồn dập không được bắn từng cái một; thay
+    // đổi thật vẫn được bảo toàn nhờ timer đuổi cuối đợt.
+    const now = Date.now();
+    const waitMs = 1200 - (now - lastEmitAt);
+    if (waitMs > 0) {
+      if (!trailingTimer) {
+        trailingTimer = setTimeout(() => { trailingTimer = null; emitIfChanged(); }, waitMs);
+      }
+      return;
+    }
     lastFingerprint = fingerprint;
+    lastEmitAt = now;
     obsDebug({ stage: 'HINT_SENT', threads: activity.threads.length, unread: activity.threads.filter((t) => t.is_unread).length, fp: fingerprint.substring(0, 10) });
     try {
       if (!chrome?.runtime?.id) return;
@@ -145,7 +163,14 @@
         type: 'SIDEBAR_ACTIVITY_HINT',
         data: { fingerprint, threads: activity.threads, observed_at: Date.now(), url: location.href }
       }).catch((err) => {
-        obsDebug({ stage: 'HINT_SEND_FAIL', error: String(err && err.message || err).substring(0, 90) });
+        const failText = String((err && err.message) || err);
+        // Context chết sau khi extension/app reload: ngắt observer thay vì
+        // retry + log HINT_SEND_FAIL vô hạn (5311 dòng trong 20MB log).
+        if (/Extension context invalidated|Receiving end does not exist/i.test(failText)) {
+          try { globalThis.__FB_CRM_SIDEBAR_ACTIVITY_OBSERVER__?.disconnect(); } catch (_) {}
+          return;
+        }
+        obsDebug({ stage: 'HINT_SEND_FAIL', error: failText.substring(0, 90) });
       });
     } catch (_) {}
   }
@@ -169,6 +194,7 @@
       observer.disconnect();
       clearInterval(fallbackTimer);
       if (debounceTimer) clearTimeout(debounceTimer);
+      if (trailingTimer) clearTimeout(trailingTimer);
     }
   };
   obsDebug({ stage: 'OBS_INSTALLED', href: String(location.href).substring(0, 90) });

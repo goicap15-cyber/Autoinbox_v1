@@ -778,14 +778,35 @@ function sanitizeLog(str, maxLen = 120) {
 
 // Đo từng chặng đường realtime hint (observer -> bg -> server) trong
 // composer-debug.log để so latency với bgDebug/obsDebug phía extension.
-function syncDebug(stage, data = {}) {
+// 2026-10-09: file từng phình 126MB vì hint relay ~10 dòng/s — mọi writer
+// phải đi qua appendComposerDebugLog để xoay vòng 30MB.
+const composerLogState = { bytes: 0 };
+
+function appendComposerDebugLog(payload) {
   try {
-    fs.appendFileSync(
-      path.join(APP_DATA_ROOT, 'composer-debug.log'),
-      JSON.stringify({ at: new Date().toISOString(), source: 'SYNC_DEBUG', stage, ...data }) + '\n'
-    );
+    const logPath = path.join(APP_DATA_ROOT, 'composer-debug.log');
+    const line = JSON.stringify(payload) + '\n';
+    if (composerLogState.bytes === 0) {
+      try { composerLogState.bytes = fs.statSync(logPath).size; } catch (_) {}
+    }
+    composerLogState.bytes += line.length;
+    if (composerLogState.bytes > 30 * 1024 * 1024) {
+      try { fs.renameSync(logPath, logPath + '.1'); } catch (_) {}
+      composerLogState.bytes = 0;
+    }
+    fs.appendFileSync(logPath, line);
   } catch (_) {}
 }
+
+function syncDebug(stage, data = {}) {
+  appendComposerDebugLog({ at: new Date().toISOString(), source: 'SYNC_DEBUG', stage, ...data });
+}
+
+// Hint relay trùng payload: chặn trước khi chạm txn sidebar trong
+// SYNC_THREADS_RESULT (observer trôi fp theo text thời gian/typing từng làm
+// backend upsert 30 threads ~10 lần/giây).
+const lastRealtimeHintSig = new Map();
+let lastUnchangedHintLogAt = 0;
 
 const richContentSecret = crypto.randomBytes(32);
 
@@ -1952,10 +1973,7 @@ wss.on('connection', (ws, req) => {
           // as media, relayed here since the extension's own console isn't
           // reachable during live debugging. Remove once T020 is closed.
           try {
-            fs.appendFileSync(
-              path.join(APP_DATA_ROOT, 'composer-debug.log'),
-              JSON.stringify({ at: new Date().toISOString(), source: 'CONTENT_DEBUG', ...msg.data }) + '\n'
-            );
+            appendComposerDebugLog({ at: new Date().toISOString(), source: 'CONTENT_DEBUG', ...msg.data });
           } catch (error) {
             console.error('[CONTENT_DEBUG] Ghi log thất bại:', error.message);
           }
@@ -1985,10 +2003,7 @@ wss.on('connection', (ws, req) => {
           // here instead. Appended as one JSON line per event; remove once
           // T020 is confirmed fixed by a live send.
           try {
-            fs.appendFileSync(
-              path.join(APP_DATA_ROOT, 'composer-debug.log'),
-              JSON.stringify({ at: new Date().toISOString(), ...msg.data }) + '\n'
-            );
+            appendComposerDebugLog({ at: new Date().toISOString(), ...msg.data });
           } catch (error) {
             console.error('[COMPOSER_DEBUG] Ghi log thất bại:', error.message);
           }
@@ -3558,6 +3573,23 @@ wss.on('connection', (ws, req) => {
           }
           const isRealtimeSidebarHint = sync_status === 'realtime_hint' || sync_status === 'realtime_requests';
           console.log(`[WS] Nhận ${threads?.length || 0} threads từ extension tài khoản: ${account_id}`);
+          // 2026-10-09: hint thuần (partial=true, realtime_hint) trùng payload
+          // trong 60s thì bỏ qua toàn bộ case — txn upsert ~30 threads mỗi lần
+          // với nội dung y hệt chỉ đốt CPU + WAL. Frame final/scan (partial khác
+          // true) và realtime_requests vẫn xử lý bình thường.
+          const isPureRealtimeHint = isRealtimeSidebarHint && partial === true && sync_status === 'realtime_hint';
+          if (isPureRealtimeHint && Array.isArray(threads)) {
+            const hintSig = `${account_id}|${threads.map((t) => `${t.thread_id || t.id}|${t.is_unread ? 1 : 0}|${t.last_message || ''}|${t.row_time_text || ''}`).join('\n')}`;
+            const prevHint = lastRealtimeHintSig.get(account_id);
+            if (prevHint && prevHint.sig === hintSig && Date.now() - prevHint.at < 60 * 1000) {
+              if (Date.now() - lastUnchangedHintLogAt > 30000) {
+                lastUnchangedHintLogAt = Date.now();
+                syncDebug('REALTIME_HINT_UNCHANGED', { account: account_id, threads: threads.length });
+              }
+              break;
+            }
+            lastRealtimeHintSig.set(account_id, { sig: hintSig, at: Date.now() });
+          }
           if (isRealtimeSidebarHint) {
             const observedAtMs = Number(msg.data?.observed_at || 0);
             syncDebug('REALTIME_HINT', {
@@ -5579,18 +5611,15 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('[Socket] Lỗi gửi tin nhắn:', err.message);
       try {
-        fs.appendFileSync(
-          path.join(APP_DATA_ROOT, 'composer-debug.log'),
-          JSON.stringify({
-            at: new Date().toISOString(),
-            stage: 'socket_send_error',
-            thread_id: String(thread_id || ''),
-            client_message_id: client_message_id || null,
-            attachment_id: attachment_id || null,
-            error_code: err.code || 'SEND_FAILED',
-            error: err.message || String(err)
-          }) + '\n'
-        );
+        appendComposerDebugLog({
+          at: new Date().toISOString(),
+          stage: 'socket_send_error',
+          thread_id: String(thread_id || ''),
+          client_message_id: client_message_id || null,
+          attachment_id: attachment_id || null,
+          error_code: err.code || 'SEND_FAILED',
+          error: err.message || String(err)
+        });
       } catch (_) { }
       socket.emit('SEND_ERROR', {
         error: err.message,

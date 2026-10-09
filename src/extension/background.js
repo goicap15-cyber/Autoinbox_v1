@@ -1908,6 +1908,11 @@ async function isRealtimeSidebarTab(tab) {
   return FbCrmMessengerTabRoles.canForwardRealtime(role);
 }
 
+// 2026-10-09: 2 tab messenger cùng account đều có observer riêng -> cùng
+// payload relay 2 lần. Ghi nhớ chữ ký relay gần nhất theo account, trùng
+// trong 8s thì bỏ (server vẫn có pre-gate 60s nhưng chặn sớm ở đây đỡ tốn WS).
+const lastHintRelaySig = new Map();
+
 function relaySidebarActivityThreads(threads, origin, observedAt = 0) {
   const rows = Array.isArray(threads) ? threads : [];
   if (!rows.length || !user_id) return false;
@@ -1929,6 +1934,10 @@ function relaySidebarActivityThreads(threads, origin, observedAt = 0) {
     source_type: 'personal_messenger',
     inbox_folder: 'INBOX'
   }));
+  const relaySig = lightweightThreads.map((t) => `${t.thread_id}|${t.is_unread ? 1 : 0}|${t.last_message || ''}|${t.row_time_text || ''}`).join('\n');
+  const prevRelay = lastHintRelaySig.get(user_id);
+  if (prevRelay && prevRelay.sig === relaySig && Date.now() - prevRelay.at < 8000) return false;
+  lastHintRelaySig.set(user_id, { sig: relaySig, at: Date.now() });
   sendToBackend('SYNC_THREADS_RESULT', {
     account_id: user_id,
     threads: lightweightThreads,
