@@ -2851,12 +2851,29 @@ wss.on('connection', (ws, req) => {
                 ORDER BY id DESC LIMIT 1
               `).get(canonicalThreadId);
             } else if (m.content) {
-              outgoingMatch = db.prepare(`
-                SELECT id, delivery_status, client_message_id, thread_id FROM messages
-                WHERE thread_id = ? AND content = ? AND is_outgoing = 1
-                  AND datetime(created_at) >= datetime('now', '-300 seconds')
-                ORDER BY id DESC LIMIT 1
-              `).get(canonicalThreadId, m.content);
+              // Echo dom_observer mang mid thật thì khớp theo mid thay vì theo
+              // nội dung: khớp nội dung nuốt tin nhắn tay LẶP NỘI DUNG trong
+              // 5 phút (reproduce 2026-10-09: 5 tin "alo" nhắn tay trong
+              // Messenger, anti-ghost chỉ giữ lại 1). Mid thật distinct theo
+              // tin; mid đã có row chính là echo của tin đó -> discard an toàn.
+              // page_dom_observer/composer_confirmation giữ khớp nội dung vì
+              // DOM Business Suite dùng id khác Graph API, không so được.
+              const obsEchoMid = String(m.fb_message_id || '');
+              const obsEchoHasRealMid = m.source === 'dom_observer' && obsEchoMid
+                && !/^(?:dom_|pending_|history_)/.test(obsEchoMid)
+                && !/__bubble_\d+$/.test(obsEchoMid);
+              outgoingMatch = obsEchoHasRealMid
+                ? db.prepare(`
+                    SELECT id, delivery_status, client_message_id, thread_id FROM messages
+                    WHERE thread_id = ? AND is_outgoing = 1 AND fb_message_id = ?
+                    ORDER BY id DESC LIMIT 1
+                  `).get(canonicalThreadId, obsEchoMid)
+                : db.prepare(`
+                    SELECT id, delivery_status, client_message_id, thread_id FROM messages
+                    WHERE thread_id = ? AND content = ? AND is_outgoing = 1
+                      AND datetime(created_at) >= datetime('now', '-300 seconds')
+                    ORDER BY id DESC LIMIT 1
+                  `).get(canonicalThreadId, m.content);
             }
 
             if (outgoingMatch) {

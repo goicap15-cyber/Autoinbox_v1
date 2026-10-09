@@ -1980,12 +1980,17 @@
 
         if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
 
-        // The explicit composer confirmation/network intercept owns plain outgoing text.
-        // The DOM observer must not forward the same rendered bubble a second time.
+        // Tin outgoing text: bubble CHƯA có native id thì nhường cho composer/
+        // network confirmation (dom_hash trôi khi hydrate sẽ thành ghost nếu
+        // forward sớm). Đã có native id thì forward - server tự khớp theo mid:
+        // ghép vào row pending của composer hoặc nhận diện trùng mid rồi bỏ.
+        // Nhắn tay ngay trong Messenger không có đường confirmation nào khác,
+        // gate cũ nuốt sạch tin này (reproduce 2026-10-09: 5 tin "alo" nhắn tay
+        // chỉ còn 1 vào CRM).
         const isPlainOutgoingDomText = parsed.is_outgoing
           && !parsed.media_url
           && (!parsed.media_type || parsed.media_type === 'text');
-        if (isPlainOutgoingDomText) return;
+        if (isPlainOutgoingDomText && !parsed.native_id) return;
 
         // Row CHƯA có native id (React hydrate trễ): đợi ~1.5s rồi đọc lại đúng
         // node đó - nếu mid thật đã gắn thì forward bằng mid (server tự khớp,

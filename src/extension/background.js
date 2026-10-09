@@ -2245,11 +2245,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.log(`[FB Engine] Skip NEW_MESSAGE_FROM_FB from role=${senderRole || 'unregistered'} tab=${sender?.tab?.id || 'unknown'}`);
         return;
       }
-      let msgData = message.data;      const isPlainOutgoingDomEcho = Boolean(
+      let msgData = message.data;
+      // Echo outgoing text KHÔNG mid thật (dom_hash/pending) vẫn bỏ: composer/
+      // network confirmation sở hữu chúng, forward sớm chỉ sinh ghost. Echo có
+      // mid thật đi tiếp - server khớp theo mid (ghép pending hoặc bỏ trùng),
+      // tin nhắn tay trong Messenger nhờ vậy được lưu thay vì mất
+      // (reproduce 2026-10-09: 5 tin "alo" nhắn tay chỉ còn 1 vào CRM).
+      const echoMid = String(msgData?.fb_message_id || '');
+      const echoHasRealMid = Boolean(echoMid)
+        && !/^(?:dom_|pending_|history_)/.test(echoMid)
+        && !/__bubble_\d+$/.test(echoMid);
+      const isPlainOutgoingDomEcho = Boolean(
         msgData?.is_outgoing
         && String(msgData?.source || '') === 'dom_observer'
         && !msgData?.media_url
         && (!msgData?.media_type || msgData.media_type === 'text')
+        && !echoHasRealMid
       );
       if (isPlainOutgoingDomEcho) {
         console.log('[FB Engine] Skip duplicate plain outgoing DOM text; composer/network confirmation owns it.');
