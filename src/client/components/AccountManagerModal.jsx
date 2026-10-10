@@ -499,7 +499,8 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
                         <button
                           type="button"
                           onClick={() => handleStartChrome(acc.id)}
-                          disabled={startingId === acc.id || deletingId === acc.id || isChangingDisplay}
+                          disabled={startingId === acc.id || deletingId === acc.id || isChangingDisplay || isConnected}
+                          title={isConnected ? 'Tài khoản đã kết nối — không cần mở lại Chrome' : undefined}
                           className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors border disabled:opacity-50 ${
                             isCheckpoint
                               ? 'bg-red-600 hover:bg-red-500 text-white border-red-500'
@@ -507,7 +508,7 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
                           }`}
                         >
                           {startingId === acc.id ? <RefreshCw size={13} className="animate-spin" /> : <ExternalLink size={13} />}
-                          <span>{startingId === acc.id ? 'Đang kết nối...' : (isCompanyAdmin ? 'Kết nối Facebook' : 'Kết nối')}</span>
+                          <span>{startingId === acc.id ? 'Đang kết nối...' : (isConnected ? 'Đã kết nối' : (isCompanyAdmin ? 'Kết nối Facebook' : 'Kết nối'))}</span>
                         </button>
                         {isCompanyAdmin && <button
                           type="button"

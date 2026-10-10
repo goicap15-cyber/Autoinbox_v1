@@ -5659,6 +5659,25 @@ app.post('/api/accounts/:id/start', async (req, res) => {
     }
   }
 
+  // 2026-10-09: đã kết nối thì không mở lại Chrome — trước đây bấm nút lần 2
+  // khiến Chrome đang chạy bị tắt rồi mở lại; mở lại thất bại (profile khóa,
+  // RAM) báo "Không thể mở Chrome" dù mọi thứ vẫn ổn.
+  const currentExtensionWs = extensionConnections.get(accountId);
+  if (currentExtensionWs && currentExtensionWs.readyState === WebSocket.OPEN) {
+    if (startInBackground) {
+      processManager.hideAccountProcess(accountId).then((result) => {
+        if (result?.success) {
+          io.emit('ACCOUNT_DISPLAY_CHANGED', {
+            account_id: accountId,
+            chrome_display_mode: 'BACKGROUND',
+            is_chrome_running: true
+          });
+        }
+      });
+    }
+    return res.json({ success: true, already_connected: true });
+  }
+
   const success = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: true });
   if (!success) {
     backgroundAfterConnectRequests.delete(accountId);
