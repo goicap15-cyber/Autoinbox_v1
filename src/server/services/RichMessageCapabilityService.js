@@ -1,4 +1,5 @@
 const DEFAULT_MAX_BYTES = 25 * 1024 * 1024;
+const InboxSourceService = require('./InboxSourceService');
 const IMAGE_MIME_TYPES = Object.freeze(['image/jpeg', 'image/png', 'image/webp']);
 const VIDEO_MIME_TYPES = Object.freeze(['video/mp4', 'video/quicktime', 'video/x-msvideo']);
 const FILE_MIME_TYPES = Object.freeze([
@@ -60,17 +61,31 @@ class RichMessageCapabilityService {
 
     const connection = getConnection(route.account_id);
     const connected = Boolean(connection && connection.readyState === 1);
-    const sourceReady = route.source_status === 'ACTIVE' && route.account_status === 'ACTIVE';
     const featureReady = config.enabled !== false;
-    const textEnabled = featureReady && sourceReady && connected;
+    let textEnabled;
+    let disabledReason = null;
+    if (route.source_type === 'page_messenger') {
+      // Thread Page gửi bằng Page Access Token qua Graph API — KHÔNG phụ
+      // thuộc Chrome/extension hay trạng thái account. Chỉ cần source ACTIVE
+      // và có token thật (kho chuẩn hoặc page_graph_tokens); thiếu token mới
+      // là lỗi token thật (báo lỗi 2026-10-10: account DISCONNECTED làm banner
+      // đổ nhầm "chưa có Page Access Token" dù page vẫn còn token).
+      const token = InboxSourceService.getDecryptedToken(route.source_id, database);
+      textEnabled = featureReady && route.source_status === 'ACTIVE' && Boolean(token);
+      if (!featureReady) disabledReason = 'Tính năng gửi rich-message đang tắt.';
+      else if (route.source_status !== 'ACTIVE') disabledReason = 'Nguồn gửi chưa ở trạng thái hoạt động.';
+      else if (!token) disabledReason = 'Page chưa có Page Access Token. Hãy mở Quản lý → Fanpage → bấm "Lấy token".';
+    } else {
+      const sourceReady = route.source_status === 'ACTIVE' && route.account_status === 'ACTIVE';
+      textEnabled = featureReady && sourceReady && connected;
+      if (!featureReady) disabledReason = 'Tính năng gửi rich-message đang tắt.';
+      else if (!sourceReady) disabledReason = 'Nguồn gửi chưa ở trạng thái hoạt động.';
+      else if (!connected) disabledReason = 'Extension của nguồn gửi chưa kết nối.';
+    }
     const adapter = config.adapters?.[route.source_type] || {};
     const imageEnabled = textEnabled && adapter.image === true;
     const videoEnabled = textEnabled && adapter.video === true;
     const fileEnabled = textEnabled && adapter.file === true;
-    let disabledReason = null;
-    if (!featureReady) disabledReason = 'Tính năng gửi rich-message đang tắt.';
-    else if (!sourceReady) disabledReason = 'Nguồn gửi chưa ở trạng thái hoạt động.';
-    else if (!connected) disabledReason = 'Extension của nguồn gửi chưa kết nối.';
 
     return {
       thread_id: route.thread_id,

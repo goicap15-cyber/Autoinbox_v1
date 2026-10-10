@@ -121,9 +121,29 @@ class InboxSourceService {
    * Get decrypted Page access token for API calls.
    */
   static getDecryptedToken(sourceId, database = getDb()) {
-    const row = database.prepare('SELECT access_token_encrypted FROM inbox_sources WHERE id = ?').get(sourceId);
-    if (!row || !row.access_token_encrypted) return null;
-    return decryptToken(row.access_token_encrypted);
+    const row = database.prepare('SELECT access_token_encrypted, external_id FROM inbox_sources WHERE id = ?').get(sourceId);
+    if (row && row.access_token_encrypted) {
+      try {
+        return decryptToken(row.access_token_encrypted);
+      } catch (_) {
+        // token kho chuẩn hỏng → thử kho ngoài bên dưới thay vì ném lỗi chặn gửi tin
+      }
+    }
+    // Fallback kho token ngoài (page_graph_tokens) — tool "Lấy token" ghi ở
+    // đây, token thật có thể chỉ nằm kho này khi page dán token ngoài CRM.
+    // Bảng do tool ngoài tạo nên DB mới/test không có — phải kiểm tra tồn tại.
+    if (row && row.external_id) {
+      const hasTokenTable = database.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'page_graph_tokens'"
+      ).get();
+      if (hasTokenTable) {
+        const fallback = database.prepare(
+          'SELECT token FROM page_graph_tokens WHERE page_id = ? AND alive = 1'
+        ).get(String(row.external_id));
+        if (fallback && fallback.token) return fallback.token;
+      }
+    }
+    return null;
   }
 
   /**

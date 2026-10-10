@@ -55,14 +55,26 @@ test('capabilities are derived from the persisted source and connection, not cli
   assert.equal(personal.source_type, 'personal_messenger');
   assert.equal(personal.image.enabled, false);
 
+  // Thread Page gửi bằng Page Access Token qua Graph API — KHÔNG phụ thuộc
+  // extension kết nối. Chrome tắt vẫn gửi được nếu page còn token.
   const disconnected = RichMessageCapabilityService.getForThread('thread-cap-page', {
     database: db,
     getConnection: () => null,
     config: TEST_CONFIG
   });
   assert.equal(disconnected.connected, false);
-  assert.equal(disconnected.text.enabled, false);
-  assert.equal(disconnected.disabled_reason, 'Extension của nguồn gửi chưa kết nối.');
+  assert.equal(disconnected.text.enabled, true);
+  assert.equal(disconnected.disabled_reason, null);
+
+  // Thiếu token THẬT mới là lỗi token — lý do phải nói đúng nguyên nhân.
+  seedPageThread(db, { id: 'thread-cap-page-notoken', sourceId: 'src-page-3', pageId: 'page-3', noToken: true });
+  const noToken = RichMessageCapabilityService.getForThread('thread-cap-page-notoken', {
+    database: db,
+    getConnection: () => null,
+    config: TEST_CONFIG
+  });
+  assert.equal(noToken.text.enabled, false);
+  assert.equal(noToken.disabled_reason, 'Page chưa có Page Access Token. Hãy mở Quản lý → Fanpage → bấm "Lấy token".');
 }));
 
 test('staged upload is bound to exactly one thread and cannot be discarded through another thread', () => withFixture(({ db, storageDir }) => {

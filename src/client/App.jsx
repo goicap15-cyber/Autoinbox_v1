@@ -1964,8 +1964,11 @@ export default function App() {
   const isCurrentSendDisabled = selectedThread?.source_type === 'page_messenger'
     ? false
     : isCurrentExtensionDisconnected;
+  // Thread page: ưu tiên lý do THẬT từ server (rich-message-capabilities) —
+  // trước đây luôn hiện câu cứng "chưa có Page Access Token" dù lý do thật
+  // có thể là nguồn không hoạt động (báo lỗi 2026-10-10).
   const currentSendDisabledReason = selectedThread?.source_type === 'page_messenger'
-    ? 'Page chưa sẵn sàng gửi tin (chưa có Page Access Token). Hãy mở Quản lý → Fanpage → bấm "Lấy token".'
+    ? (richCapabilities?.disabled_reason || 'Page chưa sẵn sàng gửi tin (chưa có Page Access Token). Hãy mở Quản lý → Fanpage → bấm "Lấy token".')
     : 'Tài khoản Facebook chưa được kết nối. Vui lòng vào Quản lý và bấm Kết nối Facebook.';
 
   const gridClass = `${leadPanelCollapsed ? 'app-grid-collapsed' : 'app-grid'}${activeView === 'employees' ? ' employee-view' : ''}`;
