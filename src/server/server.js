@@ -8148,11 +8148,29 @@ function startServer() {
       const clientMsgId = message.client_message_id || `queue_${message.id}`;
       const pendingFbId = `pending_${clientMsgId}`;
       const nowMs = Date.now();
-      const insert = db.prepare(`
-        INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, is_outgoing, sender_role, delivery_status, sequence_order, timestamp_ms, timestamp_source, created_at)
-        VALUES (?, ?, ?, 'SYSTEM', ?, 1, 'operator', 'pending', ?, ?, 'client_submit', ?)
-      `).run(message.thread_id, pendingFbId, clientMsgId, message.content, nextSeq, nowMs, new Date(nowMs).toISOString());
-      const rowId = insert.lastInsertRowid;
+      // insertCampaignDispatch (chiến dịch) đã tạo sẵn row pending với cùng
+      // fb_message_id `pending_queue_<queueId>` — INSERT lại đâm UNIQUE
+      // constraint failed: messages.fb_message_id (chiến dịch Page fail 100%
+      // ngay attempt đầu, 2026-10-10). Tìm row sẵn có để tái sử dụng.
+      const existingRow = db.prepare(
+        'SELECT id FROM messages WHERE client_message_id = ? OR fb_message_id = ?'
+      ).get(clientMsgId, pendingFbId);
+      let rowId;
+      if (existingRow) {
+        rowId = existingRow.id;
+        db.prepare(`
+          UPDATE messages
+          SET content = ?, delivery_status = 'pending', delivery_error = NULL,
+              sequence_order = ?, timestamp_ms = ?
+          WHERE id = ?
+        `).run(message.content, nextSeq, nowMs, rowId);
+      } else {
+        const insert = db.prepare(`
+          INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, is_outgoing, sender_role, delivery_status, sequence_order, timestamp_ms, timestamp_source, created_at)
+          VALUES (?, ?, ?, 'SYSTEM', ?, 1, 'operator', 'pending', ?, ?, 'client_submit', ?)
+        `).run(message.thread_id, pendingFbId, clientMsgId, message.content, nextSeq, nowMs, new Date(nowMs).toISOString());
+        rowId = insert.lastInsertRowid;
+      }
       db.prepare('UPDATE threads SET last_message = ?, last_activity = CURRENT_TIMESTAMP WHERE id = ?').run(message.content, message.thread_id);
 
       const result = await pageApiService.sendPageMessage(threadRow.source_id, psid, message.content);

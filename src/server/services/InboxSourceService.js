@@ -123,7 +123,15 @@ class InboxSourceService {
   static getDecryptedToken(sourceId, database = getDb()) {
     const row = database.prepare('SELECT access_token_encrypted FROM inbox_sources WHERE id = ?').get(sourceId);
     if (!row || !row.access_token_encrypted) return null;
-    return decryptToken(row.access_token_encrypted);
+    // Token mã hóa bằng secret khác (build cũ/.env đổi) sẽ nổ exception ở
+    // decipher.final - coi như không có token để caller báo lỗi rõ ràng
+    // (NO_PAGE_TOKEN → "Hãy chạy Lấy token & Đăng ký") thay vì lỗi crypto rác.
+    try {
+      return decryptToken(row.access_token_encrypted);
+    } catch (error) {
+      console.warn(`[InboxSource] Token của source ${sourceId} giải mã thất bại, coi như chưa có token:`, error.message);
+      return null;
+    }
   }
 
   /**
