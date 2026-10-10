@@ -61,6 +61,12 @@ function configurePageSetupAutomation(deps = {}) {
 
 // Chrome thật (headful) cho tự động hóa: ưu tiên Chrome bundled của dự án,
 // fallback Chrome cài sẵn trên máy — giống đúng cách ProcessManager chạy Chrome.
+// Window chính puppeteer đã ẩn sẵn khi spawn (windowsHide:true trong
+// @puppeteer/browsers -> STARTUPINFO SW_HIDE); watcher của ProcessManager lo
+// các window sinh SAU đó (popup OAuth "Kết nối trang" không kế thừa hide lúc
+// spawn, đo 2026-10-10 hiện VISIBLE nếu không xử lý) — quét 250ms/lần cho tới
+// khi chrome tắt. KHÔNG dùng headless: FB thấy trình duyệt thật y như trước
+// nên automation giữ nguyên độ tin cậy, user không bị Chrome nhảy lên màn hình.
 async function launchAutomationChrome() {
   const args = ['--no-sandbox', '--lang=vi-VN', '--window-size=1200,860'];
   const base = { headless: false, args, defaultViewport: null };
@@ -77,7 +83,14 @@ async function launchAutomationChrome() {
   const puppeteer = await getPuppeteer();
   let lastErr = null;
   for (const opt of candidates) {
-    try { return await puppeteer.launch(opt); } catch (e) { lastErr = e; }
+    try {
+      const browser = await puppeteer.launch(opt);
+      try {
+        const pid = browser.process()?.pid;
+        if (pid) require('./ProcessManager').spawnChromeHideWatcher(pid);
+      } catch (_) { /* ẩn thất bại thì cứ để cửa sổ hiện - automation vẫn chạy */ }
+      return browser;
+    } catch (e) { lastErr = e; }
   }
   throw lastErr || new Error('Không khởi động được Chrome để tự động hóa.');
 }
@@ -148,7 +161,7 @@ function startAppCreation(appName, email, webhookUrl, uid) {
     id,
     uid,
     status: 'opening_browser',
-    message: 'Đang mở cửa sổ Chrome…',
+    message: 'Đang mở Chrome chạy ngầm…',
     error: null,
     browser: null,
     page: null,
@@ -1902,7 +1915,7 @@ function startDeleteApp(appId, uid) {
     uid,
     kind: 'delete',
     status: 'opening_browser',
-    message: 'Đang mở cửa sổ Chrome…',
+    message: 'Đang mở Chrome chạy ngầm…',
     error: null,
     browser: null,
     page: null,
@@ -2086,7 +2099,7 @@ function startPageSetup(appId, pageIds, uid, webhookUrl) {
     uid,
     kind: 'pages',
     status: 'opening_browser',
-    message: 'Đang mở cửa sổ Chrome…',
+    message: 'Đang mở Chrome chạy ngầm…',
     error: null,
     browser: null,
     page: null,
@@ -2598,7 +2611,7 @@ function startPageSync(uid) {
     kind: 'sync-pages',
     appId,
     status: 'opening_browser',
-    message: 'Đang mở cửa sổ Chrome…',
+    message: 'Đang mở Chrome chạy ngầm…',
     error: null,
     browser: null,
     page: null,
