@@ -105,46 +105,6 @@ if ($handles.Count -eq 0) {
   execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => {});
 }
 
-// Watcher ẩn cửa sổ Chrome automation (Tạo app & Webhook / Lấy token / Đồng bộ):
-// PowerShell nền quét 250ms/lần, ShowWindowAsync(SW_HIDE) mọi window
-// Chrome_WidgetWin đang hiện của PID. Cần watcher thay vì ẩn từng lần vì window
-// sinh SAU khi spawn (popup OAuth "Kết nối trang") không kế thừa STARTUPINFO
-// SW_HIDE của windowsHide:true của puppeteer (đo 2026-10-10: popup window.open
-// hiện VISIBLE ~1-2s nếu ẩn từng lần bằng PowerShell; watcher giúp chỉ kịp ló
-// ~250ms). Tự thoát khi chrome process chết hoặc hết 15 phút (chống zombie PS).
-function spawnChromeHideWatcher(pid, maxDurationMs = 15 * 60 * 1000) {
-  if (process.platform !== 'win32' || !pid) return;
-  const psScript = `
-Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public class HideWatchHelper {
-  public delegate bool EnumProc(IntPtr h, IntPtr l);
-  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
-  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int n);
-}' -ErrorAction SilentlyContinue
-$deadline = (Get-Date).AddMilliseconds(${maxDurationMs})
-while ((Get-Date) -lt $deadline) {
-  if (-not (Get-Process -Id ${pid} -ErrorAction SilentlyContinue)) { break }
-  [void][HideWatchHelper]::EnumWindows({ param($h, $l)
-    $procId = [uint32]0
-    [void][HideWatchHelper]::GetWindowThreadProcessId($h, [ref]$procId)
-    if ($procId -eq ${pid}) {
-      $sbC = New-Object System.Text.StringBuilder 128
-      [void][HideWatchHelper]::GetClassName($h, $sbC, 128)
-      if ($sbC.ToString().StartsWith('Chrome_WidgetWin') -and [HideWatchHelper]::IsWindowVisible($h)) {
-        [void][HideWatchHelper]::ShowWindowAsync($h, 0)
-      }
-    }
-    return $true
-  }, [IntPtr]::Zero)
-  Start-Sleep -Milliseconds 250
-}`;
-  const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
-  const child = execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => {});
-  if (typeof child.unref === 'function') child.unref();
-}
-
 // Đóng Chrome bằng WM_CLOSE (tương đương bấm X) để Windows tự gỡ nút taskbar
 // sạch sẽ. taskkill /F giết process tức thì nhưng taskbar không kịp unregister
 // -> để lại nút "ma" không bấm được, chỉ mất khi đăng xuất (reproduced 2026-09-29).
@@ -1334,5 +1294,3 @@ foreach ($proc in $roots) {
 module.exports = new ProcessManager();
 module.exports.ProcessManager = ProcessManager;
 module.exports.closeChromePidsGracefullySync = closeChromePidsGracefullySync;
-module.exports.hideChromeWindowFromScreen = hideChromeWindowFromScreen;
-module.exports.spawnChromeHideWatcher = spawnChromeHideWatcher;
