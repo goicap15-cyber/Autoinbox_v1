@@ -14,6 +14,8 @@
 const crypto = require('crypto');
 const InboxSourceService = require('./InboxSourceService');
 const ConversationRepository = require('../repositories/ConversationRepository');
+const PhoneCaptureService = require('./PhoneCaptureService');
+const { extractLeadInfo } = require('../utils/leadExtractor');
 
 const GRAPH_VERSION = 'v21.0';
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
@@ -398,7 +400,7 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
 
         for (const msg of (msgData.data || []).reverse()) {
           await enrichAttachmentUrls(msg, token, database);
-          const inserted = insertGraphMessage(thread.id, source, msg, database, { markUnread: true });
+          const inserted = insertGraphMessage(thread.id, source, msg, database, { markUnread: true, io });
           if (inserted != null) insertedNew++;
           else if (backfillMediaUrlOnExistingRow(msg, database)) insertedNew++;
         }
@@ -419,6 +421,64 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
     console.warn(`[PageApi] Backfill thất bại page=${pageId}:`, err.message);
     return { ok: false, reason: err.message };
   }
+}
+
+// Quét SĐT/email từ nội dung tin khách Page rồi điền cột thông tin khách
+// hàng (contacts) — chỉ điền chỗ TRỐNG (COALESCE), không ghi đè giá trị đã có
+// kể cả nhập tay. Dùng chung cho webhook/watcher/backfill và quét bù lịch sử.
+function captureContactLeads({ threadId, accountId, messageId, content, timestampMs, contactName }, io, database = getDb()) {
+  const results = { emails: [], createdCaptures: [], capturedThreadId: null };
+  if (!messageId || !content) return results;
+
+  const { emails } = extractLeadInfo(content);
+  if (emails.length > 0) {
+    database.prepare(`
+      INSERT INTO contacts (thread_id, name, email)
+      VALUES (?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET
+        email = COALESCE(NULLIF(excluded.email,''), contacts.email)
+    `).run(threadId, contactName || 'Khách hàng', emails[0] || null);
+    results.emails = emails;
+  }
+
+  const { threadId: capturedThreadId, createdCaptures } = PhoneCaptureService.processIncomingMessage({
+    threadId,
+    accountId,
+    messageId,
+    content,
+    messageTimestampMs: timestampMs
+  }, { database });
+  results.capturedThreadId = capturedThreadId;
+  results.createdCaptures = createdCaptures || [];
+
+  if (io && (emails.length > 0 || results.createdCaptures.length > 0)) {
+    io.emit('LEAD_EXTRACTED', {
+      thread_id: threadId,
+      phones: results.createdCaptures.map((c) => c.normalized_phone),
+      emails
+    });
+    if (results.createdCaptures.length > 0) {
+      const phoneView = PhoneCaptureService.getContactPhoneView(capturedThreadId, database);
+      io.emit('PHONE_CAPTURED', {
+        thread_id: capturedThreadId,
+        captures: results.createdCaptures.map((c) => ({
+          id: c.id,
+          normalized_phone: c.normalized_phone,
+          raw_phone: c.raw_phone,
+          message_id: c.message_id,
+          message_timestamp_ms: c.message_timestamp_ms,
+          selection_state: c.selection_state
+        })),
+        phone: phoneView.phone,
+        phone_source: phoneView.phone_source,
+        phone_captured_at: phoneView.phone_captured_at,
+        phone_capture: phoneView.phone_capture,
+        phone_candidates: phoneView.phone_candidates
+      });
+    }
+    io.emit('CONTACT_UPDATED', { thread_id: threadId });
+  }
+  return results;
 }
 
 // Chèn 1 tin nhắn dạng Graph API (webhook hoặc backfill) — chống trùng theo message id
@@ -483,6 +543,20 @@ function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}
   // Chuẩn hóa sequence_order theo (timestamp_ms, id) để thứ tự bubble đúng
   // tuyệt đối — client chèn tin mới theo sequence nên live view cũng tự đúng.
   resequenceThreadByTimestamp(threadId, database);
+
+  // Tin KHÁCH đến có text: quét SĐT/email điền vào cột thông tin khách hàng.
+  // Đây là điểm hội tụ duy nhất của webhook/watcher/backfill nên gắn một chỗ
+  // là phủ hết mọi đường. Echo/tin operator (isOutgoing) bị bỏ qua.
+  if (!isOutgoing && text) {
+    captureContactLeads({
+      threadId,
+      accountId: source.owner_account_id ? String(source.owner_account_id) : null,
+      messageId,
+      content: text,
+      timestampMs: ts
+    }, opts.io || null, database);
+  }
+
   return result.lastInsertRowid;
 }
 
@@ -746,7 +820,7 @@ function processMessagingEvent(event, source, io, database) {
       audio_url: a.payload?.url || null,
       file_url: a.payload?.url || null,
     })) } : undefined,
-  }, database, { senderId: senderPsid });
+  }, database, { senderId: senderPsid, io });
 
   if (insertId == null) return null; // trùng mid — đã có
 
@@ -895,7 +969,7 @@ async function watchPageConversations(source, io, database) {
       if (!thread) { failed++; watcherLog('conv ' + conv.id + ': ensurePageThread trả null (psid=' + psid + ')'); continue; }
       for (const msg of (msgData.data || []).reverse()) {
         await enrichAttachmentUrls(msg, token, database);
-        const id = insertGraphMessage(thread.id, source, msg, database, { markUnread: true });
+        const id = insertGraphMessage(thread.id, source, msg, database, { markUnread: true, io });
         if (id != null) insertedNew++;
         else if (backfillMediaUrlOnExistingRow(msg, database)) insertedNew++;
       }
@@ -967,6 +1041,63 @@ function stopPageConversationWatcher() {
   pageWatcherTimer = null;
 }
 
+// Quét bù 1 lần SĐT/email cho tin Page CŨ đã nằm trong data (khách nhắn trước
+// khi bật capture). Chạy nền sau khi khởi động, idempotent: bộ capture chỉ
+// điền chỗ trống + chống trùng (message_id, số) nên chạy lại không sinh dữ
+// liệu thừa; thread đã đủ phone+email tự rớt khỏi danh sách các lần sau.
+async function backfillHistoricalContactLeads(io, database = getDb()) {
+  const rows = database.prepare(`
+    SELECT DISTINCT m.thread_id AS thread_id, t.account_id AS account_id
+    FROM messages m
+    JOIN threads t ON t.id = m.thread_id
+    JOIN inbox_sources s ON s.id = t.source_id
+    LEFT JOIN contacts c ON c.thread_id = m.thread_id
+    WHERE s.source_type = 'page_messenger'
+      AND m.is_outgoing = 0
+      AND m.fb_message_id IS NOT NULL
+      AND m.content IS NOT NULL AND TRIM(m.content) != ''
+      AND (c.phone IS NULL OR c.phone = '' OR c.email IS NULL OR c.email = '')
+  `).all();
+  if (rows.length === 0) {
+    console.log('[PageLeads] Quét bù: không có thread page nào cần điền SĐT/email.');
+    return { scanned: 0, filled: 0 };
+  }
+  console.log(`[PageLeads] Quét bù lịch sử: ${rows.length} thread cần rà...`);
+
+  let filled = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const { thread_id, account_id } = rows[i];
+    const msgs = database.prepare(`
+      SELECT fb_message_id, content, timestamp_ms FROM messages
+      WHERE thread_id = ? AND is_outgoing = 0
+        AND fb_message_id IS NOT NULL
+        AND content IS NOT NULL AND TRIM(content) != ''
+      ORDER BY COALESCE(timestamp_ms, 0) ASC, id ASC
+    `).all(thread_id);
+    let threadFilled = false;
+    for (const m of msgs) {
+      // Không bắn socket trong lúc quét (tránh bão event) — bắn 1 CONTACT_UPDATED
+      // cho cả thread ở cuối; UI đang mở sẽ tự refetch thông tin khách hàng.
+      const r = captureContactLeads({
+        threadId: thread_id,
+        accountId: account_id ? String(account_id) : null,
+        messageId: m.fb_message_id,
+        content: m.content,
+        timestampMs: m.timestamp_ms
+      }, null, database);
+      if (r.emails.length > 0 || r.createdCaptures.length > 0) threadFilled = true;
+    }
+    if (threadFilled) {
+      filled++;
+      if (io) io.emit('CONTACT_UPDATED', { thread_id });
+    }
+    // Nhả event loop giữa các thread — không chặn watcher/backfill/UI
+    if (i % 10 === 9) await new Promise((r2) => setTimeout(r2, 50));
+  }
+  console.log(`[PageLeads] ✅ Quét bù xong: ${filled}/${rows.length} thread đã điền SĐT/email vào thông tin khách hàng.`);
+  return { scanned: rows.length, filled };
+}
+
 
 module.exports = {
   ensureSchema,
@@ -998,5 +1129,6 @@ module.exports = {
   watchPageConversations,
   stopPageConversationWatcher,
   stopBridgePolling,
+  backfillHistoricalContactLeads,
   GRAPH_VERSION,
 };

@@ -7582,6 +7582,14 @@ function startServer() {
   // Re-subscribe webhook fields mọi page có token (thêm field mới như
   // messaging_referrals thì page cũ phải re-subscribe mới nhận event).
   pageApiService.resubscribeAllPages(db).catch(() => {});
+  // Quét bù SĐT/email cho tin Page CŨ đã nằm trong data — chạy nền sau 15s cho
+  // watcher/backfill ổn định trước; idempotent nên mỗi lần khởi động chỉ quét
+  // phần còn thiếu (sau lần đầu gần như rỗng).
+  setTimeout(() => {
+    pageApiService.backfillHistoricalContactLeads(io, db).catch((err) => {
+      console.error('[PageLeads] Quét bù lịch sử lỗi:', err.message);
+    });
+  }, 15000);
   // BỎ dọn page chưa có token lúc khởi động (2026-10-08): page được "Đồng bộ"
   // phát hiện mà chưa tạo token là trạng thái hợp lệ — xóa là mất page khỏi
   // popup sau mỗi lần tắt/mở app. App bị gỡ đã có removeAccountPages dọn sạch.

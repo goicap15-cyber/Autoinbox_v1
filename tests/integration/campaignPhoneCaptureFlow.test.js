@@ -149,12 +149,13 @@ test('thank_then_stop falls back to the default thank-you text when none is conf
 }));
 
 test('thank-you submission throwing synchronously (e.g. disconnected source) still stops and audits the failure', () => withDatabase(async (db) => {
-  seedPageThread(db, { id: 't-4' });
+  seedPageThread(db, { id: 't-4', noToken: true });
   const { campaign, recipientId } = createRunningThankThenStopCampaign(db, 't-4');
   const capture = captureFor(db, 't-4', 'mid.4');
 
-  // No fake connection this time - RichMessageCapabilityService reports
-  // disconnected, so RichMessageService.submit throws synchronously.
+  // Page KHÔNG có token thật - RichMessageCapabilityService báo không gửi
+  // được, RichMessageService.submit ném lỗi đồng bộ. (Thread page không còn
+  // phụ thuộc extension kết nối nên trigger lỗi bằng cách thiếu token.)
   await CampaignPhoneCaptureService.handleCaptures('t-4', [capture], {
     database: db, sleep: async () => {}, capabilityOptions: {}, pollIntervalMs: 0
   });

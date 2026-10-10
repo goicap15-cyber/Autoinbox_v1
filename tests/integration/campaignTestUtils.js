@@ -1,4 +1,5 @@
 const { getTestDatabase } = require('../helpers/testDatabase');
+const { encryptToken } = require('../../src/server/utils/tokenEncryption');
 
 function seedOperator(db) {
   db.prepare("INSERT OR IGNORE INTO users (id, username, password_hash, role) VALUES (1, 'admin', 'test', 'ADMIN')").run();
@@ -12,7 +13,8 @@ function seedPageThread(db, {
   contactName,
   accountStatus = 'ACTIVE',
   sourceStatus = 'ACTIVE',
-  optOut = false
+  optOut = false,
+  noToken = false
 } = {}) {
   db.prepare(`
     INSERT OR IGNORE INTO accounts (id, name, profile_dir, status)
@@ -20,9 +22,9 @@ function seedPageThread(db, {
   `).run(accountId, 'Test account', '/tmp/autochatbot-campaign-test', accountStatus);
   db.prepare(`
     INSERT OR IGNORE INTO inbox_sources
-      (id, source_type, owner_account_id, external_id, display_name, status)
-    VALUES (?, 'page_messenger', ?, ?, ?, ?)
-  `).run(sourceId, accountId, pageId, 'Test page', sourceStatus);
+      (id, source_type, owner_account_id, external_id, display_name, status, access_token_encrypted)
+    VALUES (?, 'page_messenger', ?, ?, ?, ?, ?)
+  `).run(sourceId, accountId, pageId, 'Test page', sourceStatus, noToken ? null : encryptToken('test-page-token-' + pageId));
   db.prepare(`
     INSERT INTO threads (id, external_thread_id, account_id, source_id, contact_name)
     VALUES (?, ?, ?, ?, ?)
