@@ -2,21 +2,45 @@ const { app, BrowserWindow, dialog, ipcMain, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const net = require('net');
 const crypto = require('crypto');
 
 const instanceToken = crypto.randomUUID();
 process.env.CRM_INSTANCE_TOKEN = instanceToken;
-// Do not rely on Electron's cross-build singleton mutex. After an old build is
-// force-closed on Windows that mutex can outlive the visible process briefly,
-// causing a newly installed build to exit before it can even write a log. The
-// backend instance token + exclusive port binding below provide deterministic
-// ownership and a useful EADDRINUSE error instead.
-const hasSingleInstanceLock = true;
+// Hybrid single-instance guard: lock chặn mở app lần 2 (máy khách bấm icon
+// nhiều lần → EADDRINUSE :5050 vòng lặp 2026-10-09), nhưng sau khi kill cứng
+// mutex cũ có thể sống sót chặn oan bản mới (lý do code cũ bỏ lock). Nên khi
+// không lấy được lock thì probe cổng 5050: còn instance sống thì thoát im
+// lặng (bản đầu nhận 'second-instance' và focus window), port trống thì coi
+// mutex là rác và chạy tiếp - port binding vẫn là chủ quyền cuối cùng.
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 let mainWindow = null;
 let backendRuntime = null;
 let cleanupStarted = false;
 let startupError = null;
+let backendReady = false;
+let openExternalWarned = false;
+
+function isBackendPortBusy(port, timeoutMs = 5000) {
+  const startedAt = Date.now();
+  return new Promise((resolve) => {
+    const attempt = () => {
+      const socket = new net.Socket();
+      const done = (busy) => {
+        socket.removeAllListeners();
+        socket.destroy();
+        if (busy || Date.now() - startedAt >= timeoutMs) resolve(busy);
+        else setTimeout(attempt, 400);
+      };
+      socket.once('connect', () => done(true));
+      socket.once('error', () => done(false));
+      socket.setTimeout(1200, () => done(false));
+      socket.connect(port, '127.0.0.1');
+    };
+    attempt();
+  });
+}
 
 function appendDesktopLog(message) {
   try {
@@ -89,7 +113,20 @@ async function createWindow() {
     // cần cho các link share/v/... Yêu cầu 2026-09-18: link trong chat phải
     // bấm được. Chặn popup nội bộ trong cửa sổ CRM.
     if (/^https?:\/\//i.test(url)) {
-      require('electron').shell.openExternal(url);
+      require('electron').shell.openExternal(url).catch((err) => {
+        // shell.openExternal trả Promise - máy khách thiếu/hỏng default browser
+        // (0x800401F5) không được thành unhandledRejection spam log.
+        appendDesktopLog(`[openExternal] Không mở được ${url}: ${err?.message || err}`);
+        if (!openExternalWarned) {
+          openExternalWarned = true;
+          dialog.showMessageBox({
+            type: 'warning',
+            title: 'Không mở được liên kết',
+            message: 'Windows không tìm thấy trình duyệt để mở link này.',
+            detail: 'Hãy cài Chrome/Edge và đặt làm trình duyệt mặc định (Cài đặt > Ứng dụng > Ứng dụng mặc định) rồi thử lại.'
+          });
+        }
+      });
       return { action: 'deny' };
     }
     return { action: 'allow' };
@@ -107,10 +144,17 @@ async function createWindow() {
   } catch (err) {
     const message = err?.stack || err?.message || String(err);
     appendDesktopLog(`[startup] Failed: ${message}`);
-    dialog.showErrorBox(
-      'Không thể khởi động FB Messenger CRM',
-      `Backend không khởi động được.\n\n${err?.message || err}\n\nLog: ${path.join(app.getPath('userData'), 'logs', 'desktop.log')}`
-    );
+    if (/EADDRINUSE/i.test(message)) {
+      dialog.showErrorBox(
+        'FB Messenger CRM đã đang chạy',
+        'Đã có một cửa sổ CRM khác đang mở (cổng 5050 bận).\nHãy dùng cửa sổ đang chạy, hoặc đóng hẳn app (Task Manager → FB Messenger CRM) rồi mở lại.'
+      );
+    } else {
+      dialog.showErrorBox(
+        'Không thể khởi động FB Messenger CRM',
+        `Backend không khởi động được.\n\n${err?.message || err}\n\nLog: ${path.join(app.getPath('userData'), 'logs', 'desktop.log')}`
+      );
+    }
     app.quit();
   }
 
@@ -130,8 +174,24 @@ ipcMain.handle('crm-logout', async () => {
   }
 });
 
+app.on('second-instance', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
+
 app.whenReady().then(async () => {
-  if (!hasSingleInstanceLock) return;
+  if (!hasSingleInstanceLock) {
+    const portBusy = await isBackendPortBusy(5050);
+    if (portBusy) {
+      appendDesktopLog('[startup] CRM đã chạy sẵn (cổng 5050 bận) - thoát bản vừa mở.');
+      app.quit();
+      return;
+    }
+    appendDesktopLog('[startup] Lock singleton bị giữ bởi tiến trình đã chết - cổng 5050 trống, chạy tiếp.');
+  }
   app.userAgentFallback = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 FB-CRM-Desktop';
   appendDesktopLog(`[startup] app=${app.getVersion()} packaged=${app.isPackaged} resources=${process.resourcesPath}`);
   // Start Backend Express/WebSocket Server
@@ -155,6 +215,7 @@ app.whenReady().then(async () => {
   if (!startupError && backendRuntime?.startupPromise) {
     try {
       await backendRuntime.startupPromise;
+      backendReady = true;
     } catch (err) {
       startupError = err;
       appendDesktopLog(`[backend-listen] ${err?.stack || err?.message || err}`);
@@ -174,8 +235,11 @@ process.on('uncaughtException', (err) => {
 });
 
 process.on('unhandledRejection', (reason) => {
-  startupError = reason instanceof Error ? reason : new Error(String(reason));
-  appendDesktopLog(`[unhandledRejection] ${startupError.stack || startupError}`);
+  const detail = reason instanceof Error ? (reason.stack || reason) : String(reason);
+  appendDesktopLog(`[unhandledRejection] ${detail}`);
+  // Chỉ gán khi backend chưa ready - rejection runtime muộn (vd openExternal
+  // fail) không được poison waitForBackend làm chết app oan giữa chừng.
+  if (!backendReady) startupError = reason instanceof Error ? reason : new Error(String(reason));
 });
 
 app.on('window-all-closed', () => {
