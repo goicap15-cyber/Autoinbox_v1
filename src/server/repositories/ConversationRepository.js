@@ -235,6 +235,42 @@ class ConversationRepository {
     return candidates.some((row) => String(row.content || '')
       .replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN') === normalizedContent);
   }
+
+  // Row ma lật chiều vào TRƯỚC row base trong cùng đợt quét (reproduce
+  // 2026-10-09 04:23: alo composer - ma __bubble_1 out=0 seq 113 chèn 1ms
+  // trước base out=1 seq 114): guard WS cần base đã tồn tại nên lọt khi base
+  // chưa vào DB. Gọi sau MỖI lần insert thành công - khi base đổ vào sẽ dọn
+  // sibling __bubble_N cùng family, cùng nội dung, KHÁC hướng đã chèn trước.
+  static collapseFlippedBubbleSiblings(threadId, insertedMessageId, content, database = getDefaultDb()) {
+    const familyId = String(insertedMessageId || '').replace(/__bubble_\d+$/, '');
+    if (!threadId || familyId.length < 12) return 0;
+    const normalized = String(content || '').replace(/\s+/g, ' ').trim();
+    if (!normalized) return 0;
+    if (/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(normalized)) return 0;
+    const baseRow = database.prepare(`
+      SELECT is_outgoing, content, media_type, media_url FROM messages
+      WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
+      ORDER BY id DESC LIMIT 1
+    `).get(threadId, familyId, familyId);
+    if (!baseRow) return 0;
+    if (String(baseRow.content || '').replace(/\s+/g, ' ').trim() !== normalized) return 0;
+    if (baseRow.media_type && baseRow.media_type !== 'text') return 0;
+    const flippedRows = database.prepare(`
+      SELECT id, fb_message_id, content, media_type, media_url FROM messages
+      WHERE thread_id = ? AND is_outgoing != ?
+    `).all(threadId, Number(baseRow.is_outgoing) ? 1 : 0);
+    let deleted = 0;
+    for (const row of flippedRows) {
+      const rowId = String(row.fb_message_id || '');
+      if (!rowId.startsWith(`${familyId}__bubble_`)) continue;
+      if (row.media_type && row.media_type !== 'text') continue;
+      if (row.media_url) continue;
+      if (String(row.content || '').replace(/\s+/g, ' ').trim() !== normalized) continue;
+      database.prepare('DELETE FROM messages WHERE id = ?').run(row.id);
+      deleted += 1;
+    }
+    return deleted;
+  }
   static upsertThread(threadData, database = getDefaultDb()) {
     const { id, account_id, thread_url, contact_name, last_message, is_unread, source_id, inbox_folder } = threadData;
     const external_thread_id = String(threadData.external_thread_id || threadData.thread_id || id);
@@ -537,7 +573,51 @@ class ConversationRepository {
             }
           }
         }
+        // Pending outgoing bị tổng hợp id mid.X__bubble_N với anchor CŨ (quét
+        // lại gắn nhầm article cũ cách xa): bản thật tự vào DB bằng mid riêng
+        // vài giây sau, nên bỏ bản tổng hợp - nếu không sẽ thành row ma trùng
+        // lặp mà heal 2c không với tới (ts lệch quá cửa sổ 2s, reproduce
+        // 2026-10-08 18:33: alo tái dùng mid 10/06).
+        if (isOutgoing && /__bubble_\d+$/.test(String(stableId))
+          && mediaType === 'text' && !mediaUrl
+          && !isPureEmojiContent) {
+          const outgoingBubbleFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
+          const outgoingBubbleBase = outgoingBubbleFamilyId.length >= 12
+            ? database.prepare(`
+                SELECT content, timestamp_ms FROM messages
+                WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
+                ORDER BY id DESC LIMIT 1
+              `).get(threadId, outgoingBubbleFamilyId, outgoingBubbleFamilyId)
+            : null;
+          if (outgoingBubbleBase
+            && String(outgoingBubbleBase.content || '').trim() === String(content || '').trim()
+            && Math.abs(observedTimestampMs - Number(outgoingBubbleBase.timestamp_ms || 0)) > 60000) {
+            result.skippedCount += 1;
+            continue;
+          }
+        }
+        // Otid thuần số + out=0: đối xứng guard WS — otid do client MÌNH sinh
+        // khi gửi; khách đến luôn mang <uid>@msgr.N / mid.$. Mid rút gọn của
+        // khách đã được ghép về dạng đầy đủ ở trên nên không dính guard này
+        // (reproduce 2026-10-09: "sdsdsd" nhắn tay hiện bản sao bên trái khách).
+        if (!isOutgoing && /^[0-9]{15,19}(?:__bubble_\d+)?$/.test(String(stableId))
+          && mediaType === 'text' && !mediaUrl && !isPureEmojiContent) {
+          result.skippedCount += 1;
+          continue;
+        }
         let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+        // Multi-account: mid này đã thuộc thread của acc khác -> dùng bản sao
+        // mirror (mid::thread) thay vì UPSERT nhầm row của acc kia (mất tin
+        // hội thoại bên acc này, reproduce 2026-10-08 18:09).
+        {
+          const midOwnerRow = stableId
+            ? database.prepare('SELECT thread_id FROM messages WHERE fb_message_id = ?').get(stableId)
+            : null;
+          if (midOwnerRow && midOwnerRow.thread_id !== threadId) {
+            stableId = `${stableId}::${threadId}`;
+            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+          }
+        }
         let promotedSidebarPreview = false;
         // If the incoming message has an official fb_message_id but the DB only
         // knows a pending_client_* placeholder, upgrade the pending row in-place
@@ -680,6 +760,11 @@ class ConversationRepository {
         }
         insertMsg.run(threadId, stableId, senderId, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
         result.insertedIds.push(stableId);
+        // Batch có thể mang row ma lật chiều ĐỨNG TRƯỚC base (guard 513 cần
+        // base đã tồn tại) - base vừa insert thì dọn sibling __bubble_N.
+        try {
+          ConversationRepository.collapseFlippedBubbleSiblings(threadId, stableId, content, database);
+        } catch (_) { /* sweep là lành hóa, không chặn persist */ }
       }
       return result;
     });

@@ -65,6 +65,25 @@
     }
   } catch (_) {}
 
+  // 2026-10-09: tab ẩn vẫn render liên tục (occlusion bị tắt để quét DOM nền)
+  // -> 1-2 lõi CPU. DOM mutation + observer không cần animation: dừng animation
+  // CSS khi tab hidden, trả lại khi visible. Không đụng logic quét.
+  (function installHiddenTabAnimationPause() {
+    try {
+      const style = document.createElement('style');
+      style.id = 'crm-pause-hidden-anim';
+      style.textContent = 'html[data-crm-hidden="1"] *, html[data-crm-hidden="1"] *::before,'
+        + ' html[data-crm-hidden="1"] *::after { animation-play-state: paused !important; transition: none !important; }';
+      (document.head || document.documentElement).appendChild(style);
+      const applyHiddenAnimState = () => {
+        if (document.visibilityState === 'hidden') document.documentElement.setAttribute('data-crm-hidden', '1');
+        else document.documentElement.removeAttribute('data-crm-hidden');
+      };
+      document.addEventListener('visibilitychange', applyHiddenAnimState);
+      applyHiddenAnimState();
+    } catch (_) {}
+  })();
+
   function stopAllRingtoneAudio() {
     try {
       var mediaEls = document.querySelectorAll('audio, video');
@@ -795,6 +814,69 @@
       parsed?.media_url || '',
       parsed?.content || ''
     ].join('|');
+  }
+
+  function obsDebug(info) {
+    try {
+      if (!chrome?.runtime?.id) return;
+      chrome.runtime.sendMessage({ type: 'CONTENT_DEBUG', data: { kind: 'obs', ...info } }).catch(() => {});
+    } catch (_) {}
+  }
+
+  // ===== Bản dùng thật của createBubbleFamilyTracker trong domMessageDedup.js
+  // ===== (mirror chỉ để test - PHẢI ĐỒNG BỘ khi sửa).
+  // bubble_idx là chỉ số VỊ TRÍ trong lần quét, không phải định danh bền vững:
+  // React hydrate lại article bằng lá dir="auto tạm thời, observer bắt node lá
+  // nhỏ hơn article, hay đợt re-read muộn hơn đều làm CÙNG MỘT bong bóng vật
+  // lý đổi chỉ số (mid.x <-> mid.x__bubble_1) giữa các lần quét. Hai id khác
+  // nhau khiến guard theo id ở dưới và UNIQUE(fb_message_id) của máy chủ cùng
+  // mù -> dòng tin ma nhân đôi (hội thoại "Yến", 08-10-2026). Định danh bền
+  // vững: family (mid gốc) + chữ ký + slot thứ tự chữ ký đó trong đợt quét.
+  function createBubbleFamilyTracker() {
+    const seen = new Map(); // "familyId\u0000sig\u0000slot" -> true
+    const MAX_SEEN = 20000;
+    function markSeen(key) {
+      if (!key || seen.has(key)) return;
+      seen.set(key, true);
+      if (seen.size > MAX_SEEN) seen.delete(seen.keys().next().value);
+    }
+    function resolveBatch(items) {
+      const results = items.map((item) => ({
+        id: String(item?.proposedId ?? ''),
+        key: null,
+        duplicate: false
+      }));
+      const byFamily = new Map();
+      items.forEach((item, index) => {
+        const nativeId = String(item?.nativeId || '');
+        if (!/^mid\./.test(nativeId)) return;
+        const familyId = nativeId.replace(/__bubble_\d+$/, '');
+        if (!byFamily.has(familyId)) byFamily.set(familyId, []);
+        byFamily.get(familyId).push({ index, sig: String(item?.sig ?? '') });
+      });
+      byFamily.forEach((observations, familyId) => {
+        const slots = new Map(); // sig -> slot kế tiếp
+        for (const obs of observations) {
+          const slot = slots.get(obs.sig) || 0;
+          slots.set(obs.sig, slot + 1);
+          const key = `${familyId}\u0000${obs.sig}\u0000${slot}`;
+          results[obs.index].key = key;
+          results[obs.index].duplicate = seen.has(key);
+        }
+      });
+      return results;
+    }
+    return { resolveBatch, markSeen };
+  }
+
+  const bubbleFamilyTracker = createBubbleFamilyTracker();
+
+  function toTrackerItems(thread_id, parsedList) {
+    return parsedList.map((parsed) => ({
+      nativeId: parsed.native_id,
+      proposedId: makeDomMessageId(thread_id, parsed),
+      sig: domObservationSignature(parsed)
+    }));
   }
 
   function extractThreadIdFromUrl() {
@@ -1597,13 +1679,20 @@
   }
   function seedBaseline(thread_id) {
     const existingRows = document.querySelectorAll('div[role="row"], div[role="article"], div[data-scope="messages_table"] div[dir="auto"]');
+    const baselineParsed = [];
     existingRows.forEach(row => {
       const parsedMessages = parseMessagesFromDOMNode(row);
       parsedMessages.forEach(p => {
         markDomOccurrence(p, row);
         lastObservedMessages.set(makeDomMessageId(thread_id, p), domObservationSignature(p));
+        baselineParsed.push(p);
       });
     });
+    // Baseline phải chốt cả slot family để lần quét sau đọc lại cùng bong bóng
+    // với bubble_idx trôi (hydrate trễ) không thành tin ma __bubble_N.
+    for (const verdict of bubbleFamilyTracker.resolveBatch(toTrackerItems(thread_id, baselineParsed))) {
+      bubbleFamilyTracker.markSeen(verdict.key);
+    }
     while (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
   }
 
@@ -1617,7 +1706,11 @@
     if (!main) return;
     const rows = Array.from(main.querySelectorAll('div[role=row], div[role=article]')).slice(-32);
     for (const row of rows) {
-      for (const parsed of parseMessagesFromDOMNode(row, true)) {
+      const rowParsed = parseMessagesFromDOMNode(row, true);
+      const rowVerdicts = bubbleFamilyTracker.resolveBatch(toTrackerItems(thread_id, rowParsed));
+      for (let parsedIdx = 0; parsedIdx < rowParsed.length; parsedIdx++) {
+        const parsed = rowParsed[parsedIdx];
+        const verdict = rowVerdicts[parsedIdx];
         if (!parsed.native_id) continue;
         // This recovery pass is incoming-only. Never forward an outgoing DOM bubble as CONTACT.
         // The previous hard-coded is_outgoing:false here manufactured the ghost text.
@@ -1629,11 +1722,13 @@
         // server tự khớp theo fb_message_id (reconcile spec 019). Check cũ
         // nuốt tin thật của khách trùng text (hoa/thường) với tin operator.
         markDomOccurrence(parsed, row);
-        const fbMessageId = makeDomMessageId(thread_id, parsed);
+        const fbMessageId = verdict.id;
         const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
         const observationSignature = domObservationSignature(parsed);
+        if (verdict.duplicate) continue;
         if (lastObservedMessages.get(fbMessageId) === observationSignature) continue;
         lastObservedMessages.set(fbMessageId, observationSignature);
+        bubbleFamilyTracker.markSeen(verdict.key);
 
         let timestampMs = null;
         const timeMatch = String(parsed.effective_label || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
@@ -1703,9 +1798,19 @@
     // nuốt tin thật của khách ("alo" của operator vs "Alo" của khách -
     // reproduce 2026-10-07). MIỄN TRỪ emoji-thuần: khách trả lời 👍 ngay sau
     // khi operator gửi 👍 là bình thường, không được drop.
-    if (!parsed.native_id && !parsed.is_outgoing
+    // Label "Tin nhắn do <tên khách> gửi lúc" là bằng chứng chiều DÒNG: echo
+    // bubble của chính mình khi hydrate trễ thì hoặc is_outgoing=true (không
+    // bao giờ vào được đây) hoặc chưa có label. Row còn nhãn khách mà chưa kịp
+    // có native id phải đi tiếp - window 90s từng nuốt tin thật của khách
+    // trùng nội dung tin operator vừa gửi ("alo" -> khách "alo" lại).
+    const labelProvesIncoming = /Tin nhắn do .+ gửi lúc/i.test(String(parsed.effective_label || ''))
+      && !/Tin nhắn do (?:Bạn|You) gửi/i.test(String(parsed.effective_label || ''));
+    if (!parsed.native_id && !parsed.is_outgoing && !labelProvesIncoming
       && !/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(String(parsed.content || ''))
-      && isRecentObservedOutgoing(thread_id, parsed.content)) return;
+      && isRecentObservedOutgoing(thread_id, parsed.content)) {
+      obsDebug({ stage: 'ECHO_SUPPRESSED', thread: String(thread_id), content: String(parsed.content || '').substring(0, 40) });
+      return;
+    }
 
     let tsMs = null;
     let tsSource = 'realtime_fallback';
@@ -1825,12 +1930,17 @@
 
       const contactAvatar = extractContactAvatarFromNode(node);
 
-      activeParsed.forEach((parsed) => {
+      // markDomOccurrence trước khi tính id: dom_ hash id có hậu tố _occ_N,
+      // idempotent theo anchor nên lần gọi trong vòng dưới vẫn như cũ.
+      activeParsed.forEach((parsed) => markDomOccurrence(parsed, node));
+      const batchVerdicts = bubbleFamilyTracker.resolveBatch(toTrackerItems(thread_id, activeParsed));
+      activeParsed.forEach((parsed, parsedIdx) => {
         // Every physical bubble gets its own identity. Content/time based
         // cooldowns incorrectly collapsed rapid messages such as c, c, c.
         markDomOccurrence(parsed, node);
 
-        const fbMessageId = makeDomMessageId(thread_id, parsed);
+        const verdict = batchVerdicts[parsedIdx];
+        const fbMessageId = verdict.id;
         const domPosition = getDomMessagePosition(node, thread_id, fbMessageId);
 
         // Skip only if THIS exact reading (same id, same direction) was already
@@ -1839,8 +1949,23 @@
         // reconcile/hysteresis path (spec 019) can settle it, rather than a new
         // duplicate row being created or the correction being silently dropped.
         const observationSignature = domObservationSignature(parsed);
+        if (verdict.duplicate) {
+          // Chỉ log khi tracker là lý do DUY NHẤT chặn tin (lastObserved chưa
+          // ghi cùng chữ ký) - còn lại là re-scan bình thường của tin đã
+          // forward, không đáng log.
+          if (lastObservedMessages.get(fbMessageId) !== observationSignature) {
+            obsDebug({
+              stage: 'TRACKER_DUPLICATE',
+              thread: String(thread_id),
+              id: String(fbMessageId || '').substring(0, 50),
+              content: String(parsed.content || '').substring(0, 30)
+            });
+          }
+          return;
+        }
         if (lastObservedMessages.get(fbMessageId) === observationSignature) return;
         lastObservedMessages.set(fbMessageId, observationSignature);
+        bubbleFamilyTracker.markSeen(verdict.key);
         if (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
 
         let tsMs = null;
@@ -1874,12 +1999,17 @@
 
         if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
 
-        // The explicit composer confirmation/network intercept owns plain outgoing text.
-        // The DOM observer must not forward the same rendered bubble a second time.
+        // Tin outgoing text: bubble CHƯA có native id thì nhường cho composer/
+        // network confirmation (dom_hash trôi khi hydrate sẽ thành ghost nếu
+        // forward sớm). Đã có native id thì forward - server tự khớp theo mid:
+        // ghép vào row pending của composer hoặc nhận diện trùng mid rồi bỏ.
+        // Nhắn tay ngay trong Messenger không có đường confirmation nào khác,
+        // gate cũ nuốt sạch tin này (reproduce 2026-10-09: 5 tin "alo" nhắn tay
+        // chỉ còn 1 vào CRM).
         const isPlainOutgoingDomText = parsed.is_outgoing
           && !parsed.media_url
           && (!parsed.media_type || parsed.media_type === 'text');
-        if (isPlainOutgoingDomText) return;
+        if (isPlainOutgoingDomText && !parsed.native_id) return;
 
         // Row CHƯA có native id (React hydrate trễ): đợi ~1.5s rồi đọc lại đúng
         // node đó - nếu mid thật đã gắn thì forward bằng mid (server tự khớp,
@@ -1891,17 +2021,36 @@
               let toForward = parsed;
               let idToUse = fbMessageId;
               let positionToUse = domPosition;
-              const reread = parseMessagesFromDOMNode(node, true)
-                .find((item) => !item.is_outgoing && String(item.content || '') === String(parsed.content || ''));
+              let deferredVerdict = null;
+              // Re-parse đúng article của bong bóng này (parsed.dom_anchor),
+              // KHÔNG re-parse mutation root: root chứa 2 tin giống nhau đã
+              // khiến find() trả bubble #1 cho CẢ HAI timer - lần forward thứ
+              // hai dùng lại id của tin đầu và server gộp cặp tin thành 1 row
+              // (reproduce 2026-10-08: nhắn "alo" 2 lần chỉ còn 1).
+              const rereadScope = parsed.dom_anchor || node;
+              const rereadAll = parseMessagesFromDOMNode(rereadScope, true);
+              const rereadContentMatch = (item) => !item.is_outgoing
+                && String(item.content || '') === String(parsed.content || '');
+              const reread = rereadAll.find((item) => rereadContentMatch(item)
+                  && (Number(item.bubble_idx) || 0) === (Number(parsed.bubble_idx) || 0))
+                || rereadAll.find(rereadContentMatch);
               if (reread && reread.native_id) {
                 markDomOccurrence(reread, node);
                 toForward = reread;
-                idToUse = makeDomMessageId(thread_id, reread);
+                deferredVerdict = bubbleFamilyTracker.resolveBatch(toTrackerItems(thread_id, [reread]))[0];
+                idToUse = deferredVerdict.id;
                 positionToUse = getDomMessagePosition(node, thread_id, idToUse);
               }
+              obsDebug({
+                stage: deferredVerdict ? 'REREAD_NATIVE_ID' : 'REREAD_SYNTHETIC',
+                thread: String(thread_id),
+                id: String(idToUse || '').substring(0, 50)
+              });
               const deferredSignature = domObservationSignature(toForward);
+              if (deferredVerdict && deferredVerdict.duplicate) return;
               if (lastObservedMessages.get(idToUse) !== deferredSignature) {
                 lastObservedMessages.set(idToUse, deferredSignature);
+                bubbleFamilyTracker.markSeen(deferredVerdict ? deferredVerdict.key : null);
                 forwardIncomingDomObservation(thread_id, toForward, idToUse, contactAvatar, positionToUse);
               }
             } catch (_) {
@@ -1929,7 +2078,11 @@
     if (!log) return;
     const rows = Array.from(log.querySelectorAll('div[role="row"], div[role="article"]')).slice(-24);
     for (const row of rows) {
-      for (const parsed of parseMessagesFromDOMNode(row, true)) {
+      const rowParsed = parseMessagesFromDOMNode(row, true);
+      const rowVerdicts = bubbleFamilyTracker.resolveBatch(toTrackerItems(thread_id, rowParsed));
+      for (let parsedIdx = 0; parsedIdx < rowParsed.length; parsedIdx++) {
+        const parsed = rowParsed[parsedIdx];
+        const verdict = rowVerdicts[parsedIdx];
         markDomOccurrence(parsed, row);
         // Tail reconciliation is hydration recovery, so require Facebook's
         // durable identity. Virtualized history without a native id can remount
@@ -1944,11 +2097,18 @@
         // Outgoing media is required here: MutationObserver often sees the
         // video shell before Facebook hydrates its native id/media element.
         // The periodic tail pass then provides the confirmation that clears
-        // the CRM pending spinner. Plain outgoing text remains on its existing path.
-        if (parsed.is_outgoing && !isCallRow && !isMediaRow) continue;
-        const fbMessageId = makeDomMessageId(thread_id, parsed);
+        // the CRM pending spinner. Plain outgoing text vẫn bỏ qua KHI CHƯA có
+        // mid thật: otid/dom_ là id tạm, đường realtime đảm nhiệm. Nhưng bubble
+        // mang mid.$ mà realtime đã lỡ bỏ (tab đang điều hướng, xác nhận chậm)
+        // phải được lượt quét đuôi này cứu - server khớp theo mid nên không thể
+        // thành ghost (reproduce 2026-10-09 12:54: 3/4 tin "alo" mất vì echo
+        // không bao giờ tới server).
+        const hasDurableMidId = /^mid\./.test(String(parsed.native_id || ''));
+        if (parsed.is_outgoing && !isCallRow && !isMediaRow && !hasDurableMidId) continue;
+        const fbMessageId = verdict.id;
         const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
         const observationSignature = domObservationSignature(parsed);
+        if (verdict.duplicate) continue;
         if (lastObservedMessages.get(fbMessageId) === observationSignature) continue;
         let tsMs = null;
         const timeMatch = String(parsed.effective_label || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
@@ -1964,6 +2124,7 @@
           tsMs = observed.getTime();
         }
         lastObservedMessages.set(fbMessageId, observationSignature);
+        bubbleFamilyTracker.markSeen(verdict.key);
         try {
           if (chrome?.runtime?.id) chrome.runtime.sendMessage({
             type: 'NEW_MESSAGE_FROM_FB',

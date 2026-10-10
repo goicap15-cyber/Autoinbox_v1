@@ -12,6 +12,25 @@ const isBusiness = window.location.hostname.includes('business.facebook.com')
 
 if (isBusiness) {
     console.log(`[PageContent] Business Suite Inbox DOM observer started in ${window.top === window.self ? 'TOP FRAME' : 'IFRAME'}: ${window.location.href}`);
+
+    // 2026-10-09: dừng animation CSS khi tab ẩn — quét DOM nền không cần
+    // animation, tab BS ẩn vẫn đốt CPU render nếu để chạy.
+    (function installHiddenTabAnimationPause() {
+        try {
+            const style = document.createElement('style');
+            style.id = 'crm-pause-hidden-anim';
+            style.textContent = 'html[data-crm-hidden="1"] *, html[data-crm-hidden="1"] *::before,'
+                + ' html[data-crm-hidden="1"] *::after { animation-play-state: paused !important; transition: none !important; }';
+            (document.head || document.documentElement).appendChild(style);
+            const applyHiddenAnimState = () => {
+                if (document.visibilityState === 'hidden') document.documentElement.setAttribute('data-crm-hidden', '1');
+                else document.documentElement.removeAttribute('data-crm-hidden');
+            };
+            document.addEventListener('visibilitychange', applyHiddenAnimState);
+            applyHiddenAnimState();
+        } catch (_) {}
+    })();
+
     
     function resolveCurrentPageId() {
         let pId = new URLSearchParams(window.location.search).get('asset_id')

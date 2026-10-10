@@ -779,16 +779,35 @@ function sanitizeLog(str, maxLen = 120) {
 
 // Đo từng chặng đường realtime hint (observer -> bg -> server) trong
 // composer-debug.log để so latency với bgDebug/obsDebug phía extension.
-// Chỉ bật khi SYNC_DEBUG=1 — mặc định tắt vì ghi ~2 dòng/giây/tài khoản.
-function syncDebug(stage, data = {}) {
-  if (!process.env.SYNC_DEBUG) return;
+// 2026-10-09: file từng phình 126MB vì hint relay ~10 dòng/s — mọi writer
+// phải đi qua appendComposerDebugLog để xoay vòng 30MB.
+const composerLogState = { bytes: 0 };
+
+function appendComposerDebugLog(payload) {
   try {
-    appendRotating(
-      path.join(APP_DATA_ROOT, 'composer-debug.log'),
-      JSON.stringify({ at: new Date().toISOString(), source: 'SYNC_DEBUG', stage, ...data }) + '\n'
-    );
+    const logPath = path.join(APP_DATA_ROOT, 'composer-debug.log');
+    const line = JSON.stringify(payload) + '\n';
+    if (composerLogState.bytes === 0) {
+      try { composerLogState.bytes = fs.statSync(logPath).size; } catch (_) {}
+    }
+    composerLogState.bytes += line.length;
+    if (composerLogState.bytes > 30 * 1024 * 1024) {
+      try { fs.renameSync(logPath, logPath + '.1'); } catch (_) {}
+      composerLogState.bytes = 0;
+    }
+    fs.appendFileSync(logPath, line);
   } catch (_) {}
 }
+
+function syncDebug(stage, data = {}) {
+  appendComposerDebugLog({ at: new Date().toISOString(), source: 'SYNC_DEBUG', stage, ...data });
+}
+
+// Hint relay trùng payload: chặn trước khi chạm txn sidebar trong
+// SYNC_THREADS_RESULT (observer trôi fp theo text thời gian/typing từng làm
+// backend upsert 30 threads ~10 lần/giây).
+const lastRealtimeHintSig = new Map();
+let lastUnchangedHintLogAt = 0;
 
 const richContentSecret = crypto.randomBytes(32);
 
@@ -1145,23 +1164,44 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
     trace('BACKEND_DISPATCHED_EXTENSION');
 
     // Never leave the CRM bubble pending forever when an extension handler
-    // stalls before returning SEND_MESSAGE_RESULT.
+    // stalls before returning SEND_MESSAGE_RESULT. Nhưng KHÔNG đánh failed để tránh hiện nút Thử lại.
+    // Chỉ delete khi tin đã lưu ở chỗ khác (echo/history bắt được mid thật).
     setTimeout(() => {
       const pending = db.prepare(`
-        SELECT id FROM messages
+        SELECT id, fb_message_id, content, created_at FROM messages
         WHERE client_message_id = ? AND delivery_status = 'pending'
       `).get(clientMsgId);
       if (!pending) return;
-      const timeoutError = 'Extension không xác nhận kết quả gửi trong 30 giây';
-      deleteOutboundMessageRows({ messageId: pending.id });
-      io.emit('MESSAGE_SEND_FAILED', {
-        thread_id,
-        client_message_id: clientMsgId,
-        success: false,
-        status: 'failed',
-        error: timeoutError,
-        error_code: 'EXTENSION_ACK_TIMEOUT'
-      });
+      
+      // Echo-merge đã ghép mid thật vào row (còn đứng ở pending) => tin đã lên Messenger
+      if (pending.fb_message_id && !String(pending.fb_message_id).startsWith('pending_')) {
+        console.log(`[WS] Sweeper thấy mid thật cho ${clientMsgId}, giữ pending.`);
+        return;
+      }
+      
+      // Tin đã được lưu bằng mid thật riêng (echo/history bắt được) -> row optimistic này là bản thừa
+      const capturedElsewhere = db.prepare(`
+        SELECT id FROM messages
+        WHERE thread_id = ? AND is_outgoing = 1 AND id != ?
+          AND COALESCE(content, '') = COALESCE(?, '')
+          AND (fb_message_id LIKE 'mid.%' OR fb_message_id LIKE '%@msgr.%')
+          AND datetime(created_at) >= datetime(?)
+        LIMIT 1
+      `).get(thread.id, pending.id, pending.content ?? text, pending.created_at || new Date().toISOString());
+      
+      if (capturedElsewhere) {
+        deleteOutboundMessageRows({ messageId: pending.id });
+        io.emit('MESSAGE_SENT', {
+          thread_id: thread.id,
+          client_message_id: clientMsgId,
+          status: 'sent'
+        });
+        console.log(`[WS] Sweeper tìm thấy bản trùng cho ${clientMsgId}, xóa row optimistic.`);
+        return;
+      }
+      
+      // Chưa có bằng chứng 2 chiều: GIỮ pending, không delete, không emit failed
+      console.log(`[WS] Sweeper giữ pending ${clientMsgId} (+30s), chờ echo/crawler.`);
     }, 30000);
   }
 
@@ -1955,10 +1995,7 @@ wss.on('connection', (ws, req) => {
           // as media, relayed here since the extension's own console isn't
           // reachable during live debugging. Remove once T020 is closed.
           try {
-            appendRotating(
-              path.join(APP_DATA_ROOT, 'composer-debug.log'),
-              JSON.stringify({ at: new Date().toISOString(), source: 'CONTENT_DEBUG', ...msg.data }) + '\n'
-            );
+            appendComposerDebugLog({ at: new Date().toISOString(), source: 'CONTENT_DEBUG', ...msg.data });
           } catch (error) {
             console.error('[CONTENT_DEBUG] Ghi log thất bại:', error.message);
           }
@@ -1988,10 +2025,7 @@ wss.on('connection', (ws, req) => {
           // here instead. Appended as one JSON line per event; remove once
           // T020 is confirmed fixed by a live send.
           try {
-            appendRotating(
-              path.join(APP_DATA_ROOT, 'composer-debug.log'),
-              JSON.stringify({ at: new Date().toISOString(), ...msg.data }) + '\n'
-            );
+            appendComposerDebugLog({ at: new Date().toISOString(), ...msg.data });
           } catch (error) {
             console.error('[COMPOSER_DEBUG] Ghi log thất bại:', error.message);
           }
@@ -2854,12 +2888,29 @@ wss.on('connection', (ws, req) => {
                 ORDER BY id DESC LIMIT 1
               `).get(canonicalThreadId);
             } else if (m.content) {
-              outgoingMatch = db.prepare(`
-                SELECT id, delivery_status, client_message_id, thread_id FROM messages
-                WHERE thread_id = ? AND content = ? AND is_outgoing = 1
-                  AND datetime(created_at) >= datetime('now', '-300 seconds')
-                ORDER BY id DESC LIMIT 1
-              `).get(canonicalThreadId, m.content);
+              // Echo dom_observer mang mid thật thì khớp theo mid thay vì theo
+              // nội dung: khớp nội dung nuốt tin nhắn tay LẶP NỘI DUNG trong
+              // 5 phút (reproduce 2026-10-09: 5 tin "alo" nhắn tay trong
+              // Messenger, anti-ghost chỉ giữ lại 1). Mid thật distinct theo
+              // tin; mid đã có row chính là echo của tin đó -> discard an toàn.
+              // page_dom_observer/composer_confirmation giữ khớp nội dung vì
+              // DOM Business Suite dùng id khác Graph API, không so được.
+              const obsEchoMid = String(m.fb_message_id || '');
+              const obsEchoHasRealMid = m.source === 'dom_observer' && obsEchoMid
+                && !/^(?:dom_|pending_|history_)/.test(obsEchoMid)
+                && !/__bubble_\d+$/.test(obsEchoMid);
+              outgoingMatch = obsEchoHasRealMid
+                ? db.prepare(`
+                    SELECT id, delivery_status, client_message_id, thread_id FROM messages
+                    WHERE thread_id = ? AND is_outgoing = 1 AND fb_message_id = ?
+                    ORDER BY id DESC LIMIT 1
+                  `).get(canonicalThreadId, obsEchoMid)
+                : db.prepare(`
+                    SELECT id, delivery_status, client_message_id, thread_id FROM messages
+                    WHERE thread_id = ? AND content = ? AND is_outgoing = 1
+                      AND datetime(created_at) >= datetime('now', '-300 seconds')
+                    ORDER BY id DESC LIMIT 1
+                  `).get(canonicalThreadId, m.content);
             }
 
             if (outgoingMatch) {
@@ -2879,6 +2930,57 @@ wss.on('connection', (ws, req) => {
 
           // Lưu tin nhắn vào bảng messages
           let stableMessageId = m.fb_message_id || m.client_message_id || ConversationRepository.fingerprint(m.thread_id, m);
+          // Phantom family __bubble_N: id tổng hợp mid.X__bubble_N nhưng row
+          // base mid.X cùng thread tồn tại với nội dung giống nhau. Like-group
+          // thật ở cùng article nên cùng người gửi (không bao giờ lật hướng),
+          // còn pending thật luôn được xác nhận bằng mid riêng vài giây sau:
+          //  - quan sát ĐẾN nhưng base là tin ĐI (hoặc ngược lại) -> phantom
+          //    lật chiều (reproduce 2026-10-08: "nhắn gì đó"/"allo"/"alo" của
+          //    operator hiện thêm bản sao bên trái khách);
+          //  - cùng hướng nhưng base cũ hơn 60s -> pending bị gán nhầm anchor
+          //    cũ (reproduce 18:33: alo tái dùng mid 10/06) - bản thật sẽ tự
+          //    vào DB bằng mid riêng.
+          if (/__bubble_\d+$/.test(String(stableMessageId))
+            && (!m.media_type || m.media_type === 'text') && !m.media_url
+            && !/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(String(m.content || ''))) {
+            const bubbleFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+            const bubbleBaseRow = bubbleFamilyId.length >= 12
+              ? db.prepare(`
+                  SELECT content, is_outgoing, timestamp_ms FROM messages
+                  WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
+                  ORDER BY id DESC LIMIT 1
+                `).get(m.thread_id, bubbleFamilyId, bubbleFamilyId)
+              : null;
+            if (bubbleBaseRow
+              && String(bubbleBaseRow.content || '').trim() === String(m.content || '').trim()
+              && (Number(bubbleBaseRow.is_outgoing) !== (isOutgoing ? 1 : 0)
+                || Math.abs(Number(tsMs || 0) - Number(bubbleBaseRow.timestamp_ms || 0)) > 60000)) {
+              syncDebug('WS_SKIP_BUBBLE_FAMILY_PHANTOM', {
+                thread: m.thread_id,
+                fb_message_id: String(stableMessageId).substring(0, 70),
+                base_outgoing: Number(bubbleBaseRow.is_outgoing),
+                observed_outgoing: isOutgoing ? 1 : 0
+              });
+              break;
+            }
+          }
+          // Otid thuần số + out=0: otid do client MÌNH sinh khi gửi (top 41
+          // bit = ms gửi thật - đo DB sống (id>>22) khớp giây gửi); tin khách
+          // đến qua server luôn mang <uid>@msgr.N hoặc mid.$. Id số trần
+          // tuyên bố incoming chỉ có thể là nhãn "Tin nhắn do X gửi lúc"
+          // gán nhầm anchor cho lá tin mình (reproduce 2026-10-09: "sdsdsd"
+          // nhắn tay hiện thêm bản sao bên trái khách; DB 5/5 row số+out=0
+          // đều là tin user tự gõ). Mid rút gọn của khách đã được ghép về
+          // dạng đầy đủ ở trên nên không dính guard này.
+          const otidFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+          if (!isOutgoing && /^\d{15,19}$/.test(otidFamilyId)
+            && (!m.media_type || m.media_type === 'text') && !m.media_url) {
+            syncDebug('WS_SKIP_OTID_FLIPPED', {
+              thread: m.thread_id,
+              fb_message_id: String(stableMessageId).substring(0, 70)
+            });
+            break;
+          }
           if (!isOutgoing && m.fb_message_id) {
             const promotedPreview = ConversationRepository.promoteSidebarPreview({
               threadId: m.thread_id,
@@ -2924,14 +3026,94 @@ wss.on('connection', (ws, req) => {
               realtimeSequence = targetSequence;
             }
           }
-          const insertMsgResult = db.prepare(`
+          let insertMsgResult = db.prepare(`
             INSERT OR IGNORE INTO messages
               (thread_id, fb_message_id, sender_id, content, media_type, media_url, local_media_path, is_outgoing, direction_status, sequence_order, timestamp_ms, timestamp_source, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(m.thread_id, stableMessageId, safeSenderId, m.content,
             m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt);
 
+          // Multi-account: cùng một tin vật lý được mọi tab acc đăng nhập quan
+          // sát với CÙNG mid, nhưng UNIQUE(fb_message_id) toàn cục chỉ cho một
+          // thread giữ row — tab forward sau bị IGNORE câm và hội thoại bên
+          // acc kia mất tin (reproduce 2026-10-08 18:09: 2/3 "alo" giữa 2 acc
+          // chỉ còn ở thread acc khách). Bản sao cho thread này dùng id suy
+          // dẫn deterministic (mid::thread) để lần quét sau vẫn khớp row cũ.
+          if (insertMsgResult.changes === 0) {
+            const midOwnerRow = db.prepare('SELECT thread_id FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+            if (midOwnerRow && midOwnerRow.thread_id !== m.thread_id) {
+              const mirrorMessageId = `${stableMessageId}::${m.thread_id}`;
+              insertMsgResult = db.prepare(`
+                INSERT OR IGNORE INTO messages
+                  (thread_id, fb_message_id, sender_id, content, media_type, media_url, local_media_path, is_outgoing, direction_status, sequence_order, timestamp_ms, timestamp_source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).run(m.thread_id, mirrorMessageId, safeSenderId, m.content,
+                m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt);
+              stableMessageId = mirrorMessageId;
+              if (insertMsgResult.changes > 0) {
+                syncDebug('WS_MIRROR_CROSS_ACCOUNT', {
+                  thread: m.thread_id,
+                  owner_thread: midOwnerRow.thread_id,
+                  fb_message_id: String(mirrorMessageId).substring(0, 70)
+                });
+              }
+            }
+          }
+
+          // Row ma lật chiều SINH TRƯỚC base có thể đã chiếm đứt id tổng hợp
+          // mid.$X__bubble_N (guard b54 cần base tồn tại, sweep b58 chỉ chạy
+          // khi base đổ vào - base chưa từng vào DB thì không gì dọn). Reading
+          // THẬT sau này quay lại với CÙNG id nhưng chiều khác: reading sau
+          // hydrate đủ label tin cậy hơn, sửa chiều row squat thay vì để
+          // INSERT OR IGNORE nuốt câm tin thật (reproduce 2026-10-09 12:00:
+          // bắn 4 "alo" chỉ 1 vào DB, row ma mid.$UE5vv__bubble_1 out=0 đứng
+          // yên). Chỉ flip IN->OUT trên row squat sinh trong 15 phút; chiều
+          // ngược lại bị reconcileExistingMessage chặn cứng như cũ.
+          if (insertMsgResult.changes === 0 && /__bubble_\d+$/.test(String(stableMessageId))) {
+            const squatterRow = db.prepare(`
+              SELECT id, is_outgoing FROM messages
+              WHERE fb_message_id = ? AND thread_id = ?
+                AND datetime(created_at) >= datetime('now', '-900 seconds')
+            `).get(stableMessageId, m.thread_id);
+            if (squatterRow
+              && Number(squatterRow.is_outgoing) === 0
+              && isOutgoing && directionStatus === 'confirmed') {
+              db.prepare(`
+                UPDATE messages SET is_outgoing = 1, sender_role = 'operator',
+                  direction_status = 'confirmed', sender_id = ?
+                WHERE id = ?
+              `).run(safeSenderId, squatterRow.id);
+              syncDebug('WS_FIX_FLIPPED_SQUATTER', {
+                thread: m.thread_id,
+                fb_message_id: String(stableMessageId).substring(0, 70)
+              });
+              // Nhánh !wasNewMessage phía dưới sẽ break ở reconcile no_change
+              // nên phải tự báo client vẽ lại thread ngay.
+              io.emit('THREAD_MESSAGES_UPDATED', {
+                thread_id: m.thread_id,
+                account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null
+              });
+            }
+          }
+
           let wasNewMessage = insertMsgResult.changes > 0;
+          if (wasNewMessage) {
+            // Row ma lật chiều có thể đã chèn TRƯỚC base trong cùng đợt quét
+            // (guard phía trên cần base đã tồn tại) - base vừa đổ vào thì dọn
+            // ngay sibling __bubble_N cùng family khác hướng.
+            try {
+              const healedFlipCount = ConversationRepository.collapseFlippedBubbleSiblings(m.thread_id, stableMessageId, m.content, db);
+              if (healedFlipCount > 0) {
+                syncDebug('WS_HEAL_FLIPPED_BUBBLE_SIBLING', {
+                  thread: m.thread_id,
+                  fb_message_id: String(stableMessageId).substring(0, 70),
+                  healed: healedFlipCount
+                });
+              }
+            } catch (sweepError) {
+              console.warn('[WS] Flipped bubble sibling sweep failed:', sweepError.message);
+            }
+          }
           if (wasNewMessage && !String(stableMessageId).endsWith('_media')) {
             try {
               // A media companion can be observed before the base native row.
@@ -3466,6 +3648,23 @@ wss.on('connection', (ws, req) => {
           }
           const isRealtimeSidebarHint = sync_status === 'realtime_hint' || sync_status === 'realtime_requests';
           console.log(`[WS] Nhận ${threads?.length || 0} threads từ extension tài khoản: ${account_id}`);
+          // 2026-10-09: hint thuần (partial=true, realtime_hint) trùng payload
+          // trong 60s thì bỏ qua toàn bộ case — txn upsert ~30 threads mỗi lần
+          // với nội dung y hệt chỉ đốt CPU + WAL. Frame final/scan (partial khác
+          // true) và realtime_requests vẫn xử lý bình thường.
+          const isPureRealtimeHint = isRealtimeSidebarHint && partial === true && sync_status === 'realtime_hint';
+          if (isPureRealtimeHint && Array.isArray(threads)) {
+            const hintSig = `${account_id}|${threads.map((t) => `${t.thread_id || t.id}|${t.is_unread ? 1 : 0}|${t.last_message || ''}|${t.row_time_text || ''}`).join('\n')}`;
+            const prevHint = lastRealtimeHintSig.get(account_id);
+            if (prevHint && prevHint.sig === hintSig && Date.now() - prevHint.at < 60 * 1000) {
+              if (Date.now() - lastUnchangedHintLogAt > 30000) {
+                lastUnchangedHintLogAt = Date.now();
+                syncDebug('REALTIME_HINT_UNCHANGED', { account: account_id, threads: threads.length });
+              }
+              break;
+            }
+            lastRealtimeHintSig.set(account_id, { sig: hintSig, at: Date.now() });
+          }
           if (isRealtimeSidebarHint) {
             const observedAtMs = Number(msg.data?.observed_at || 0);
             syncDebug('REALTIME_HINT', {
@@ -5333,7 +5532,9 @@ io.on('connection', (socket) => {
       thread_id: thread.id,
       external_thread_id: thread.external_thread_id || thread.id,
       thread_url: thread.thread_url,
-      page_id: thread.source_type === 'page_messenger' ? thread.page_id : null,
+      // threads không có cột source_type/page_id — phải resolve qua join
+      // inbox_sources, nếu không mọi job Page rơi lane cá nhân (page:false)
+      page_id: ConversationRepository.getThreadSource(thread.id).pageId,
       contact_name: thread.contact_name,
       reason: (direction === 'older' || (direction === 'viewport' && Number(scroll_delta) < 0)) ? 'crm_scroll_older' : (direction === 'viewport' ? 'crm_scroll_viewport' : 'crm_navigation'),
       allow_navigation: true,
@@ -5491,18 +5692,15 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('[Socket] Lỗi gửi tin nhắn:', err.message);
       try {
-        appendRotating(
-          path.join(APP_DATA_ROOT, 'composer-debug.log'),
-          JSON.stringify({
-            at: new Date().toISOString(),
-            stage: 'socket_send_error',
-            thread_id: String(thread_id || ''),
-            client_message_id: client_message_id || null,
-            attachment_id: attachment_id || null,
-            error_code: err.code || 'SEND_FAILED',
-            error: err.message || String(err)
-          }) + '\n'
-        );
+        appendComposerDebugLog({
+          at: new Date().toISOString(),
+          stage: 'socket_send_error',
+          thread_id: String(thread_id || ''),
+          client_message_id: client_message_id || null,
+          attachment_id: attachment_id || null,
+          error_code: err.code || 'SEND_FAILED',
+          error: err.message || String(err)
+        });
       } catch (_) { }
       socket.emit('SEND_ERROR', {
         error: err.message,
@@ -7782,6 +7980,76 @@ function startServer() {
     }
     healTouchedThreads(orphanPreviewThreadIds);
 
+    // (2c) Phantom __bubble_N: bubble_idx chỉ là chỉ số VỊ TRÍ trong lần quét
+    // DOM - đợt hydrate trễ/lá dir=auto tạm thời đánh lại chỉ số của CÙNG MỘT
+    // bong bóng (mid.x <-> mid.x__bubble_1) thành hai id, UNIQUE(fb_message_id)
+    // không thấy -> hai row trùng text (reproduce 2026-10-08 hội thoại "Yến").
+    // Guard tracker phía extension chặn từ nay về sau; ở đây dọn row cũ.
+    // Chỉ xoá row CÓ HẬU TỐ (row base không bao giờ bị đụng). Like-group THẬT
+    // (FB gộp N like giống nhau vào 1 article) cũng trùng text+ts, nhưng được
+    // forward theo thứ tự leaf: base trước, __bubble_1 ngay sau -> nếu row base
+    // cùng nội dung nằm ngay trước (rowid chênh ≤ 4, chịu lẫn insert thread
+    // khác) thì giữ. Mọi cặp phantom quan sát được đều vi phạm mẫu này.
+    const bubbleRows = db.prepare(`
+      SELECT id, thread_id, fb_message_id, content, is_outgoing, media_type, media_url,
+        timestamp_ms FROM messages WHERE fb_message_id LIKE '%__bubble_%'
+    `).all();
+    const familyMembers = db.prepare(`
+      SELECT id, fb_message_id, content, is_outgoing, media_type, media_url, timestamp_ms
+      FROM messages WHERE thread_id = ? AND fb_message_id IN (${[...new Array(50)].map(() => '?').join(',')})
+    `);
+    const deletePhantomBubble = db.prepare('DELETE FROM messages WHERE id = ?');
+    // (2c-bis) Phantom LẬT CHIỀU: __bubble_N là id tổng hợp của lá KHÔNG có
+    // mid riêng trong article gốc - like-group thật cùng article nên cùng
+    // người gửi, nên row __bubble_N Khác hướng với base cùng nội dung chỉ
+    // có thể là quét lại sai nhãn (reproduce 2026-10-08: "nhắn gì đó"/"allo"
+    // của operator thành tin khách, id ...7513148857660772091__bubble_1).
+    // Base có thể bị rút gọn prefix (7513...__bubble_1 vs peer@msgr.7513...).
+    const familyBaseStmt = db.prepare(`
+      SELECT id, content, is_outgoing FROM messages
+      WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
+      ORDER BY id DESC LIMIT 1
+    `);
+    const phantomThreadIds = new Set();
+    for (const m of bubbleRows) {
+      if ((m.media_type && m.media_type !== 'text') || m.media_url) continue;
+      if (!/__bubble_\d+$/.test(String(m.fb_message_id || ''))) continue;
+      const familyId = String(m.fb_message_id).replace(/__bubble_\d+$/, '');
+      // (2c-ter) Otid thuần số + out=0: otid do client MÌNH sinh khi gửi,
+      // tin khách luôn mang <uid>@msgr.N / mid.$. Không cần base cùng family
+      // (base thật mang mid khác family nên 2c-bis không với tới).
+      if (Number(m.is_outgoing) === 0 && /^\d{15,19}$/.test(familyId)) {
+        deletePhantomBubble.run(m.id);
+        phantomThreadIds.add(m.thread_id);
+        continue;
+      }
+      const familyBase = familyId.length >= 12
+        ? familyBaseStmt.get(m.thread_id, familyId, familyId)
+        : null;
+      if (familyBase
+        && String(familyBase.content || '') === String(m.content || '')
+        && Number(familyBase.is_outgoing) !== Number(m.is_outgoing)) {
+        deletePhantomBubble.run(m.id);
+        phantomThreadIds.add(m.thread_id);
+        continue;
+      }
+      const members = familyMembers.all(m.thread_id, familyId, m.fb_message_id,
+        ...[...new Array(48)].map(() => '?'));
+      const sameBubble = (twin) => twin.id !== m.id
+        && (!twin.media_type || twin.media_type === 'text') && !twin.media_url
+        && String(twin.content || '') === String(m.content || '')
+        && Number(twin.is_outgoing) === Number(m.is_outgoing)
+        && Math.abs(Number(twin.timestamp_ms || 0) - Number(m.timestamp_ms || 0)) <= 2000;
+      const isProtected = members.some((twin) => sameBubble(twin)
+        && !/__bubble_\d+$/.test(String(twin.fb_message_id || ''))
+        && twin.id < m.id && m.id - twin.id <= 4);
+      if (isProtected) continue;
+      if (!members.some(sameBubble)) continue;
+      deletePhantomBubble.run(m.id);
+      phantomThreadIds.add(m.thread_id);
+    }
+    healTouchedThreads(phantomThreadIds);
+
     // (3) Separator thời gian dạng tắt ("9w", "2d"...) bị bắt nhầm thành
     // bubble - chỉ tồn tại dưới id dom_ (separator không có data-message-id).
     const COMPACT_RELATIVE_RE = /^\d{1,2}\s?(?:s|sec|m|min|h|hr|d|w|mo|y)$/i;
@@ -7912,11 +8180,29 @@ function startServer() {
       const clientMsgId = message.client_message_id || `queue_${message.id}`;
       const pendingFbId = `pending_${clientMsgId}`;
       const nowMs = Date.now();
-      const insert = db.prepare(`
-        INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, is_outgoing, sender_role, delivery_status, sequence_order, timestamp_ms, timestamp_source, created_at)
-        VALUES (?, ?, ?, 'SYSTEM', ?, 1, 'operator', 'pending', ?, ?, 'client_submit', ?)
-      `).run(message.thread_id, pendingFbId, clientMsgId, message.content, nextSeq, nowMs, new Date(nowMs).toISOString());
-      const rowId = insert.lastInsertRowid;
+      // insertCampaignDispatch (chiến dịch) đã tạo sẵn row pending với cùng
+      // fb_message_id `pending_queue_<queueId>` — INSERT lại đâm UNIQUE
+      // constraint failed: messages.fb_message_id (chiến dịch Page fail 100%
+      // ngay attempt đầu, 2026-10-10). Tìm row sẵn có để tái sử dụng.
+      const existingRow = db.prepare(
+        'SELECT id FROM messages WHERE client_message_id = ? OR fb_message_id = ?'
+      ).get(clientMsgId, pendingFbId);
+      let rowId;
+      if (existingRow) {
+        rowId = existingRow.id;
+        db.prepare(`
+          UPDATE messages
+          SET content = ?, delivery_status = 'pending', delivery_error = NULL,
+              sequence_order = ?, timestamp_ms = ?
+          WHERE id = ?
+        `).run(message.content, nextSeq, nowMs, rowId);
+      } else {
+        const insert = db.prepare(`
+          INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, is_outgoing, sender_role, delivery_status, sequence_order, timestamp_ms, timestamp_source, created_at)
+          VALUES (?, ?, ?, 'SYSTEM', ?, 1, 'operator', 'pending', ?, ?, 'client_submit', ?)
+        `).run(message.thread_id, pendingFbId, clientMsgId, message.content, nextSeq, nowMs, new Date(nowMs).toISOString());
+        rowId = insert.lastInsertRowid;
+      }
       db.prepare('UPDATE threads SET last_message = ?, last_activity = CURRENT_TIMESTAMP WHERE id = ?').run(message.content, message.thread_id);
 
       const result = await pageApiService.sendPageMessage(threadRow.source_id, psid, message.content);

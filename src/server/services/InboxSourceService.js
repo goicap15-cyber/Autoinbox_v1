@@ -125,8 +125,10 @@ class InboxSourceService {
     if (row && row.access_token_encrypted) {
       try {
         return decryptToken(row.access_token_encrypted);
-      } catch (_) {
-        // token kho chuẩn hỏng → thử kho ngoài bên dưới thay vì ném lỗi chặn gửi tin
+      } catch (error) {
+        // Token mã hóa bằng secret khác (build cũ/.env đổi) sẽ nổ exception ở
+        // decipher.final — coi như kho chuẩn hỏng, thử kho ngoài bên dưới.
+        console.warn(`[InboxSource] Token của source ${sourceId} giải mã thất bại, thử kho ngoài:`, error.message);
       }
     }
     // Fallback kho token ngoài (page_graph_tokens) — tool "Lấy token" ghi ở

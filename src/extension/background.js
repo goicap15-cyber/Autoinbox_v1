@@ -1908,6 +1908,11 @@ async function isRealtimeSidebarTab(tab) {
   return FbCrmMessengerTabRoles.canForwardRealtime(role);
 }
 
+// 2026-10-09: 2 tab messenger cùng account đều có observer riêng -> cùng
+// payload relay 2 lần. Ghi nhớ chữ ký relay gần nhất theo account, trùng
+// trong 8s thì bỏ (server vẫn có pre-gate 60s nhưng chặn sớm ở đây đỡ tốn WS).
+const lastHintRelaySig = new Map();
+
 function relaySidebarActivityThreads(threads, origin, observedAt = 0) {
   const rows = Array.isArray(threads) ? threads : [];
   if (!rows.length || !user_id) return false;
@@ -1929,6 +1934,10 @@ function relaySidebarActivityThreads(threads, origin, observedAt = 0) {
     source_type: 'personal_messenger',
     inbox_folder: 'INBOX'
   }));
+  const relaySig = lightweightThreads.map((t) => `${t.thread_id}|${t.is_unread ? 1 : 0}|${t.last_message || ''}|${t.row_time_text || ''}`).join('\n');
+  const prevRelay = lastHintRelaySig.get(user_id);
+  if (prevRelay && prevRelay.sig === relaySig && Date.now() - prevRelay.at < 8000) return false;
+  lastHintRelaySig.set(user_id, { sig: relaySig, at: Date.now() });
   sendToBackend('SYNC_THREADS_RESULT', {
     account_id: user_id,
     threads: lightweightThreads,
@@ -2243,13 +2252,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           || (isExplicitIncoming && FbCrmMessengerTabRoles.canForwardIncomingRealtime?.(senderRole)));
       if (!mayForward) {
         console.log(`[FB Engine] Skip NEW_MESSAGE_FROM_FB from role=${senderRole || 'unregistered'} tab=${sender?.tab?.id || 'unknown'}`);
+        try {
+          if (chrome?.runtime?.id) sendToBackend('CONTENT_DEBUG', {
+            at: new Date().toISOString(),
+            source: 'bg_send',
+            stage: 'BG_SKIP_ROLE',
+            role: senderRole || 'unregistered',
+            tab: sender?.tab?.id || 'unknown',
+            thread: String(message.data?.thread_id || '').substring(0, 30),
+            mid: String(message.data?.fb_message_id || '').substring(0, 45),
+            out: message.data?.is_outgoing ? 1 : 0
+          });
+        } catch (_) {}
         return;
       }
-      let msgData = message.data;      const isPlainOutgoingDomEcho = Boolean(
+      let msgData = message.data;
+      // Echo outgoing text KHÔNG mid thật (dom_hash/pending) vẫn bỏ: composer/
+      // network confirmation sở hữu chúng, forward sớm chỉ sinh ghost. Echo có
+      // mid thật đi tiếp - server khớp theo mid (ghép pending hoặc bỏ trùng),
+      // tin nhắn tay trong Messenger nhờ vậy được lưu thay vì mất
+      // (reproduce 2026-10-09: 5 tin "alo" nhắn tay chỉ còn 1 vào CRM).
+      const echoMid = String(msgData?.fb_message_id || '');
+      // mid.$X__bubble_N là LÁ THẬT của tin đã hydrate (like-group hoặc
+      // bubble_idx trôi), không phải echo optimistic của composer - strip
+      // hậu tố trước khi test "có mid thật", nếu không tin thật bị nuốt câm
+      // ở cổng này (reproduce 2026-10-09 12:00: bắn 4 "alo" chỉ 1 vào DB,
+      // reading thật của 2 tin chết đúng cửa này). dom_/pending_/history_
+      // (kể cả khi mang hậu tố __bubble_N) vẫn bị chặn như cũ.
+      const echoFamilyMid = echoMid.replace(/__bubble_\d+$/, '');
+      const echoHasRealMid = Boolean(echoFamilyMid)
+        && !/^(?:dom_|pending_|history_)/.test(echoFamilyMid);
+      const isPlainOutgoingDomEcho = Boolean(
         msgData?.is_outgoing
         && String(msgData?.source || '') === 'dom_observer'
         && !msgData?.media_url
         && (!msgData?.media_type || msgData.media_type === 'text')
+        && !echoHasRealMid
       );
       if (isPlainOutgoingDomEcho) {
         console.log('[FB Engine] Skip duplicate plain outgoing DOM text; composer/network confirmation owns it.');
@@ -3379,7 +3417,23 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
     return handleSendPersonalMessageWithAttachment({ thread_id, recipient_thread_id, thread_url, expected_contact_name, strict_recipient_identity, content: messageText, attachment, attachmentManifest, client_message_id, account_id, tab_role });
   }
   let lastSendError = null;
-  const trace = (stage, extra = {}) => console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage, thread_id: String(thread_id), client_message_id, at: new Date().toISOString(), ...extra }));
+  const trace = (stage, extra = {}) => {
+    console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage, thread_id: String(thread_id), client_message_id, at: new Date().toISOString(), ...extra }));
+    // stdout của app đóng gói bị mất -> relay kèm CONTENT_DEBUG để lần đo
+    // sau nhìn thấy hành trình gửi trong composer-debug.log (mất tin 12:54
+    // không xác định được vì mọi trace của flow này chỉ vào console).
+    try {
+      if (chrome?.runtime?.id) sendToBackend('CONTENT_DEBUG', {
+        at: new Date().toISOString(),
+        source: 'bg_send',
+        stage: 'SEND_TRACE',
+        send_stage: stage,
+        thread: String(thread_id || '').substring(0, 30),
+        cmid: String(client_message_id || '').substring(0, 45),
+        ...Object.fromEntries(Object.entries(extra || {}).map(([k, v]) => [k, typeof v === 'string' ? v.substring(0, 60) : v]))
+      });
+    } catch (_) { /* relay best-effort */ }
+  };
   const confirmFromRenderedBubble = async (tabId, stage) => {
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {
