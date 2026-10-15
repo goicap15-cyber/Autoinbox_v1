@@ -118,11 +118,15 @@ class CampaignRepository {
              COALESCE(cr.source_display_name_snapshot, s.display_name, t.contact_name, 'Không xác định') AS source_name,
              COALESCE(cr.source_external_id_snapshot, CASE WHEN COALESCE(cr.source_type_snapshot, s.source_type) = 'page_messenger' THEN s.external_id ELSE NULL END) AS source_external_id,
              s.status AS current_source_status,
-             a.status AS current_account_status
+             a.status AS current_account_status,
+             dm.delivery_channel AS delivery_channel
       FROM campaign_recipients cr
       LEFT JOIN threads t ON t.id = cr.thread_id
       LEFT JOIN inbox_sources s ON s.id = cr.source_id
       LEFT JOIN accounts a ON a.id = cr.account_id
+      LEFT JOIN campaign_attempts ca_latest
+        ON ca_latest.campaign_recipient_id = cr.id AND ca_latest.attempt_number = cr.attempt_count
+      LEFT JOIN messages dm ON dm.client_message_id = 'queue_' || ca_latest.queue_id
       WHERE cr.campaign_id = ?
       ORDER BY cr.selection_order ASC
     `).all(campaignId);

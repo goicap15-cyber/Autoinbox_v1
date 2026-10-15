@@ -265,6 +265,35 @@ function extractBareThreadId(threadId) {
 }
 
 const dirtyAttachmentDraftTabs = new Set();
+
+// ── Luồng DOM Business Suite cho chiến dịch Page (quá 24h) ────────────────
+// Tab đang gửi tin chiến dịch được bảo vệ khỏi runTabAudit + dọn tab lúc
+// REGISTER_ACCOUNT_ACK (nếu không, audit có thể giết tab giữa chừng).
+const domSendProtectedTabIds = new Set();
+// Mutex: 1 nick chỉ xử lý 1 tab Business Suite một lúc — các lệnh DOM khác
+// (chiến dịch song song) xếp hàng tuần tự, không mở nhiều tab đâm nhau.
+const pageDomSendChains = new Map();
+function runPageDomSendSerialized(pageId, operation) {
+  const key = String(pageId || 'page');
+  const previous = pageDomSendChains.get(key) || Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  pageDomSendChains.set(key, current);
+  current.finally(() => {
+    if (pageDomSendChains.get(key) === current) pageDomSendChains.delete(key);
+  }).catch(() => {});
+  return current;
+}
+function withTimeout(promise, ms, code) {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error('Hết thời gian chờ: ' + code);
+      err.code = code;
+      reject(err);
+    }, ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
 function runPersonalSendSerialized(accountId, operation) {
   const key = String(accountId || user_id || 'default');
   const previous = personalSendChains.get(key) || Promise.resolve();
@@ -1585,9 +1614,10 @@ function connectWebSocket() {
           // Dọn tab Business Suite còn sót: đường Page DOM đã ngừng (Page chạy
           // qua Messenger Platform API) — tab cũ không tự biến mất khi Chrome
           // reuse qua nhiều phiên app (báo lỗi 2026-10-06: 2 tab biz kẹt mãi).
+          // Trừ tab đang gửi tin chiến dịch (luồng DOM hybrid mới).
           try {
             chrome.tabs.query({ url: ['*://business.facebook.com/*'] }, (bizTabs) => {
-              const ids = (bizTabs || []).map((t) => t?.id).filter(Boolean);
+              const ids = (bizTabs || []).map((t) => t?.id).filter(Boolean).filter((id) => !domSendProtectedTabIds.has(id));
               if (ids.length) {
                 console.log('[FB Engine] 🧹 Đóng', ids.length, 'tab Business Suite còn sót (đường Page cũ).');
                 for (const id of ids) chrome.tabs.remove(id).catch(() => {});
@@ -4666,7 +4696,63 @@ async function typeAndSubmitComposer(tabId, content) {
   }
 }
 
-async function handleSendPageMessage({ thread_id, content, page_id, client_message_id, attachment = null, attachmentManifest = null, expected_contact_name = null }) {
+// Sau khi bấm Gửi, đọc DOM xác nhận bong bóng tin (nội dung khớp) đã xuất
+// hiện. Nhận diện thông báo khách chặn Page. Quá hạn → chụp snapshot DOM gửi
+// về server để chẩn đoán rồi ném FAILED_SEND_UNCONFIRMED.
+async function confirmPageDomSend(tabId, content) {
+  const needle = String(content || '').replace(/\s+/g, ' ').trim();
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const probe = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (needle) => {
+        const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+        const main = document.querySelector('div[role="main"]');
+        if (!main) return { found: false, blocked: false };
+        let found = false;
+        let blocked = false;
+        const walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+          const el = node.parentElement;
+          if (!el) continue;
+          // Bỏ qua ô soạn thảo — text còn nằm trong composer nghĩa là chưa bay
+          if (el.closest('[contenteditable="true"], [role="textbox"]')) continue;
+          const text = clean(node.textContent);
+          if (!text) continue;
+          if (needle && text.includes(needle)) found = true;
+          if (/không còn nhận tin nhắn|no longer receive messages|isn'?t available|unavailable to message/i.test(text)) blocked = true;
+        }
+        return { found, blocked };
+      },
+      args: [needle]
+    }).then((rows) => rows?.[0]?.result || { found: false, blocked: false }).catch(() => ({ found: false, blocked: false }));
+
+    if (probe.blocked) {
+      const err = new Error('Khách đã chặn Page — Business Suite không cho gửi tin.');
+      err.code = 'CUSTOMER_BLOCKED';
+      throw err;
+    }
+    if (probe.found) return { confirmed: true };
+    await delay(500);
+  }
+  let snapshot = null;
+  try {
+    snapshot = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const main = document.querySelector('div[role="main"]');
+        return { url: location.href, text: (main?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 500) };
+      }
+    }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+  } catch (_) {}
+  sendToBackend('COMPOSER_DEBUG', { stage: 'page_dom_unconfirmed', ...(snapshot || {}) });
+  const err = new Error('Đã bấm Gửi nhưng không thấy bong bóng tin xuất hiện trong khung chat.');
+  err.code = 'FAILED_SEND_UNCONFIRMED';
+  throw err;
+}
+
+async function handleSendPageMessage({ thread_id, content, page_id, client_message_id, attachment = null, attachmentManifest = null, expected_contact_name = null, dispatchMode = null }) {
   console.log(`[FB Engine] 📤 Bắt đầu gửi qua Business Suite: page_id=${page_id} thread=${thread_id} expected_name=${expected_contact_name || 'none'}`);
 
   if (page_id) {
@@ -4682,7 +4768,12 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
   const targetUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(page_id)}&mailbox_id=${encodeURIComponent(page_id)}&selected_item_id=${encodeURIComponent(recipientPsid)}&thread_type=FB_MESSAGE`;
 
   const role = `page:${page_id}`;
-  let tab = await getBusinessSuiteTab(page_id);
+  // Chế độ chiến dịch quá 24h: mở tab ngầm → gõ → XÁC NHẬN bong bóng tin →
+  // đóng tab ngay trong finally. Các luồng cũ giữ nguyên hành vi (tái dùng tab).
+  const isCampaignDom = dispatchMode === 'business_suite_single_tab';
+  let tab = null;
+  const runSend = async () => {
+  tab = await getBusinessSuiteTab(page_id);
 
   if (!tab) {
     if (await isTabCreationOnCooldown(role)) {
@@ -4709,6 +4800,11 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
           await registerTab(role, created.id);
           await Promise.race([waitForTabComplete(created.id, 10000), delay(4000)]);
           const settled = await chrome.tabs.get(created.id).catch(() => null);
+          if (settled && /\/login(?:\.php)?(?:[/?#]|$)/i.test(String(settled.url || ''))) {
+            const loginErr = new Error('Chrome admin chưa đăng nhập Business Suite (tab hiện trang đăng nhập).');
+            loginErr.code = 'FAILED_BS_NOT_LOGGED_IN';
+            throw loginErr;
+          }
           if (!settled || !isBusinessSuiteUrl(settled.url) || !String(settled.url || '').includes(`asset_id=${page_id}`)) {
             await unregisterTab(role);
             await startTabCreationCooldown(role);
@@ -4723,8 +4819,19 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
 
   if (!tab) {
     sendToBackend('SEND_MESSAGE_RESULT', { thread_id, client_message_id, success: false, error: 'Không tìm thấy hoặc không thể mở Tab Business Suite', error_code: 'FACEBOOK_TAB_NOT_FOUND' });
-    throw new Error('Không tìm thấy Tab Business Suite');
+    const tabErr = new Error('Không tìm thấy Tab Business Suite');
+    tabErr.code = 'FACEBOOK_TAB_NOT_FOUND';
+    throw tabErr;
   }
+
+  if (/\/login(?:\.php)?(?:[/?#]|$)/i.test(String(tab.url || ''))) {
+    const loginErr = new Error('Chrome admin chưa đăng nhập Business Suite (tab hiện trang đăng nhập).');
+    loginErr.code = 'FAILED_BS_NOT_LOGGED_IN';
+    throw loginErr;
+  }
+
+  // Bảo vệ tab đang gửi chiến dịch khỏi runTabAudit + dọn tab lúc register.
+  if (isCampaignDom && tab.id) domSendProtectedTabIds.add(tab.id);
 
   // Đảm bảo tab đã ở đúng hội thoại (dù tab vừa mở hay đã mở sẵn từ trước)
   const onCorrectThread = await ensureTabOnThread(tab, recipientPsid, targetUrl, page_id, null, expected_contact_name);
@@ -4739,7 +4846,7 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
   await resetFailedBusinessSuiteComposerDraft(tab.id).catch(() => null);
 
   // Vòng lặp chờ ô soạn thảo và so khớp danh tính thực tế trên DOM
-  const interactionDeadline = Date.now() + 10000;
+  const interactionDeadline = Date.now() + (isCampaignDom ? 15000 : 10000);
   let interactionState = null;
   while (Date.now() < interactionDeadline) {
     interactionState = await chrome.scripting.executeScript({
@@ -4789,7 +4896,9 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
   if (!interactionState?.composer_ready) {
     const composerReady = await pollForComposer(tab.id, 5000);
     if (!composerReady) {
-      throw new Error('Không tìm thấy ô soạn tin nhắn Business Suite');
+      const composerErr = new Error('Không tìm thấy ô soạn tin nhắn Business Suite');
+      composerErr.code = 'COMPOSER_NOT_FOUND';
+      throw composerErr;
     }
   }
 
@@ -4804,7 +4913,9 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
       error: `Tab Business Suite chưa ở đúng thread mục tiêu (đang mở ${verifiedThreadId} thay vì ${recipientPsid})`,
       error_code: 'THREAD_ROUTE_MISMATCH'
     });
-    throw new Error(`Tab Business Suite chưa ở đúng thread mục tiêu (đang mở ${verifiedThreadId} thay vì ${recipientPsid})`);
+    const routeErr = new Error(`Tab Business Suite chưa ở đúng thread mục tiêu (đang mở ${verifiedThreadId} thay vì ${recipientPsid})`);
+    routeErr.code = 'THREAD_ROUTE_MISMATCH';
+    throw routeErr;
   }
 
   // Chốt chặn 2: Tên người nhận trên Header (Identity Check - chống gửi nhầm người)
@@ -4819,7 +4930,9 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
       error: `Business Suite contact identity does not match (${visibleContactName} vs ${expected_contact_name}); send blocked`,
       error_code: 'CONTACT_IDENTITY_MISMATCH'
     });
-    throw new Error(`Business Suite contact identity mismatch: ${visibleContactName} !== ${expected_contact_name}`);
+    const identityErr = new Error(`Business Suite contact identity mismatch: ${visibleContactName} !== ${expected_contact_name}`);
+    identityErr.code = 'CONTACT_IDENTITY_MISMATCH';
+    throw identityErr;
   }
 
   try {
@@ -4830,9 +4943,15 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
     }
 
     await typeAndSubmitComposer(tab.id, content);
+    if (isCampaignDom) await confirmPageDomSend(tab.id, content);
   } catch (error) {
     await resetFailedBusinessSuiteComposerDraft(tab.id).catch(() => null);
     throw error;
+  }
+
+  if (isCampaignDom) {
+    console.log('[FB Engine] ✅ DOM Business Suite: đã xác nhận bong bóng tin, gửi thành công.');
+    return { delivered: true };
   }
 
   console.log('[FB Engine] ✅ Đã dispatch tin nhắn qua Business Suite');
@@ -4844,6 +4963,18 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
     stage: 'BUSINESS_SUITE_CDP',
     error_code: 'COMPOSER_DISPATCHED'
   });
+  };
+  try {
+    return await runSend();
+  } finally {
+    // BẤT KỂ thành công hay lỗi: đóng tab ngay để không tích tụ tab gây tràn RAM.
+    if (isCampaignDom && tab?.id) {
+      domSendProtectedTabIds.delete(tab.id);
+      try { await chrome.tabs.remove(tab.id); } catch (_) {}
+      await unregisterTab(role).catch(() => {});
+      console.log('[FB Engine] [PAGE_DOM] Đã đóng tab Business Suite sau khi gửi:', tab.id);
+    }
+  }
 }
 
 async function handleSendQueuedMessage(data) {
@@ -4885,29 +5016,54 @@ async function handleSendQueuedMessage(data) {
 
   // 2. Dispatch according to source_type
   if (data.source_type === 'page_messenger' || data.page_id) {
+    const isDomMode = data.dispatch_mode === 'business_suite_single_tab';
     try {
-      await handleSendPageMessage({
+      const sendOp = () => handleSendPageMessage({
         thread_id: data.thread_id,
         content: data.content,
         page_id: data.page_id,
         client_message_id,
         attachment: data.attachment || null,
         attachmentManifest: Array.isArray(data.attachment_manifest) ? data.attachment_manifest : null,
-        expected_contact_name: data.expected_contact_name || null
+        expected_contact_name: data.expected_contact_name || null,
+        dispatchMode: data.dispatch_mode || null
       });
-      sendToBackend('QUEUED_MESSAGE_RESULT', {
-        contract_version: data.contract_version || 1,
-        queue_id: data.queue_id,
-        outbound_attempt_id: data.outbound_attempt_id || null,
-        thread_id: data.thread_id,
-        client_message_id,
-        outcome: 'dispatched',
-        stage: 'BUSINESS_SUITE_CDP',
-        adapter_version: 'rich-message-v1',
-        error_code: null,
-        error: 'COMPOSER_DISPATCHED_WAITING_CONFIRMATION',
-        success: true
-      });
+      const pageKey = data.page_id || `page_${data.source_id}`;
+      const result = isDomMode
+        ? await runPageDomSendSerialized(pageKey, () => withTimeout(sendOp(), 45000, 'FAILED_BS_TIMEOUT'))
+        : await sendOp();
+
+      if (isDomMode && result?.delivered) {
+        sendToBackend('QUEUED_MESSAGE_RESULT', {
+          contract_version: data.contract_version || 1,
+          queue_id: data.queue_id,
+          outbound_attempt_id: data.outbound_attempt_id || null,
+          thread_id: data.thread_id,
+          client_message_id,
+          outcome: 'delivered',
+          stage: 'BUSINESS_SUITE_DOM',
+          adapter_version: 'business-suite-dom-v1',
+          error_code: null,
+          error: null,
+          success: true
+        });
+        return;
+      }
+      if (!isDomMode) {
+        sendToBackend('QUEUED_MESSAGE_RESULT', {
+          contract_version: data.contract_version || 1,
+          queue_id: data.queue_id,
+          outbound_attempt_id: data.outbound_attempt_id || null,
+          thread_id: data.thread_id,
+          client_message_id,
+          outcome: 'dispatched',
+          stage: 'BUSINESS_SUITE_CDP',
+          adapter_version: 'rich-message-v1',
+          error_code: null,
+          error: 'COMPOSER_DISPATCHED_WAITING_CONFIRMATION',
+          success: true
+        });
+      }
     } catch (err) {
       console.error('[FB Engine] Lỗi gửi Page Message từ Queue:', err);
       sendToBackend('QUEUED_MESSAGE_RESULT', {
@@ -4917,8 +5073,8 @@ async function handleSendQueuedMessage(data) {
         thread_id: data.thread_id,
         client_message_id,
         outcome: 'rejected',
-        stage: 'BUSINESS_SUITE_CDP',
-        adapter_version: 'rich-message-v1',
+        stage: isDomMode ? 'BUSINESS_SUITE_DOM' : 'BUSINESS_SUITE_CDP',
+        adapter_version: isDomMode ? 'business-suite-dom-v1' : 'rich-message-v1',
         error_code: err.code || 'PAGE_SEND_FAILED',
         error: err.message,
         success: false
@@ -9028,7 +9184,7 @@ async function runTabAudit() {
     await loadTabRegistry();
     const registrySnapshot = {};
     for (const [role, tabId] of tabRegistry) registrySnapshot[role] = tabId;
-    const protectedIds = Array.from(markerTabIds.keys());
+    const protectedIds = Array.from(markerTabIds.keys()).concat(Array.from(domSendProtectedTabIds));
     const tabs = await new Promise((resolve) => {
       chrome.tabs.query({
         url: ['*://business.facebook.com/*', '*://*.messenger.com/*', '*://messenger.com/*', '*://*.facebook.com/*', '*://facebook.com/*']

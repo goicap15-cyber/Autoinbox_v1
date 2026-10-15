@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS messages (
     is_unsent BOOLEAN NOT NULL DEFAULT 0,
     delivery_status TEXT CHECK(delivery_status IN ('pending', 'sent', 'failed')) DEFAULT 'sent',
     delivery_error TEXT,
+    delivery_channel TEXT NOT NULL DEFAULT 'graph',
     timestamp_ms INTEGER DEFAULT 0,
     timestamp_source TEXT DEFAULT 'unknown',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -228,6 +229,30 @@ CREATE TABLE IF NOT EXISTS auto_replies (
     response_template TEXT NOT NULL,
     is_active BOOLEAN DEFAULT 1,
     FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+
+-- 7b. Từ khóa kích hoạt của mỗi quy tắc Auto Reply: nhiều cụm / quy tắc,
+-- mỗi cụm có công tắc riêng (tắt toàn rule ở auto_replies.is_active, tắt
+-- cục bộ ở is_active tại đây). Cụm dài hơn thắng khi cùng khớp 1 tin.
+CREATE TABLE IF NOT EXISTS auto_reply_keywords (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    auto_reply_id INTEGER NOT NULL,
+    keyword TEXT NOT NULL,
+    is_active BOOLEAN DEFAULT 1,
+    FOREIGN KEY(auto_reply_id) REFERENCES auto_replies(id) ON DELETE CASCADE,
+    UNIQUE(auto_reply_id, keyword)
+);
+
+-- 7c. Nhật ký đã trả lời: mỗi quy tắc chỉ tự động trả lời 1 lần cho 1 khách
+-- (đánh dấu CHỈ KHI gửi thành công, xóa theo rule/thread khi rule bị xóa).
+CREATE TABLE IF NOT EXISTS auto_reply_fired (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    auto_reply_id INTEGER NOT NULL,
+    thread_id TEXT NOT NULL,
+    fired_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(auto_reply_id) REFERENCES auto_replies(id) ON DELETE CASCADE,
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+    UNIQUE(auto_reply_id, thread_id)
 );
 
 CREATE TABLE IF NOT EXISTS ai_configs (

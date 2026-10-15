@@ -248,19 +248,27 @@ class QueueWorker {
         return { message, outcome: 'failed' };
       }
       let outcome = null;
+      let domDispatch = false;
       try {
         const r = await this.pageGraphSend(message);
-        outcome = r && r.success ? 'sent' : 'failed';
-        if (outcome === 'sent') {
+        if (r && r.dispatchedViaDom) {
+          // Đã bắn lệnh SEND_QUEUED_MESSAGE sang extension (luồng DOM Business
+          // Suite). Kết quả thật do extension báo qua QUEUED_MESSAGE_RESULT —
+          // giữ queue ở 'processing' như luồng personal qua extension.
+          outcome = 'dispatched';
+          domDispatch = true;
+        } else if (r && r.success) {
+          outcome = 'sent';
           MessageQueueRepository.updateStatus(message.id, 'sent');
         } else {
-          this.fail(message, r.errorCode || 'PAGE_SEND_FAILED');
+          outcome = 'failed';
+          this.fail(message, (r && r.errorCode) || 'PAGE_SEND_FAILED');
         }
       } catch (error) {
         this.fail(message, error.message || 'PAGE_SEND_FAILED');
         outcome = 'failed';
       }
-      return { message, outcome };
+      return { message, outcome, domDispatch };
     }
 
     let attachment = null;
@@ -358,7 +366,13 @@ class QueueWorker {
       try {
         const result = await this.processNext();
         if (result) {
-          await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 3000) + 2000));
+          // Luồng DOM Business Suite nhịp chậm hơn hẳn (6-15s ngẫu nhiên) để
+          // tránh Facebook quét spam khi Chrome admin gõ tin liên tục; các
+          // luồng còn lại giữ nhịp 2-5s như cũ.
+          const delayMs = result.domDispatch
+            ? Math.floor(Math.random() * 9000) + 6000
+            : Math.floor(Math.random() * 3000) + 2000;
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
         } else {
           await new Promise((resolve) => setTimeout(resolve, 1000));
         }

@@ -1323,6 +1323,36 @@ const migrations = [
       }
       console.log('[DB] Migration v20261008001: Added threads.ad_post_link/ad_title/ad_photo_url.');
     }
+  },
+  {
+    // 2026-10-12: Auto Reply đa từ khóa. schema.sql (chạy trước migration) đã
+    // tạo auto_reply_keywords/auto_reply_fired trên mọi DB — migration chỉ
+    // chuyển trigger_keyword cũ của từng quy tắc hiện có sang bảng con.
+    version: 20261012001,
+    name: 'auto_reply_multi_keyword_backfill',
+    up: (db) => {
+      db.exec(`
+        INSERT OR IGNORE INTO auto_reply_keywords (auto_reply_id, keyword, is_active)
+        SELECT id, TRIM(trigger_keyword), 1
+        FROM auto_replies
+        WHERE trigger_keyword IS NOT NULL AND TRIM(trigger_keyword) != ''
+      `);
+      console.log('[DB] Migration v20261012001: Backfilled auto_reply_keywords from legacy trigger_keyword.');
+    }
+  },
+  {
+    // 2026-10-14: Chiến dịch Page hybrid — phân biệt tin gửi qua Graph API
+    // ('graph') hay qua DOM Business Suite ('dom') để báo cáo đúng kênh gửi.
+    version: 20261014001,
+    name: 'add_messages_delivery_channel',
+    up: (db) => {
+      try {
+        db.exec("ALTER TABLE messages ADD COLUMN delivery_channel TEXT NOT NULL DEFAULT 'graph';");
+      } catch (e) {
+        console.log(`[DB] Migration v20261014001: messages.delivery_channel already exists, skipped.`);
+      }
+      console.log('[DB] Migration v20261014001: Added messages.delivery_channel (graph|dom).');
+    }
   }
 ];
 

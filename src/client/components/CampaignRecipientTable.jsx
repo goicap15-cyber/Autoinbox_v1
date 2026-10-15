@@ -89,7 +89,7 @@ export default function CampaignRecipientTable({ campaign, onRetry, busyRecipien
       </header>
 
       <div className="max-h-[430px] overflow-auto">
-        <table className="w-full min-w-[820px] border-collapse text-left text-xs">
+        <table className="w-full min-w-[940px] border-collapse text-left text-xs">
           <thead className="sticky top-0 z-[1] bg-slate-50 text-slate-400">
             <tr>
               <th className="px-4 py-2.5 font-medium">#</th>
@@ -98,6 +98,7 @@ export default function CampaignRecipientTable({ campaign, onRetry, busyRecipien
               <th className="px-4 py-2.5 font-medium">Trạng thái</th>
               <th className="px-4 py-2.5 text-center font-medium">Attempt</th>
               <th className="px-4 py-2.5 font-medium">Kết quả</th>
+              <th className="px-4 py-2.5 font-medium">Kênh gửi</th>
               <th className="px-3 py-2.5 text-right font-medium">Thao tác</th>
             </tr>
           </thead>
@@ -153,10 +154,17 @@ export default function CampaignRecipientTable({ campaign, onRetry, busyRecipien
                   </td>
                   <td className="max-w-60 px-4 py-3">
                     {recipient.last_error || recipient.eligibility_reason ? (
-                      <span className="flex items-start gap-1.5 text-red-500" title={recipient.last_error || recipient.eligibility_reason}>
+                      <span className={'flex items-start gap-1.5 ' + (recipient.status === 'skipped' ? 'text-orange-500' : recipient.status === 'failed' ? 'text-red-500' : 'text-slate-500')} title={recipient.last_error || recipient.eligibility_reason}>
                         <AlertCircle size={13} className="mt-0.5 shrink-0" />
                         <span className="line-clamp-2">{recipient.last_error || recipient.eligibility_reason}</span>
                       </span>
+                    ) : <span className="text-slate-300">—</span>}
+                  </td>
+                  <td className="px-4 py-3">
+                    {recipient.delivery_channel === 'dom' ? (
+                      <span className="inline-flex items-center rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-600">DOM Business Suite</span>
+                    ) : recipient.delivery_channel === 'graph' ? (
+                      <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-600">Graph API</span>
                     ) : <span className="text-slate-300">—</span>}
                   </td>
                   <td className="px-3 py-3 text-right">
@@ -171,7 +179,7 @@ export default function CampaignRecipientTable({ campaign, onRetry, busyRecipien
             })}
             {recipients.length === 0 && (
               <tr>
-                <td colSpan="7" className="px-4 py-10 text-center text-slate-400">Không có người nhận phù hợp bộ lọc.</td>
+                <td colSpan="8" className="px-4 py-10 text-center text-slate-400">Không có người nhận phù hợp bộ lọc.</td>
               </tr>
             )}
           </tbody>

@@ -30,6 +30,7 @@ class CampaignRunner {
     this.sleep = defaultSleep;
     this.pollIntervalMs = 250;
     this.confirmationTimeoutMs = 120000;
+    this.domConfirmationTimeoutMs = 180000;
   }
 
   configure({
@@ -39,6 +40,7 @@ class CampaignRunner {
     sleep,
     pollIntervalMs,
     confirmationTimeoutMs,
+    domConfirmationTimeoutMs,
     database,
     accountDailyCap
   } = {}) {
@@ -50,6 +52,9 @@ class CampaignRunner {
     if (Number.isFinite(pollIntervalMs)) this.pollIntervalMs = Math.max(1, pollIntervalMs);
     if (Number.isFinite(confirmationTimeoutMs)) {
       this.confirmationTimeoutMs = Math.max(10, confirmationTimeoutMs);
+    }
+    if (Number.isFinite(domConfirmationTimeoutMs)) {
+      this.domConfirmationTimeoutMs = Math.max(10, domConfirmationTimeoutMs);
     }
     if (Number.isFinite(accountDailyCap)) {
       this.accountDailyCap = accountDailyCap;
@@ -148,6 +153,27 @@ class CampaignRunner {
       { attempt_id: recipient.attempt_id, queue_id: recipient.queue_id, error: errorCode },
       recipient.id
     );
+    // Khách đã chặn tin nhắn từ Page: không phải lỗi kênh gửi — chuyển
+    // recipient sang 'skipped' để báo cáo riêng, không auto-retry, không
+    // tính vào cột failed của chiến dịch.
+    if (errorCode === 'CUSTOMER_BLOCKED') {
+      const database = this.database || require('../database/db');
+      // finishAttempt phía trên vừa đổi recipient sang 'failed' — chỉ lật
+      // 'failed' sang 'skipped', không đụng trạng thái khác.
+      database.prepare(`
+        UPDATE campaign_recipients
+        SET status = 'skipped', last_error_code = ?, last_error = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status = 'failed'
+      `).run(errorCode, 'Khách hàng đã chặn tin nhắn từ Page', recipient.id);
+      this.repositoryCall(
+        'addAudit',
+        campaign.id,
+        'delivery_skipped_customer_blocked',
+        { attempt_id: recipient.attempt_id, queue_id: recipient.queue_id },
+        recipient.id
+      );
+    }
   }
 
   async settleProcessing(campaign, recipient) {
@@ -387,13 +413,31 @@ class CampaignRunner {
     }
   }
 
+  isDomDispatch(queueId) {
+    const database = this.database || require('../database/db');
+    const row = database.prepare(
+      'SELECT delivery_channel FROM messages WHERE client_message_id = ? OR fb_message_id = ? ORDER BY id DESC LIMIT 1'
+    ).get('queue_' + queueId, 'pending_queue_' + queueId);
+    return row?.delivery_channel === 'dom';
+  }
+
   async waitForQueue(queueId, campaignId) {
-    const timeoutAt = Date.now() + this.confirmationTimeoutMs;
+    const startedAt = Date.now();
+    let timeoutAt = startedAt + this.confirmationTimeoutMs;
+    let domExtended = false;
     while (Date.now() < timeoutAt) {
       const row = this.getQueueStatus
         ? this.getQueueStatus(queueId)
         : MessageQueueRepository.getStatus(queueId, this.database || undefined);
       if (row && ['sent', 'failed'].includes(row.status)) return row;
+      // Tin đi luồng DOM Business Suite (extension gõ trong Chrome admin) mất
+      // tới ~45s mới xác nhận. Dấu 'dom' chỉ xuất hiện trên messages ngay lúc
+      // dispatch (sau khi popPending) nên lần đầu thấy là nới hạn chờ lên
+      // 180s thay vì 120s của luồng API.
+      if (!domExtended && this.isDomDispatch(queueId)) {
+        domExtended = true;
+        timeoutAt = Math.max(timeoutAt, Date.now() + this.domConfirmationTimeoutMs);
+      }
       const campaign = this.repositoryCall('getCampaign', campaignId);
       if (!campaign || campaign.status === 'cancelled') {
         return { status: 'failed', error_reason: 'CAMPAIGN_CANCELLED' };

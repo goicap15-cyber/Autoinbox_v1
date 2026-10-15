@@ -232,12 +232,17 @@ async function sendPageMessage(sourceId, recipientPsid, text, database = getDb()
   });
   const data = await res.json().catch(() => ({}));
   if (data.error) {
+    // Meta xác nhận ngoài cửa sổ 24h (tính từ tin cuối CỦA KHÁCH): code 10 /
+    // subcode 2018001. Cờ fallbackToDom để luồng gửi chuyển sang DOM Business Suite.
+    const outside24h = data.error.code === 10 && data.error.error_subcode === 2018001;
     console.warn(`[PageApi] Gửi tin lỗi cho page ${source.external_id}:`, data.error.message);
     return {
       success: false,
       error: data.error.error_data?.message || data.error.message || 'Graph API lỗi không rõ',
       errorCode: data.error.code ? `GRAPH_${data.error.code}` : 'GRAPH_ERROR',
       errorSubcode: data.error.error_subcode || null,
+      fallbackToDom: outside24h,
+      reason: outside24h ? 'OUTSIDE_24H' : null,
     };
   }
   return { success: true, messageId: data.message_id || null, recipientId: data.recipient_id || null };
@@ -247,6 +252,26 @@ async function sendPageMessage(sourceId, recipientPsid, text, database = getDb()
 // trùng hội thoại thì repo đổi thành page:<pageId>:<psid>.
 function bareThreadId(threadId) {
   return String(threadId || '').includes(':') ? String(threadId).split(':').pop() : String(threadId || '');
+}
+
+// Cửa sổ trả lời 24h của Messenger Platform — tính từ tin cuối CỦA KHÁCH
+// (is_outgoing = 0), không tính tin page gửi. Dùng tại thời điểm xử lý từng
+// tin để quyết định gửi API hay chuyển DOM (không quyết trước lúc enqueue).
+const PAGE_REPLY_WINDOW_MS = 24 * 3600 * 1000;
+
+function getLastCustomerMessageAt(threadId, database = getDb()) {
+  const row = database.prepare(
+    'SELECT MAX(timestamp_ms) AS last_ts FROM messages WHERE thread_id = ? AND is_outgoing = 0'
+  ).get(threadId);
+  const lastTs = row && row.last_ts ? Number(row.last_ts) : 0;
+  return lastTs > 0 ? lastTs : null;
+}
+
+function classifyReplyWindow(threadId, database = getDb()) {
+  const lastCustomerMessageAt = getLastCustomerMessageAt(threadId, database);
+  if (lastCustomerMessageAt == null) return { status: 'unknown', lastCustomerMessageAt: null };
+  const status = Date.now() - lastCustomerMessageAt > PAGE_REPLY_WINDOW_MS ? 'outside' : 'within';
+  return { status, lastCustomerMessageAt };
 }
 
 // ── Đăng ký page vào webhook của app (bằng Page token qua Graph) ──
@@ -1115,6 +1140,9 @@ module.exports = {
   listPages,
   savePages,
   sendPageMessage,
+  getLastCustomerMessageAt,
+  classifyReplyWindow,
+  PAGE_REPLY_WINDOW_MS,
   subscribePage,
   resubscribeAllPages,
   clearPageTokens,
