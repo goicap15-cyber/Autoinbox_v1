@@ -4773,10 +4773,10 @@ function logBsDom(stage, message, details = null) {
 // trước khi gõ. pollForComposer cũ chỉ đếm số phần tử contenteditable/textbox
 // nên từng báo true oan khi FB chưa mount hội thoại (ô tìm kiếm cũng được đếm),
 // dẫn tới gõ vào chỗ sai rồi FAILED_SEND_UNCONFIRMED.
-async function findRealBusinessSuiteComposer(tabId) {
+async function findRealBusinessSuiteComposer(tabId, contactName = null) {
   const rows = await chrome.scripting.executeScript({
     target: { tabId },
-    func: () => {
+    func: (name) => {
       // 2026-10-16: Quét text trên toàn trang để bắt lỗi React Error Boundary (màn hình Kính thiên văn)
       const fullBodyText = (document.body.innerText || '').slice(0, 10000);
       // 2026-10-18: BỎ cụm "không thể xem thông tin" khỏi regex - cụm này nằm
@@ -4835,9 +4835,49 @@ async function findRealBusinessSuiteComposer(tabId) {
       // 2026-10-18: Tên khách ở header khung chat = bằng chứng hội thoại ĐÃ
       // render. Khi click nhầm link nav, URL có thread id nhưng header trống —
       // ô soạn "tìm thấy" chỉ là DIV rác, gõ vào không ra bong bóng.
-      const headerEls = Array.from(document.querySelectorAll('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], [data-surface*="contact_name"]'));
+      // 19/10: UI mới không dùng h1/h2 cho tên — thêm [role="heading"] và
+      // fallback nút lá text == tên khách ở cột giữa (left >= 350 loại row
+      // sidebar bên trái; thẻ liên hệ bên phải hiện tên cũng là bằng chứng
+      // thread đã mở vì khi chưa mở nó chỉ hiện "Không có Thể liên hệ").
+      const normText = (s) => String(s || '').toLowerCase().trim();
+      const cleanName = name ? normText(name) : '';
+      const headingCandidates = [];
+      const headerEls = Array.from(document.querySelectorAll('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], [data-surface*="contact_name"], [role="heading"]'));
+      for (const el of headerEls) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        headingCandidates.push({
+          text: (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 50),
+          left: Math.round(rect.left),
+          top: Math.round(rect.top),
+          tag: el.tagName
+        });
+        if (headingCandidates.length >= 8) break;
+      }
       const headingEl = headerEls.find((el) => el.getBoundingClientRect().left >= 200) || headerEls[0];
-      const headingName = (headingEl?.textContent || '').replace(/\s+/g, ' ').trim() || null;
+      let headingName = (headingEl?.textContent || '').replace(/\s+/g, ' ').trim() || null;
+
+      if (!headingName && cleanName) {
+        const leaves = Array.from(document.querySelectorAll('div, span, h1, h2, h3, h4, a, strong, b'));
+        const nameLeaf = leaves.find((el) => {
+          if (el.children.length !== 0) return false;
+          const rect = el.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return false;
+          if (rect.left < 350) return false;
+          const t = normText(el.textContent);
+          if (t !== cleanName) return false;
+          if (el.closest('[role="complementary"], aside')) return false;
+          headingCandidates.push({
+            text: (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 50),
+            left: Math.round(rect.left),
+            top: Math.round(rect.top),
+            tag: el.tagName,
+            via: 'leaf'
+          });
+          return true;
+        });
+        if (nameLeaf) headingName = (nameLeaf.textContent || '').replace(/\s+/g, ' ').trim();
+      }
 
       return {
         ok: Boolean(real || fallback),
@@ -4845,11 +4885,13 @@ async function findRealBusinessSuiteComposer(tabId) {
         candidate_count: candidates.length,
         labels: candidates.map((el) => (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.tagName).slice(0, 80)),
         main_text_snippet: fullBodyText.slice(0, 300),
-        heading_name: headingName
+        heading_name: headingName,
+        heading_candidates: headingCandidates
       };
-    }
+    },
+    args: [contactName]
   }).catch(() => null);
-  return rows?.[0]?.result || { ok: false, fb_error_state: false, candidate_count: 0, labels: [], main_text_snippet: '', heading_name: null };
+  return rows?.[0]?.result || { ok: false, fb_error_state: false, candidate_count: 0, labels: [], main_text_snippet: '', heading_name: null, heading_candidates: [] };
 }
 
 // 2026-10-18: FB Business Suite KHÔNG render khung chat khi load thẳng URL có
@@ -4865,10 +4907,24 @@ async function probeBizSidebarRow(tabId, ids, contactName) {
       const cleanName = name ? normalize(name) : '';
       const ids = Array.isArray(targetIds) ? targetIds : [targetIds];
 
-      // 1. Thread đã mở sẵn: header h1/h2 khớp tên khách
-      const headerElems = Array.from(document.querySelectorAll('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], [data-surface*="contact_name"]'));
+      // 1. Thread đã mở sẵn: header khớp tên khách (2026-10-18: thêm
+      // [role="heading"] + fallback leaf-node cho UI mới, giống vòng poll)
+      const headerElems = Array.from(document.querySelectorAll('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], [data-surface*="contact_name"], [role="heading"]'));
       const heading = headerElems.find((el) => el.getBoundingClientRect().left >= 200) || headerElems[0];
-      const headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
+      let headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!headingName && cleanName) {
+        const leaves = Array.from(document.querySelectorAll('div, span, h1, h2, h3, h4, a, strong, b'));
+        const nameLeaf = leaves.find((el) => {
+          if (el.children.length !== 0) return false;
+          const rect = el.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return false;
+          if (rect.left < 350) return false;
+          if (normalize(el.textContent) !== cleanName) return false;
+          if (el.closest('[role="complementary"], aside')) return false;
+          return true;
+        });
+        if (nameLeaf) headingName = (nameLeaf.textContent || '').replace(/\s+/g, ' ').trim();
+      }
       if (cleanName && headingName && normalize(headingName).includes(cleanName)) {
         return { found: false, alreadyOpen: true, headingName };
       }
@@ -5402,10 +5458,31 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
 
         const landingState = /trả lời tin nhắn, thiết lập tin trả lời tự động/i.test(bodyText);
 
-        // Header name: Tìm trong header của vùng chat giữa (rect.left >= 200)
-        const headerElems = Array.from(document.querySelectorAll('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], [data-surface*="contact_name"]'));
-        const heading = headerElems.find((el) => el.getBoundingClientRect().left >= 200) || headerElems[0];
-        const headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
+        // Header name: Tìm trong header của vùng chat giữa (rect.left >= 200).
+        // 2026-10-18: UI mới không còn khớp selector cũ — thêm [role="heading"]
+        // + fallback quét leaf-node (left >= 350, loại aside/complementary) để
+        // đọc được tên khách cho cổng identity của campaign DOM.
+        const normText = (s) => String(s || '').toLowerCase().trim();
+        const cleanName = contactName ? normText(contactName) : '';
+        const headingCandidates = [];
+        const headerEls = Array.from(document.querySelectorAll('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], [data-surface*="contact_name"], [role="heading"]'));
+        const heading = headerEls.find((el) => el.getBoundingClientRect().left >= 200) || headerEls[0];
+        let headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim() || null;
+        if (!headingName && cleanName) {
+          const leaves = Array.from(document.querySelectorAll('div, span, h1, h2, h3, h4, a, strong, b'));
+          const nameLeaf = leaves.find((el) => {
+            if (el.children.length !== 0) return false;
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return false;
+            if (rect.left < 350) return false;
+            const t = normText(el.textContent);
+            if (t !== cleanName) return false;
+            if (el.closest('[role="complementary"], aside')) return false;
+            if (headingCandidates.length < 8) headingCandidates.push({ text: t, left: Math.round(rect.left), top: Math.round(rect.top), tag: el.tagName, via: 'leaf' });
+            return true;
+          });
+          if (nameLeaf) headingName = (nameLeaf.textContent || '').replace(/\s+/g, ' ').trim();
+        }
         const composerLabel = (composer?.getAttribute('aria-label') || '').trim();
         const visibleContactName = headingName || composerLabel.replace(/^(?:Viết cho|Write to)\s+/i, '').trim() || null;
 
@@ -5441,6 +5518,7 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
           landing_state: landingState,
           candidate_count: candidates.length,
           visible_contact_name: visibleContactName,
+          heading_candidates: headingCandidates,
           route_ready: routeReady,
           id_matched: idMatched,
           name_matched: nameMatched,
@@ -5530,7 +5608,7 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
   }
 
   // Xác minh ô soạn THẬT trước khi gõ
-  let composerCheck = await findRealBusinessSuiteComposer(tab.id);
+  let composerCheck = await findRealBusinessSuiteComposer(tab.id, expected_contact_name);
   // 2026-10-18: chế độ campaign DOM coi ô soạn là hợp lệ CHỈ KHI header khung
   // chat hiển thị tên khách (bằng chứng hội thoại đã render). Thiếu tên =
   // vẫn chưa mở đúng thread -> chạy vòng cứu hộ click row thật.
@@ -5563,7 +5641,7 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
         break;
       }
       await delay(cfg.waitMs);
-      composerCheck = await findRealBusinessSuiteComposer(tab.id);
+      composerCheck = await findRealBusinessSuiteComposer(tab.id, expected_contact_name);
       if (isCampaignDom && composerCheck.ok) {
         const hn = composerCheck.heading_name;
         const hm = Boolean(hn) && (!expected_contact_name || String(hn).toLocaleLowerCase('vi-VN').includes(String(expected_contact_name).toLocaleLowerCase('vi-VN')));
