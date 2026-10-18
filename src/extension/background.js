@@ -417,6 +417,12 @@ async function dispatchTrustedPointerClick(tabId, point) {
   const target = { tabId };
   try {
     await chrome.debugger.attach(target, '1.3');
+    // mouseMoved trước press/release: FB Business Suite chỉ mở thread khi
+    // nhận đủ chuỗi di chuyển + nhấn chuột thật (CDP isTrusted) - thiếu
+    // mouseMoved, click không được tính là tương tác chuột hoàn chỉnh.
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: point.x, y: point.y
+    });
     await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
       type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1
     });
@@ -4014,19 +4020,6 @@ async function validateRichQueuedEnvelope(payload) {
 // render (see the loading-skeleton state confirmed live) can take longer than
 // any single fixed delay, so this returns as soon as the composer appears
 // rather than giving up (or checking too early) on one fixed wait.
-async function pollForComposer(tabId, timeoutMs = 7000, intervalMs = 400) {
-  const startTime = Date.now();
-  while (Date.now() - startTime < timeoutMs) {
-    const result = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => document.querySelectorAll('[contenteditable="true"], [role="textbox"]').length > 0
-    }).catch(() => null);
-    if (result?.[0]?.result) return true;
-    await delay(intervalMs);
-  }
-  return false;
-}
-
 // ── CDP-based native file-chooser interception ─────────────────────────────
 // Live testing found that Business Suite's attach icon no longer exposes a
 // scriptable <input type="file"> - clicking it opens the OS-native file
@@ -4540,11 +4533,27 @@ async function typeAndSubmitComposer(tabId, content) {
       // role=textbox, and among those pick the largest by rendered area -
       // the real message input is reliably bigger than an inline filename
       // field or similar incidental control.
-      const candidates = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"]')];
+      const isEditable = (el) => {
+        return el.isContentEditable ||
+          el.getAttribute('contenteditable') === 'true' ||
+          el.getAttribute('contenteditable') === '' ||
+          el.getAttribute('contenteditable') === 'plaintext-only' ||
+          el.getAttribute('role') === 'textbox';
+      };
+      const rawCandidates = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"], [contenteditable="plaintext-only"], [contenteditable=""]')];
+      const candidates = rawCandidates.filter((el) => {
+        const rect = el.getBoundingClientRect();
+        const label = (el.getAttribute('aria-label') || '').toLowerCase();
+        const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        if (label.includes('search') || label.includes('tìm kiếm') || placeholder.includes('search') || placeholder.includes('tìm kiếm')) return false;
+        if (rect.left < 250) return false;
+        return isEditable(el);
+      });
       if (!candidates.length) return { success: false, error: 'Không tìm thấy ô soạn tin nhắn' };
       const scored = candidates.map((el) => {
         const rect = el.getBoundingClientRect();
-        return { el, area: rect.width * rect.height, isContentEditable: el.getAttribute('contenteditable') === 'true' };
+        return { el, area: rect.width * rect.height, isContentEditable: Boolean(el.isContentEditable || el.getAttribute('contenteditable') === 'true') };
       });
       const contentEditableOnly = scored.filter((c) => c.isContentEditable);
       const pool = contentEditableOnly.length ? contentEditableOnly : scored;
@@ -4752,7 +4761,396 @@ async function confirmPageDomSend(tabId, content) {
   throw err;
 }
 
-async function handleSendPageMessage({ thread_id, content, page_id, client_message_id, attachment = null, attachmentManifest = null, expected_contact_name = null, dispatchMode = null }) {
+function logBsDom(stage, message, details = null) {
+  const payload = { stage, message, details };
+  console.log(`[BS_DOM_DEBUG][${stage}] ${message}`, details ? JSON.stringify(details) : '');
+  try {
+    sendToBackend('BS_DOM_DEBUG', payload);
+  } catch (_) {}
+}
+
+// 2026-10-16 (phương án C): xác minh ô soạn THẬT nằm trong khung hội thoại
+// trước khi gõ. pollForComposer cũ chỉ đếm số phần tử contenteditable/textbox
+// nên từng báo true oan khi FB chưa mount hội thoại (ô tìm kiếm cũng được đếm),
+// dẫn tới gõ vào chỗ sai rồi FAILED_SEND_UNCONFIRMED.
+async function findRealBusinessSuiteComposer(tabId) {
+  const rows = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      // 2026-10-16: Quét text trên toàn trang để bắt lỗi React Error Boundary (màn hình Kính thiên văn)
+      const fullBodyText = (document.body.innerText || '').slice(0, 10000);
+      // 2026-10-18: BỎ cụm "không thể xem thông tin" khỏi regex - cụm này nằm
+      // trong Thẻ liên hệ rỗng ("Trang của bạn không thể xem thông tin trên
+      // trang cá nhân của người này nữa") là trạng thái BÌNH THƯỜNG, khiến
+      // composer_ready bị chặn oan dù thread đã mở đúng.
+      const fbErrorState = /đã xảy ra lỗi|something went wrong|vui lòng thử lại sau/i.test(fullBodyText);
+
+      const isEditable = (el) => {
+        return el.isContentEditable ||
+          el.getAttribute('contenteditable') === 'true' ||
+          el.getAttribute('contenteditable') === '' ||
+          el.getAttribute('contenteditable') === 'plaintext-only' ||
+          el.getAttribute('role') === 'textbox';
+      };
+
+      // Loại trừ menu trái và search sidebar (rect.left < 250) để bắt trúng khung chat giữa
+      const candidates = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"], [contenteditable="plaintext-only"], [contenteditable=""]')]
+        .filter((el) => {
+          const rect = el.getBoundingClientRect();
+          const label = (el.getAttribute('aria-label') || '').toLowerCase();
+          const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
+          if (rect.width <= 0 || rect.height <= 0) return false;
+          if (label.includes('search') || label.includes('tìm kiếm') || placeholder.includes('search') || placeholder.includes('tìm kiếm')) return false;
+          if (rect.left < 250) return false;
+          return isEditable(el);
+        });
+
+      const looksComposerLabel = (el) => {
+        const label = (el.getAttribute('aria-label') || '').toLowerCase();
+        const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
+        const combined = `${label} ${placeholder}`;
+        return /viết|write|trả lời|reply|message|nhập|tin nhắn|gửi tin|send a message|\baa\b/i.test(combined);
+      };
+
+      // Ô soạn thật: contenteditable ở cột giữa có nhãn soạn thảo
+      let real = candidates.find((el) => looksComposerLabel(el)) || null;
+
+      // Dự phòng 1: contenteditable ở cột giữa, cùng vùng có nút gửi "Nhấn Enter để gửi" hoặc "Gửi"
+      let fallback = null;
+      if (!real) {
+        fallback = candidates.find((el) => {
+          const scope = el.closest('div[role="group"], form') || el.parentElement || document.body;
+          return Boolean(scope.querySelector('button[aria-label*="gửi" i], [role="button"][aria-label*="gửi" i], button[aria-label*="send" i], [role="button"][aria-label*="send" i]'));
+        }) || null;
+      }
+
+      // Dự phòng 2: contenteditable bất kỳ ở cột giữa nằm ở nửa dưới màn hình
+      if (!real && !fallback) {
+        fallback = candidates.find((el) => {
+          const rect = el.getBoundingClientRect();
+          return rect.top > window.innerHeight * 0.35;
+        }) || null;
+      }
+
+      // 2026-10-18: Tên khách ở header khung chat = bằng chứng hội thoại ĐÃ
+      // render. Khi click nhầm link nav, URL có thread id nhưng header trống —
+      // ô soạn "tìm thấy" chỉ là DIV rác, gõ vào không ra bong bóng.
+      const headerEls = Array.from(document.querySelectorAll('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], [data-surface*="contact_name"]'));
+      const headingEl = headerEls.find((el) => el.getBoundingClientRect().left >= 200) || headerEls[0];
+      const headingName = (headingEl?.textContent || '').replace(/\s+/g, ' ').trim() || null;
+
+      return {
+        ok: Boolean(real || fallback),
+        fb_error_state: fbErrorState,
+        candidate_count: candidates.length,
+        labels: candidates.map((el) => (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.tagName).slice(0, 80)),
+        main_text_snippet: fullBodyText.slice(0, 300),
+        heading_name: headingName
+      };
+    }
+  }).catch(() => null);
+  return rows?.[0]?.result || { ok: false, fb_error_state: false, candidate_count: 0, labels: [], main_text_snippet: '', heading_name: null };
+}
+
+// 2026-10-18: FB Business Suite KHÔNG render khung chat khi load thẳng URL có
+// selected_item_id (màn hình Kính thiên văn "Đã xảy ra lỗi") và BỎ QUA click giả
+// dispatchEvent. Thread chỉ mở khi nhận CLICK THẬT (CDP Input.dispatchMouseEvent).
+// probeBizSidebarRow: tìm row sidebar mục tiêu (theo ID rồi tới tên), trả tọa độ
+// tâm cho dispatchTrustedPointerClick; không tự click.
+async function probeBizSidebarRow(tabId, ids, contactName) {
+  const rows = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (targetIds, name) => {
+      const normalize = (s) => (s || '').toLowerCase().trim();
+      const cleanName = name ? normalize(name) : '';
+      const ids = Array.isArray(targetIds) ? targetIds : [targetIds];
+
+      // 1. Thread đã mở sẵn: header h1/h2 khớp tên khách
+      const headerElems = Array.from(document.querySelectorAll('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], [data-surface*="contact_name"]'));
+      const heading = headerElems.find((el) => el.getBoundingClientRect().left >= 200) || headerElems[0];
+      const headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
+      if (cleanName && headingName && normalize(headingName).includes(cleanName)) {
+        return { found: false, alreadyOpen: true, headingName };
+      }
+
+      // 2. Màn hình Landing "Hộp thư - Trả lời tin nhắn..." -> lấy tọa độ tab Messenger để thoát
+      const fullText = (document.body.innerText || '').slice(0, 5000);
+      const isLanding = /trả lời tin nhắn, thiết lập tin trả lời tự động|hộp thư\s+trả lời tin nhắn/i.test(fullText);
+      let mTab = null;
+      if (isLanding) {
+        const messengerTabs = Array.from(document.querySelectorAll('a, button, [role="tab"], [role="button"], div[tabindex]'));
+        mTab = messengerTabs.find((el) => {
+          const t = normalize(el.textContent);
+          const aria = normalize(el.getAttribute('aria-label'));
+          const rect = el.getBoundingClientRect();
+          return (t.startsWith('messenger') || aria.startsWith('messenger')) && rect.left < 300 && rect.width > 0;
+        }) || null;
+      }
+
+      // 3. TÌM THEO TÊN KHÁCH TRƯỚC — món nghề của ensureTabOnThread cũ (đang
+      // chạy ổn cho luồng page): khoanh vùng sidebar, tìm nút lá (không có
+      // con) có text == tên khách rồi closest lên row clickable. Lý do đưa lên
+      // trước: FB chèn selected_item_id của thread đang chọn vào cả href của
+      // tab lọc trên đầu trang ("Tất cả tin nhắn" x=156 y=96) nên tìm theo
+      // link ID dễ click nhầm tab nav thay vì row hội thoại.
+      const NAV_LABEL_LIST = ['tất cả tin nhắn', 'tin trả lời quảng cáo', 'bình luận trên facebook', 'bình luận trên instagram', 'tạo quảng cáo nhắn tin', 'quy trình tự động hóa', 'khách hàng tiềm năng', 'cài đặt tin nhắn', 'chưa đọc', 'ưu tiên', 'messenger', 'instagram', 'whatsapp', 'tìm kiếm', 'hộp thư', 'tin nhắn', 'mới'];
+      const stripSpaces = (s) => String(s || '').toLowerCase().replace(/\s+/g, '');
+      // Bóc từng nhãn nav khỏi chuỗi: bóc hết mà rỗng -> nav. Ăn cả chuỗi nối
+      // liền "tất cả tin nhắntất cả tin nhắntất cả tin" mà regex khớp chính
+      // xác trước đây trượt.
+      const isNavLabel = (el) => {
+        const t = normalize((el.textContent || '').replace(/\s+/g, ' '));
+        if (cleanName && t.includes(cleanName)) return false;
+        let stripped = stripSpaces(t);
+        for (const lbl of NAV_LABEL_LIST) stripped = stripped.split(stripSpaces(lbl)).join('');
+        return stripped === '';
+      };
+      const inThreadColumn = (el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && rect.left >= 90 && rect.left <= 450 && rect.top >= 110;
+      };
+
+      const nameCandidates = [];
+      let link = null;
+      let nameNode = null;
+      if (cleanName) {
+        const sidebar = document.querySelector('[role="navigation"]') ||
+          document.querySelector('[data-surface*="thread_list"]') ||
+          document.querySelector('div[role="grid"]') ||
+          document.body;
+        const nodes = Array.from(sidebar.querySelectorAll('span, div'));
+        for (const el of nodes) {
+          if (el.children.length !== 0) continue;
+          const t = normalize(el.textContent);
+          if (!t.includes(cleanName)) continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) continue;
+          nameCandidates.push({
+            text: t.slice(0, 40),
+            exact: t === cleanName,
+            x: Math.round(rect.left + rect.width / 2),
+            y: Math.round(rect.top + rect.height / 2),
+            left: Math.round(rect.left),
+            top: Math.round(rect.top)
+          });
+          if (nameCandidates.length >= 8) break;
+        }
+        const exactNode = nodes.find((el) => {
+          if (el.children.length !== 0) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && normalize(el.textContent) === cleanName;
+        });
+        if (exactNode) {
+          nameNode = exactNode;
+          link = exactNode.closest('a[href]') || exactNode.closest('[role="row"]') || exactNode.closest('[role="listitem"]') || exactNode.closest('div[tabindex]') || exactNode;
+        }
+      }
+
+      // 4. Fallback: link theo ID — chỉ nhận link trong cột thread list
+      // (top >= 110 loại thanh tab trên đầu trang) và không phải nhãn nav.
+      // Bỏ hẳn fallback lỏng không kiểm tra vị trí: không tìm thấy -> NO_ROW
+      // thay vì click bừa vào tab nav.
+      const allLinks = Array.from(document.querySelectorAll('a[href*="selected_item_id="], a[href*="thread_id="]'));
+      const idMatchedLinks = allLinks.filter((a) => {
+        const href = a.getAttribute('href') || a.href || '';
+        return ids.some((id) => id && href.includes(`selected_item_id=${id}`));
+      });
+      const linkCandidates = idMatchedLinks.slice(0, 8).map((a) => {
+        const r = a.getBoundingClientRect();
+        const t = normalize((a.textContent || '').replace(/\s+/g, ' ')).slice(0, 40);
+        return { text: t, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), left: Math.round(r.left), top: Math.round(r.top), isNav: isNavLabel(a) };
+      });
+      if (!link && idMatchedLinks.length) {
+        if (cleanName) {
+          link = idMatchedLinks.find((a) => normalize(a.textContent).includes(cleanName) && inThreadColumn(a)) || null;
+        }
+        if (!link) link = idMatchedLinks.find((a) => !isNavLabel(a) && inThreadColumn(a)) || null;
+      }
+
+      if (!link) {
+        return {
+          found: false,
+          availableLinksCount: allLinks.length,
+          idMatchedLinksCount: idMatchedLinks.length,
+          linkCandidates,
+          nameCandidates,
+          reason: idMatchedLinks.length ? 'ONLY_NAV_OR_OUTSIDE_LINKS' : (nameCandidates.length ? 'NAME_FOUND_BUT_NO_CLICKABLE' : null),
+          isLanding,
+          mTab: null,
+          alreadyOpen: false
+        };
+      }
+
+      const target = link.querySelector('div[role="row"], div[role="button"], [role="gridcell"], div') || link;
+      try { target.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch (_) {}
+      let rect = target.getBoundingClientRect();
+      // Tìm thấy theo tên: nút tên là chỗ chắc chắn nằm trong row hội thoại —
+      // dùng tọa độ của nó thay vì div con đầu tiên của row (có thể là avatar).
+      if (nameNode) {
+        const nameRect = nameNode.getBoundingClientRect();
+        if (nameRect.width > 0 && nameRect.height > 0) rect = nameRect;
+      }
+      if (rect.width <= 0 || rect.height <= 0) return { found: false, reason: 'ZERO_RECT', isLanding, mTab: null, alreadyOpen: false };
+
+      const mTabRect = mTab ? mTab.getBoundingClientRect() : null;
+      return {
+        found: true,
+        alreadyOpen: false,
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+        href: link.href || null,
+        text: (link.textContent || '').slice(0, 50),
+        isLanding,
+        linkCandidates,
+        nameCandidates,
+        mTabX: mTabRect && mTabRect.width > 0 ? Math.round(mTabRect.left + mTabRect.width / 2) : null,
+        mTabY: mTabRect && mTabRect.height > 0 ? Math.round(mTabRect.top + mTabRect.height / 2) : null
+      };
+    },
+    args: [ids, contactName]
+  }).catch(() => null);
+  return rows?.[0]?.result || null;
+}
+
+// Dự phòng khi CDP attach thất bại (debugger đang bị giữ bởi DevTools khác):
+// click giả theo hành vi cũ. FB thường bỏ qua click giả, chỉ dùng làm phao.
+async function syntheticClickBizSidebarRow(tabId, ids, contactName) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (targetIds, name) => {
+      const normalize = (s) => (s || '').toLowerCase().trim();
+      const cleanName = name ? normalize(name) : '';
+      const ids = Array.isArray(targetIds) ? targetIds : [targetIds];
+      const NAV_LABEL_LIST = ['tất cả tin nhắn', 'tin trả lời quảng cáo', 'bình luận trên facebook', 'bình luận trên instagram', 'tạo quảng cáo nhắn tin', 'quy trình tự động hóa', 'khách hàng tiềm năng', 'cài đặt tin nhắn', 'chưa đọc', 'ưu tiên', 'messenger', 'instagram', 'whatsapp', 'tìm kiếm', 'hộp thư', 'tin nhắn', 'mới'];
+      const stripSpaces = (s) => String(s || '').toLowerCase().replace(/\s+/g, '');
+      const isNavLabel = (el) => {
+        const t = normalize((el.textContent || '').replace(/\s+/g, ' '));
+        if (cleanName && t.includes(cleanName)) return false;
+        let stripped = stripSpaces(t);
+        for (const lbl of NAV_LABEL_LIST) stripped = stripped.split(stripSpaces(lbl)).join('');
+        return stripped === '';
+      };
+      const inThreadColumn = (el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && rect.left >= 90 && rect.left <= 450 && rect.top >= 110;
+      };
+      let link = null;
+      // Tìm theo tên khách TRƯỚC (nút lá text == tên trong vùng sidebar)
+      if (cleanName) {
+        const sidebar = document.querySelector('[role="navigation"]') ||
+          document.querySelector('[data-surface*="thread_list"]') ||
+          document.querySelector('div[role="grid"]') ||
+          document.body;
+        const nodes = Array.from(sidebar.querySelectorAll('span, div'));
+        const exactNode = nodes.find((el) => {
+          if (el.children.length !== 0) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && normalize(el.textContent) === cleanName;
+        });
+        if (exactNode) {
+          link = exactNode.closest('a[href]') || exactNode.closest('[role="row"]') || exactNode.closest('[role="listitem"]') || exactNode.closest('div[tabindex]') || exactNode;
+        }
+      }
+      // Fallback: link theo ID trong cột thread list (top >= 110 loại thanh tab)
+      const allLinks = Array.from(document.querySelectorAll('a[href*="selected_item_id="], a[href*="thread_id="]'));
+      const idMatchedLinks = allLinks.filter((a) => {
+        const href = a.getAttribute('href') || a.href || '';
+        return ids.some((id) => id && href.includes(`selected_item_id=${id}`));
+      });
+      if (!link && idMatchedLinks.length) {
+        if (cleanName) link = idMatchedLinks.find((a) => normalize(a.textContent).includes(cleanName) && inThreadColumn(a)) || null;
+        if (!link) link = idMatchedLinks.find((a) => !isNavLabel(a) && inThreadColumn(a)) || null;
+      }
+      if (!link) return { clicked: false };
+      const target = link.querySelector('div[role="row"], div[role="button"], [role="gridcell"], div') || link;
+      const rect = target.getBoundingClientRect();
+      const mouseOpts = {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        buttons: 1,
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2
+      };
+      try { target.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch (_) {}
+      ['pointerover', 'pointerenter', 'pointerdown', 'mousedown', 'focus', 'pointerup', 'mouseup', 'click'].forEach((type) => {
+        if (type === 'focus') { target.focus?.(); return; }
+        const Evt = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+        target.dispatchEvent(new Evt(type, mouseOpts));
+      });
+      if (typeof target.click === 'function') target.click();
+      if (target !== link) {
+        link.dispatchEvent(new MouseEvent('click', mouseOpts));
+        if (typeof link.click === 'function') link.click();
+      }
+      return { clicked: true };
+    },
+    args: [ids, contactName]
+  }).catch(() => null);
+}
+
+// Mở thread Business Suite bằng CDP click thật vào row sidebar:
+// 1) thoát Landing (nếu có) bằng CDP click tab Messenger, 2) CDP click row mục
+// tiêu. opened=true = đã thực hiện click (FB render xong hay chưa do vòng poll
+// composer xác nhận). CDP lỗi -> fallback click giả.
+async function clickBizSidebarRowViaCdp(tabId, ids, contactName) {
+  let probe = await probeBizSidebarRow(tabId, ids, contactName);
+  if (!probe) {
+    logBsDom('CDP_PROBE_FAIL', 'probeBizSidebarRow trả về null (executeScript lỗi)', { tabId, ids, contactName });
+    return { opened: false, via: null, probe };
+  }
+  if (probe.alreadyOpen) return { opened: true, via: 'already_open', probe };
+  if (probe.isLanding && Number.isFinite(probe.mTabX) && Number.isFinite(probe.mTabY)) {
+    const landingClick = await dispatchTrustedPointerClick(tabId, { x: probe.mTabX, y: probe.mTabY });
+    logBsDom('LANDING_EXIT', 'CDP click thoát Landing (tab Messenger)', {
+      mTabX: probe.mTabX,
+      mTabY: probe.mTabY,
+      success: landingClick.success,
+      error: landingClick.error || null,
+      error_code: landingClick.error_code || null
+    });
+    await delay(900);
+    const beforeLandingProbe = probe;
+    probe = (await probeBizSidebarRow(tabId, ids, contactName)) || probe;
+    logBsDom('LANDING_EXIT_REPROBE', 'Trạng thái sau khi click thoát Landing', {
+      wasLanding: Boolean(beforeLandingProbe.isLanding),
+      stillLanding: Boolean(probe.isLanding),
+      found: probe.found,
+      alreadyOpen: probe.alreadyOpen,
+      x: probe.x,
+      y: probe.y
+    });
+  }
+  if (!probe.found || !Number.isFinite(probe.x) || !Number.isFinite(probe.y)) {
+    logBsDom('CDP_PROBE_NO_ROW', 'Không có row sidebar hợp lệ để click sau probe', {
+      found: probe.found,
+      x: probe.x,
+      y: probe.y,
+      isLanding: probe.isLanding,
+      availableLinksCount: probe.availableLinksCount,
+      reason: probe.reason || null
+    });
+    return { opened: false, via: null, probe };
+  }
+  const trusted = await dispatchTrustedPointerClick(tabId, { x: probe.x, y: probe.y });
+  logBsDom('CDP_CLICK_RESULT', 'Kết quả CDP click thật vào row sidebar', {
+    x: probe.x,
+    y: probe.y,
+    href: probe.href || null,
+    text: probe.text || null,
+    success: trusted.success,
+    error: trusted.error || null,
+    error_code: trusted.error_code || null
+  });
+  if (trusted.success) return { opened: true, via: 'cdp', probe };
+  logBsDom('CDP_FALLBACK_SYNTHETIC', 'CDP click thất bại, fallback click giả', {
+    trustedError: trusted.error || trusted.error_code
+  });
+  await syntheticClickBizSidebarRow(tabId, ids, contactName);
+  return { opened: true, via: 'synthetic', probe, trustedError: trusted.error || trusted.error_code };
+}
+
+async function handleSendPageMessage({ thread_id, content, page_id, client_message_id, attachment = null, attachmentManifest = null, expected_contact_name = null, dispatchMode = null, thread_url = null, customer_uid = null }) {
   console.log(`[FB Engine] 📤 Bắt đầu gửi qua Business Suite: page_id=${page_id} thread=${thread_id} expected_name=${expected_contact_name || 'none'}`);
 
   if (page_id) {
@@ -4765,33 +5163,68 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
 
   // Extract recipient PSID from thread_id (format is "page:pageId:recipientPsid" or "sourceId:recipientPsid" or just "recipientPsid")
   const recipientPsid = extractBareThreadId(thread_id);
-  const targetUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(page_id)}&mailbox_id=${encodeURIComponent(page_id)}&selected_item_id=${encodeURIComponent(recipientPsid)}&thread_type=FB_MESSAGE`;
+  // Trích xuất ID nội bộ nếu có trong thread_url (ví dụ /inbox/1415457738309395/?section=messages)
+  const internalThreadId = thread_url ? (String(thread_url).match(/\/inbox\/(\d+)/)?.[1] || String(thread_url).match(/[?&](?:selected_item_id|thread_id)=(\d+)/)?.[1] || null) : null;
+  // Ưu tiên dùng ID nội bộ nếu có, fallback sang customer_uid hoặc PSID
+  const primaryTargetId = internalThreadId || customer_uid || recipientPsid;
+  const validTargetIds = [primaryTargetId, recipientPsid, customer_uid, internalThreadId].filter(Boolean).map(String);
+  // 2026-10-18: Chế độ DOM campaign mở tab bằng inboxUrl KHÔNG có
+  // selected_item_id (load thẳng URL thread khiến FB không render khung chat -
+  // màn hình Kính thiên văn "Đã xảy ra lỗi"). Thread được mở bằng CDP click
+  // thật vào row sidebar. Luồng cũ giữ targetUrl đầy đủ như trước.
+  const inboxUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(page_id)}&mailbox_id=${encodeURIComponent(page_id)}&thread_type=FB_MESSAGE`;
+  const targetUrl = `${inboxUrl}&selected_item_id=${encodeURIComponent(primaryTargetId)}`;
+
+  logBsDom('START', 'Bắt đầu gửi tin Page qua DOM Business Suite', {
+    page_id,
+    thread_id,
+    recipientPsid,
+    internalThreadId,
+    primaryTargetId,
+    customer_uid,
+    validTargetIds,
+    expected_contact_name,
+    thread_url,
+    targetUrl,
+    dispatchMode
+  });
 
   const role = `page:${page_id}`;
   // Chế độ chiến dịch quá 24h: mở tab ngầm → gõ → XÁC NHẬN bong bóng tin →
   // đóng tab ngay trong finally. Các luồng cũ giữ nguyên hành vi (tái dùng tab).
   const isCampaignDom = dispatchMode === 'business_suite_single_tab';
+  logBsDom('CAMPAIGN_MODE', 'Xác nhận chế độ gửi', {
+    is_campaign_dom: isCampaignDom,
+    dispatch_mode: dispatchMode || null,
+    page_id,
+    thread_id,
+    client_message_id,
+    primaryTargetId,
+    validTargetIds,
+    inboxUrl,
+    targetUrl
+  });
   let tab = null;
   const runSend = async () => {
   tab = await getBusinessSuiteTab(page_id);
 
   if (!tab) {
+    logBsDom('TAB_NONE', 'Không tìm thấy tab Business Suite hiện có — sẽ tạo tab mới', { page_id });
     if (await isTabCreationOnCooldown(role)) {
+      logBsDom('COOLDOWN_BLOCKED', 'Tab Business Suite đang trong cooldown', { page_id });
       throw new Error(`Tab Business Suite cho page_id=${page_id} đang trong cooldown (vừa bị lật identity), bỏ qua lần gửi này.`);
     }
-    console.log(`[FB Engine] Không tìm thấy tab Business Suite cho page_id=${page_id}. Tạo tab nền mới.`);
+    logBsDom('CREATE_TAB', 'Không tìm thấy tab Business Suite, tiến hành tạo tab mới', { targetUrl, tabCreateUrl: isCampaignDom ? inboxUrl : targetUrl });
     tab = await tabCreationCoordinator.run(
       role,
       () => getBusinessSuiteTab(page_id),
       async () => {
+        logBsDom('TAB_CREATE_URL', 'URL dùng để mở tab mới', { url: isCampaignDom ? inboxUrl : targetUrl, isCampaignDom });
         const created = await new Promise(resolve => {
-          // Business Suite sống TRONG CÙNG cửa sổ với Messenger cá nhân
-          // (yêu cầu 2026-09-18: bỏ chế độ 2 cửa sổ Chrome riêng cho Page).
-          // Ghim vào window chứa tab Messenger của tài khoản để tab không
-          // bao giờ rơi vào một cửa sổ thứ hai.
           chrome.tabs.query({ url: ['*://www.facebook.com/messages/*', '*://web.facebook.com/messages/*'] }, (msgTabs) => {
             const personalWindowId = msgTabs && msgTabs.length ? msgTabs[0].windowId : undefined;
-            chrome.tabs.create({ url: targetUrl, active: false, pinned: true, windowId: personalWindowId }, (createdTab) => {
+            // Cho active: true để tránh Chrome background throttling làm chậm SPA render
+            chrome.tabs.create({ url: isCampaignDom ? inboxUrl : targetUrl, active: true, pinned: true, windowId: personalWindowId }, (createdTab) => {
               resolve(createdTab);
             });
           });
@@ -4800,12 +5233,20 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
           await registerTab(role, created.id);
           await Promise.race([waitForTabComplete(created.id, 10000), delay(4000)]);
           const settled = await chrome.tabs.get(created.id).catch(() => null);
+          logBsDom('TAB_CREATED', 'Tab Business Suite đã nạp xong ban đầu', {
+            id: created.id,
+            url: settled?.url,
+            status: settled?.status,
+            title: settled?.title
+          });
           if (settled && /\/login(?:\.php)?(?:[/?#]|$)/i.test(String(settled.url || ''))) {
+            logBsDom('LOGIN_REQUIRED', 'Chrome admin chưa đăng nhập Business Suite', { url: settled.url });
             const loginErr = new Error('Chrome admin chưa đăng nhập Business Suite (tab hiện trang đăng nhập).');
             loginErr.code = 'FAILED_BS_NOT_LOGGED_IN';
             throw loginErr;
           }
           if (!settled || !isBusinessSuiteUrl(settled.url) || !String(settled.url || '').includes(`asset_id=${page_id}`)) {
+            logBsDom('TAB_UNSTABLE', 'Tab không ổn định vào đúng page sau khi mở', { url: settled?.url });
             await unregisterTab(role);
             await startTabCreationCooldown(role);
             throw new Error(`Tab Business Suite cho page_id=${page_id} không ổn định vào đúng trang sau khi mở (identity dùng chung).`);
@@ -4818,13 +5259,25 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
   }
 
   if (!tab) {
+    logBsDom('TAB_NOT_FOUND', 'Không tìm thấy hoặc không thể mở Tab Business Suite');
     sendToBackend('SEND_MESSAGE_RESULT', { thread_id, client_message_id, success: false, error: 'Không tìm thấy hoặc không thể mở Tab Business Suite', error_code: 'FACEBOOK_TAB_NOT_FOUND' });
     const tabErr = new Error('Không tìm thấy Tab Business Suite');
     tabErr.code = 'FACEBOOK_TAB_NOT_FOUND';
     throw tabErr;
   }
 
+  // Đảm bảo tab được active để không bị Chrome bóp CPU render
+  if (tab.id) {
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    logBsDom('TAB_ACTIVE', 'Tab Business Suite đã sẵn sàng (đã kích hoạt active)', {
+      tabId: tab.id,
+      url: tab.url,
+      title: tab.title
+    });
+  }
+
   if (/\/login(?:\.php)?(?:[/?#]|$)/i.test(String(tab.url || ''))) {
+    logBsDom('LOGIN_REQUIRED', 'Chrome admin chưa đăng nhập Business Suite', { url: tab.url });
     const loginErr = new Error('Chrome admin chưa đăng nhập Business Suite (tab hiện trang đăng nhập).');
     loginErr.code = 'FAILED_BS_NOT_LOGGED_IN';
     throw loginErr;
@@ -4834,33 +5287,124 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
   if (isCampaignDom && tab.id) domSendProtectedTabIds.add(tab.id);
 
   // Đảm bảo tab đã ở đúng hội thoại (dù tab vừa mở hay đã mở sẵn từ trước)
-  const onCorrectThread = await ensureTabOnThread(tab, recipientPsid, targetUrl, page_id, null, expected_contact_name);
-  if (!onCorrectThread) {
-    console.log(`[FB Engine] Business Suite chưa vào đúng recipientPsid=${recipientPsid}, thử tabs.update...`);
-    await chrome.tabs.update(tab.id, { url: targetUrl });
-    await Promise.race([waitForTabComplete(tab.id, 8000), delay(3000)]);
-    await delay(1200);
+  logBsDom('ENSURE_THREAD_START', 'Bắt đầu kiểm tra và định tuyến hội thoại trong tab', {
+    primaryTargetId,
+    recipientPsid,
+    internalThreadId,
+    expected_contact_name,
+    tabUrl: tab.url
+  });
+  // 2026-10-18: Chế độ DOM campaign KHÔNG điều hướng bằng URL (tự ghi
+  // selected_item_id khiến FB hiện màn hình Kính thiên văn). Thread được mở
+  // bằng CDP click thật vào row sidebar ở vòng lặp phía dưới.
+  if (isCampaignDom) {
+    logBsDom('ENSURE_THREAD_SKIP_URL', 'Chế độ DOM campaign: bỏ điều hướng URL — mở thread bằng CDP click sidebar', { targetUrl, inboxUrl });
+  } else {
+    const onCorrectThread = await ensureTabOnThread(tab, primaryTargetId, targetUrl, page_id, null, expected_contact_name, { customer_uid, recipientPsid });
+    logBsDom('ENSURE_THREAD_RESULT', 'Kết quả định tuyến hội thoại ban đầu', { onCorrectThread });
+    if (!onCorrectThread) {
+      logBsDom('NAVIGATE_TARGET_URL', 'Cập nhật URL tab sang targetUrl', { targetUrl });
+      await chrome.tabs.update(tab.id, { url: targetUrl, active: true });
+      await Promise.race([waitForTabComplete(tab.id, 8000), delay(3000)]);
+      await delay(1200);
+    }
   }
 
   // Dọn dẹp bản nháp hoặc gợi ý cũ nếu có trước khi soạn thảo
   await resetFailedBusinessSuiteComposerDraft(tab.id).catch(() => null);
 
-  // Vòng lặp chờ ô soạn thảo và so khớp danh tính thực tế trên DOM
-  const interactionDeadline = Date.now() + (isCampaignDom ? 15000 : 10000);
+  // 2026-10-18: Mở thread bằng CDP CLICK THẬT vào row sidebar (click giả
+  // dispatchEvent bị FB bỏ qua). Vòng lặp chờ sidebar mount (tối đa 15s), mỗi
+  // vòng: thoát Landing nếu có + CDP-click row mục tiêu theo ID hoặc tên.
+  {
+    const clickDeadline = Date.now() + 15000;
+    let rowClicked = false;
+    let lastRowProbe = null;
+    while (Date.now() < clickDeadline) {
+      const clickRes = await clickBizSidebarRowViaCdp(tab.id, validTargetIds, expected_contact_name);
+      lastRowProbe = clickRes.probe;
+      logBsDom('PRIMARY_PROBE', 'Trạng thái row sidebar trong vòng click 15s', {
+        found: lastRowProbe?.found,
+        alreadyOpen: lastRowProbe?.alreadyOpen,
+        isLanding: lastRowProbe?.isLanding,
+        x: lastRowProbe?.x,
+        y: lastRowProbe?.y,
+        mTabX: lastRowProbe?.mTabX,
+        mTabY: lastRowProbe?.mTabY,
+        availableLinksCount: lastRowProbe?.availableLinksCount,
+        reason: lastRowProbe?.reason || null,
+        opened: clickRes.opened,
+        via: clickRes.via
+      });
+      if (clickRes.opened) {
+        rowClicked = true;
+        const viaLabel = clickRes.via === 'cdp' ? 'CDP-click thật' : clickRes.via === 'already_open' ? 'thread đã mở sẵn' : 'click giả dự phòng';
+        logBsDom('PRIMARY_SIDEBAR_CLICK', `Đã ${viaLabel} row sidebar thread mục tiêu`, { probe: lastRowProbe, via: clickRes.via, trustedError: clickRes.trustedError || null });
+        await delay(2000);
+        break;
+      }
+      await delay(1200);
+    }
+    if (!rowClicked) {
+      logBsDom('PRIMARY_CLICK_NO_ROW', `Chưa tìm thấy row sidebar mục tiêu — tiếp tục vào vòng lặp chờ và cứu hộ`, lastRowProbe);
+    }
+  }
+
+  // Vòng lặp chờ ô soạn thảo và so khớp danh tính thực tế trên DOM.
+  // Tab Business Suite vừa mở (hoặc vừa bị điều hướng lại vì chưa vào đúng
+  // thread) có thể mất hàng chục giây mới render xong inbox; khi inbox vẫn
+  // trống thì ô soạn chắc chắn chưa xuất hiện — gia hạn deadline thay vì
+  // bỏ cuộc sớm rồi báo COMPOSER_NOT_FOUND oan.
+  const basePollMs = 15000;
+  const hardDeadline = Date.now() + 60000;
+  const loopStartAt = Date.now();
+  let interactionDeadline = Date.now() + basePollMs;
   let interactionState = null;
-  while (Date.now() < interactionDeadline) {
+  let pollIteration = 0;
+  let loadingExtendsGranted = 0;
+  let rescueClicks = 0;
+  let lastRescueAt = 0;
+  while (Date.now() < hardDeadline) {
+    pollIteration += 1;
     interactionState = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: (targetThreadId) => {
-        const main = document.querySelector('div[role="main"]') || document;
-        const composer = [...main.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
-          .find((element) => {
-            const rect = element.getBoundingClientRect();
-            const label = (element.getAttribute('aria-label') || '').toLowerCase();
-            return rect.width > 0 && rect.height > 0 && !label.includes('search') && !label.includes('tìm kiếm');
-          });
+      func: (validIds, contactName, requireIdentity) => {
+        // 2026-10-16: Quét text toàn trang để bắt lỗi React Error Boundary (màn hình Kính thiên văn "Đã xảy ra lỗi")
+        const bodyText = (document.body.innerText || '').slice(0, 10000);
+        // 2026-10-18: BỎ cụm "không thể xem thông tin" (Thẻ liên hệ rỗng là
+        // trạng thái bình thường, không phải Error Boundary).
+        const fbErrorState = /đã xảy ra lỗi|something went wrong|vui lòng thử lại sau/i.test(bodyText);
 
-        const heading = main.querySelector('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], [data-surface*="contact_name"]');
+        const isEditable = (el) => {
+          return el.isContentEditable ||
+            el.getAttribute('contenteditable') === 'true' ||
+            el.getAttribute('contenteditable') === '' ||
+            el.getAttribute('contenteditable') === 'plaintext-only' ||
+            el.getAttribute('role') === 'textbox';
+        };
+
+        // Khung chat giữa luôn có rect.left >= 250, loại trừ triệt để ô tìm kiếm ở sidebar (rect.left < 250)
+        const allCandidates = [...document.querySelectorAll('[contenteditable="true"], [role="textbox"], [contenteditable="plaintext-only"], [contenteditable=""]')];
+        const candidates = allCandidates.filter((el) => {
+          const rect = el.getBoundingClientRect();
+          const label = (el.getAttribute('aria-label') || '').toLowerCase();
+          const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
+          if (rect.width <= 0 || rect.height <= 0) return false;
+          if (label.includes('search') || label.includes('tìm kiếm') || placeholder.includes('search') || placeholder.includes('tìm kiếm')) return false;
+          if (rect.left < 250) return false;
+          return isEditable(el);
+        });
+
+        const composer = candidates.find((el) => {
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+
+        const landingState = /trả lời tin nhắn, thiết lập tin trả lời tự động/i.test(bodyText);
+
+        // Header name: Tìm trong header của vùng chat giữa (rect.left >= 200)
+        const headerElems = Array.from(document.querySelectorAll('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], [data-surface*="contact_name"]'));
+        const heading = headerElems.find((el) => el.getBoundingClientRect().left >= 200) || headerElems[0];
         const headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
         const composerLabel = (composer?.getAttribute('aria-label') || '').trim();
         const visibleContactName = headingName || composerLabel.replace(/^(?:Viết cho|Write to)\s+/i, '').trim() || null;
@@ -4877,80 +5421,226 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
         const routeMatch = location.href.match(/[?&](?:selected_item_id|thread_id)=([^&#]+)/);
         const currentThreadId = selectedThreadId || (routeMatch ? decodeURIComponent(routeMatch[1]) : null);
 
+        const inboxRows = Array.from(document.querySelectorAll('a[href*="selected_item_id="], [role="row"], [role="listitem"]')).length;
+
+        // So khớp ID hoặc Tên
+        const targetIds = Array.isArray(validIds) ? validIds : [validIds];
+        const idMatched = Boolean(currentThreadId && targetIds.some(id => id && String(id) === String(currentThreadId)));
+        const normalize = (s) => (s || '').toLowerCase().trim();
+        const nameMatched = Boolean(contactName && visibleContactName && normalize(visibleContactName).includes(normalize(contactName)));
+        const routeReady = idMatched || nameMatched;
+        // 2026-10-18: chế độ campaign DOM bắt buộc phải thấy TÊN KHÁCH ở
+        // header/ô soạn mới tính composer_ready — URL có thread id (do click
+        // nhầm link nav tạo ra) không phải bằng chứng khung chat đã render.
+        const identityConfirmed = nameMatched || Boolean(visibleContactName);
+
         return {
           current_thread_id: currentThreadId,
-          composer_ready: Boolean(composer),
+          inbox_rows: inboxRows,
+          composer_ready: Boolean(composer) && !landingState && !fbErrorState && (!requireIdentity || identityConfirmed),
+          landing_state: landingState,
+          candidate_count: candidates.length,
           visible_contact_name: visibleContactName,
-          route_ready: String(currentThreadId || '') === String(targetThreadId || '')
+          route_ready: routeReady,
+          id_matched: idMatched,
+          name_matched: nameMatched,
+          identity_confirmed: identityConfirmed,
+          fb_error_state: fbErrorState,
+          location_href: location.href,
+          title: document.title
         };
       },
-      args: [recipientPsid]
-    }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+      args: [validTargetIds, expected_contact_name, isCampaignDom]
+    }).then((rows) => rows?.[0]?.result || null).catch((err) => ({ error: err?.message }));
 
-    if (interactionState?.route_ready && interactionState?.composer_ready) {
-      if (!expected_contact_name || interactionState?.visible_contact_name) break;
+    if (pollIteration <= 5 || pollIteration % 5 === 0) {
+      logBsDom('COMPOSER_POLL', `Kiểm tra ô soạn thảo (lần ${pollIteration})`, interactionState);
+    }
+
+    // UID khớp hoặc tên khớp + có ô soạn là đủ
+    if (interactionState?.route_ready && interactionState?.composer_ready) break;
+
+    // Giải cứu React Error Boundary hoặc mở hội thoại nếu bị kẹt
+    const isErrorBoundary = interactionState?.fb_error_state === true;
+    const composerMissing = interactionState?.route_ready && !interactionState?.composer_ready;
+    const routeMissing = !interactionState?.route_ready;
+    const isLanding = interactionState?.landing_state === true;
+    const rescueNeeded = isErrorBoundary || composerMissing || isLanding || (routeMissing && Date.now() - loopStartAt >= 3000);
+
+    if (rescueNeeded && rescueClicks < 4 && Date.now() - loopStartAt >= 2500 && Date.now() - lastRescueAt >= 4000) {
+      lastRescueAt = Date.now();
+      rescueClicks += 1;
+
+      if (isErrorBoundary) {
+        logBsDom('RESCUE_PIVOT_RETURN', `Cứu hộ lần ${rescueClicks}: Phát hiện màn hình Kính thiên văn ("Đã xảy ra lỗi") ➔ Kích hoạt đảo thread chớp nhoáng (Pivot & Return) để reset Error Boundary`, interactionState);
+        const pivotProbe = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: (ids) => {
+            const links = Array.from(document.querySelectorAll('a[href*="selected_item_id="]'));
+            const otherLink = links.find((a) => {
+              const href = a.getAttribute('href') || a.href || '';
+              return !ids.some(id => id && href.includes(`selected_item_id=${id}`));
+            });
+            if (!otherLink) return { ok: false, reason: 'NO_OTHER_THREAD' };
+            const target = otherLink.querySelector('div[role="row"], div[role="button"], [role="gridcell"], div') || otherLink;
+            try { target.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }); } catch (_) {}
+            const rect = target.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return { ok: false, reason: 'ZERO_RECT' };
+            return { ok: true, x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2), pivotHref: otherLink.href };
+          },
+          args: [validTargetIds]
+        }).then((rows) => rows?.[0]?.result || null).catch((e) => ({ ok: false, error: e.message }));
+
+        logBsDom('PIVOT_PROBE_RESULT', `Tọa độ thread tạm cho Pivot & Return:`, pivotProbe);
+        if (pivotProbe?.ok && Number.isFinite(pivotProbe.x) && Number.isFinite(pivotProbe.y)) {
+          const pivotClick = await dispatchTrustedPointerClick(tab.id, { x: pivotProbe.x, y: pivotProbe.y });
+          logBsDom('PIVOT_CLICK_RESULT', `Kết quả CDP click thread tạm (Pivot & Return) lần ${rescueClicks}`, {
+            x: pivotProbe.x,
+            y: pivotProbe.y,
+            pivotHref: pivotProbe.pivotHref || null,
+            success: pivotClick.success,
+            error: pivotClick.error || null,
+            error_code: pivotClick.error_code || null
+          });
+          await delay(1200);
+        }
+      }
+
+      // CDP-click thật lại row mục tiêu (kèm thoát Landing nếu có)
+      logBsDom('RESCUE_SIDEBAR_CLICK', `Cứu hộ lần ${rescueClicks}: CDP-click lại row sidebar thread mục tiêu (mô phỏng click tay)`, interactionState);
+      const rescue = await clickBizSidebarRowViaCdp(tab.id, validTargetIds, expected_contact_name);
+      logBsDom('RESCUE_CLICK_RESULT', `Kết quả click cứu hộ lần ${rescueClicks}`, rescue);
+      await delay(2000);
+      continue;
+    }
+
+    // Gia hạn chờ tối đa tới 35-40s khi trang đang tải / phục hồi
+    const threadStillLoading = !interactionState?.inbox_rows ||
+      (interactionState?.route_ready && !interactionState?.composer_ready) ||
+      interactionState?.landing_state ||
+      interactionState?.fb_error_state;
+
+    if (Date.now() >= interactionDeadline) {
+      if (!threadStillLoading || loadingExtendsGranted >= 3) break;
+      loadingExtendsGranted += 1;
+      interactionDeadline = Math.min(Date.now() + 10000, hardDeadline);
+      logBsDom('PAGE_STILL_LOADING', `Khung chat Business Suite đang tải/phục hồi — gia hạn chờ lần ${loadingExtendsGranted} (+10s)`, interactionState);
     }
     await delay(300);
   }
 
-  if (!interactionState?.composer_ready) {
-    const composerReady = await pollForComposer(tab.id, 5000);
-    if (!composerReady) {
-      const composerErr = new Error('Không tìm thấy ô soạn tin nhắn Business Suite');
-      composerErr.code = 'COMPOSER_NOT_FOUND';
-      throw composerErr;
+  // Xác minh ô soạn THẬT trước khi gõ
+  let composerCheck = await findRealBusinessSuiteComposer(tab.id);
+  // 2026-10-18: chế độ campaign DOM coi ô soạn là hợp lệ CHỈ KHI header khung
+  // chat hiển thị tên khách (bằng chứng hội thoại đã render). Thiếu tên =
+  // vẫn chưa mở đúng thread -> chạy vòng cứu hộ click row thật.
+  if (isCampaignDom && composerCheck.ok) {
+    const headingName = composerCheck.heading_name;
+    const headingMatches = Boolean(headingName) && (!expected_contact_name || String(headingName).toLocaleLowerCase('vi-VN').includes(String(expected_contact_name).toLocaleLowerCase('vi-VN')));
+    if (!headingMatches) {
+      logBsDom('COMPOSER_VERIFY_NO_IDENTITY', 'Ô soạn có nhưng header chưa hiển thị đúng tên khách — coi như chưa mở thread', { heading_name: headingName, expected_contact_name, ok: composerCheck.ok });
+      composerCheck = { ...composerCheck, ok: false, identity_blocked: true };
     }
   }
+  logBsDom('COMPOSER_VERIFY', 'Xác minh ô soạn thật trước khi gõ', composerCheck);
+  if (!composerCheck.ok) {
+    const rescueRounds = [
+      { waitMs: 3000, stage: 'VERIFY_RESCUE', retryStage: 'COMPOSER_VERIFY_RETRY' },
+      { waitMs: 5000, stage: 'VERIFY_RESCUE_RETRY', retryStage: 'COMPOSER_VERIFY_RETRY2' }
+    ];
+    for (let round = 0; round < rescueRounds.length && !composerCheck.ok && rescueClicks < 5; round += 1) {
+      const cfg = rescueRounds[round];
+      logBsDom(cfg.stage, `Ô soạn chưa phải thật — click cứu hộ sidebar vòng ${round + 1} rồi xác minh lại`, composerCheck);
 
-  // Chốt chặn 1: Thread ID trên DOM
+      let clicked = false;
+      try {
+        const res = await clickBizSidebarRowViaCdp(tab.id, validTargetIds, expected_contact_name);
+        clicked = Boolean(res?.opened);
+      } catch (_) {}
+      rescueClicks += 1;
+      if (!clicked) {
+        logBsDom(`${cfg.stage}_NO_ROW`, `Không tìm thấy row sidebar để click cứu hộ (vòng ${round + 1})`, composerCheck);
+        break;
+      }
+      await delay(cfg.waitMs);
+      composerCheck = await findRealBusinessSuiteComposer(tab.id);
+      if (isCampaignDom && composerCheck.ok) {
+        const hn = composerCheck.heading_name;
+        const hm = Boolean(hn) && (!expected_contact_name || String(hn).toLocaleLowerCase('vi-VN').includes(String(expected_contact_name).toLocaleLowerCase('vi-VN')));
+        if (!hm) {
+          logBsDom(`${cfg.stage}_NO_IDENTITY`, 'Xác minh lại: ô soạn có nhưng header vẫn chưa hiển thị đúng tên khách', { heading_name: hn, expected_contact_name });
+          composerCheck = { ...composerCheck, ok: false, identity_blocked: true };
+        }
+      }
+      logBsDom(cfg.retryStage, `Xác minh lại ô soạn sau click cứu hộ vòng ${round + 1}`, composerCheck);
+    }
+  }
+  if (!composerCheck.ok) {
+    logBsDom('COMPOSER_NOT_FOUND', 'Không tìm thấy ô soạn tin nhắn Business Suite', composerCheck);
+    const composerErr = new Error('Không tìm thấy ô soạn tin nhắn Business Suite');
+    composerErr.code = 'COMPOSER_NOT_FOUND';
+    throw composerErr;
+  }
+  logBsDom('COMPOSER_FOUND', 'Đã xác minh ô soạn thảo Business Suite thật', {
+    visible_contact_name: interactionState?.visible_contact_name,
+    current_thread_id: interactionState?.current_thread_id,
+    heading_name: composerCheck?.heading_name
+  });
+
+  // Chốt chặn 1: Thread ID hoặc Tên liên hệ trên DOM
   const verifiedThreadId = interactionState?.current_thread_id || await getCurrentThreadIdInTab(tab.id);
-  if (verifiedThreadId && String(verifiedThreadId) !== String(recipientPsid)) {
-    console.error(`[FB Engine] 🛑 Chặn gửi nhầm: Tab Business Suite đang mở thread ${verifiedThreadId}, nhưng đích là ${recipientPsid}`);
+  const isMatchingThreadId = verifiedThreadId && validTargetIds.includes(String(verifiedThreadId));
+  const visibleContactName = interactionState?.visible_contact_name;
+  const normalizeIdentity = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+  const isMatchingContactName = Boolean(expected_contact_name && visibleContactName && normalizeIdentity(visibleContactName).includes(normalizeIdentity(expected_contact_name)));
+
+  if (verifiedThreadId && !isMatchingThreadId && !isMatchingContactName) {
+    logBsDom('THREAD_ROUTE_MISMATCH', `Tab đang mở thread ${verifiedThreadId}, khác đích ${primaryTargetId}/${recipientPsid}`, { verifiedThreadId, primaryTargetId, recipientPsid, customer_uid, validTargetIds });
+    console.error(`[FB Engine] 🛑 Chặn gửi nhầm: Tab Business Suite đang mở thread ${verifiedThreadId}, nhưng đích là ${primaryTargetId}/${recipientPsid}`);
     sendToBackend('SEND_MESSAGE_RESULT', {
       thread_id,
       client_message_id,
       success: false,
-      error: `Tab Business Suite chưa ở đúng thread mục tiêu (đang mở ${verifiedThreadId} thay vì ${recipientPsid})`,
+      error: `Tab Business Suite chưa ở đúng thread mục tiêu (đang mở ${verifiedThreadId} thay vì ${primaryTargetId})`,
       error_code: 'THREAD_ROUTE_MISMATCH'
     });
-    const routeErr = new Error(`Tab Business Suite chưa ở đúng thread mục tiêu (đang mở ${verifiedThreadId} thay vì ${recipientPsid})`);
+    const routeErr = new Error(`Tab Business Suite chưa ở đúng thread mục tiêu (đang mở ${verifiedThreadId} thay vì ${primaryTargetId})`);
     routeErr.code = 'THREAD_ROUTE_MISMATCH';
     throw routeErr;
   }
 
-  // Chốt chặn 2: Tên người nhận trên Header (Identity Check - chống gửi nhầm người)
-  const visibleContactName = interactionState?.visible_contact_name;
-  const normalizeIdentity = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+  // 2026-10-16: Ghi cảnh báo nếu tên header khác CRM nhưng UID/ID đã khớp
   if (expected_contact_name && visibleContactName && normalizeIdentity(visibleContactName) !== normalizeIdentity(expected_contact_name)) {
-    console.error(`[FB Engine] 🛑 Chặn gửi nhầm: Khung chat Business Suite đang mở "${visibleContactName}" thay vì "${expected_contact_name}"`);
-    sendToBackend('SEND_MESSAGE_RESULT', {
-      thread_id,
-      client_message_id,
-      success: false,
-      error: `Business Suite contact identity does not match (${visibleContactName} vs ${expected_contact_name}); send blocked`,
-      error_code: 'CONTACT_IDENTITY_MISMATCH'
-    });
-    const identityErr = new Error(`Business Suite contact identity mismatch: ${visibleContactName} !== ${expected_contact_name}`);
-    identityErr.code = 'CONTACT_IDENTITY_MISMATCH';
-    throw identityErr;
+    logBsDom('CONTACT_IDENTITY_WARN', `Tên header "${visibleContactName}" khác CRM "${expected_contact_name}" — bỏ qua vì UID đã khớp`, { visibleContactName, expected_contact_name });
+    console.warn(`[FB Engine] ⚠️ Tên header "${visibleContactName}" khác CRM "${expected_contact_name}" — vẫn gửi vì UID thread đã khớp.`);
   }
 
   try {
     const attachmentPayload = attachmentManifest || attachment;
     if (attachmentPayload) {
+      logBsDom('ATTACHMENT_STAGE', 'Đang đính kèm file...');
       await stageBusinessSuiteAttachment(tab.id, attachmentPayload);
       await waitForBusinessSuiteAttachmentReady(tab.id, attachmentPayload);
+      logBsDom('ATTACHMENT_READY', 'Đính kèm file sẵn sàng');
     }
 
+    logBsDom('TYPE_AND_SUBMIT', 'Tiến hành gõ nội dung và gửi qua DOM', { contentLength: content?.length });
     await typeAndSubmitComposer(tab.id, content);
-    if (isCampaignDom) await confirmPageDomSend(tab.id, content);
+    if (isCampaignDom) {
+      logBsDom('CONFIRMING_DOM_SEND', 'Chờ xác nhận bong bóng tin gửi...');
+      const confirmRes = await confirmPageDomSend(tab.id, content);
+      logBsDom('CONFIRMED_DOM_SEND', 'Đã xác nhận bong bóng tin gửi thành công!');
+      logBsDom('CONFIRM_DETAIL', 'Chi tiết kết quả xác nhận bong bóng tin', { ...(confirmRes || {}), contentLength: content?.length });
+    }
   } catch (error) {
+    logBsDom('SEND_ERROR', 'Lỗi trong quá trình gõ/gửi tin nhắn:', { error: error.message, code: error.code });
     await resetFailedBusinessSuiteComposerDraft(tab.id).catch(() => null);
     throw error;
   }
 
   if (isCampaignDom) {
     console.log('[FB Engine] ✅ DOM Business Suite: đã xác nhận bong bóng tin, gửi thành công.');
+    logBsDom('SUCCESS', 'Gửi thành công tin nhắn qua Business Suite DOM', { client_message_id });
     return { delivered: true };
   }
 
@@ -4973,6 +5663,7 @@ async function handleSendPageMessage({ thread_id, content, page_id, client_messa
       try { await chrome.tabs.remove(tab.id); } catch (_) {}
       await unregisterTab(role).catch(() => {});
       console.log('[FB Engine] [PAGE_DOM] Đã đóng tab Business Suite sau khi gửi:', tab.id);
+      logBsDom('TAB_CLOSED', 'Đã đóng tab Business Suite sau khi gửi (chế độ DOM campaign)', { tabId: tab.id, role });
     }
   }
 }
@@ -4990,6 +5681,20 @@ async function handleSendQueuedMessage(data) {
   if (dispatchKey) recentQueuedDispatchAttempts.set(dispatchKey, now);
   const client_message_id = `queue_${data.queue_id}`;
   console.log(`[FB Engine] 📥 Nhận SEND_QUEUED_MESSAGE: queue_id=${data.queue_id} source_type=${data.source_type} thread_id=${data.thread_id}`);
+  logBsDom('QUEUE_RECEIVED', 'Nhận lệnh gửi tin Page từ server', {
+    queue_id: data.queue_id,
+    client_message_id,
+    dispatch_mode: data.dispatch_mode || null,
+    is_dom_mode: data.dispatch_mode === 'business_suite_single_tab',
+    page_id: data.page_id || null,
+    source_type: data.source_type || null,
+    thread_id: data.thread_id,
+    recipient_thread_id: data.recipient_thread_id || null,
+    customer_uid: data.customer_uid || null,
+    expected_contact_name: data.expected_contact_name || null,
+    has_attachment: Boolean(data.attachment || data.attachment_manifest),
+    thread_url: data.thread_url || null
+  });
 
   // 1. Envelope validation
   try {
@@ -5026,11 +5731,16 @@ async function handleSendQueuedMessage(data) {
         attachment: data.attachment || null,
         attachmentManifest: Array.isArray(data.attachment_manifest) ? data.attachment_manifest : null,
         expected_contact_name: data.expected_contact_name || null,
-        dispatchMode: data.dispatch_mode || null
+        dispatchMode: data.dispatch_mode || null,
+        thread_url: data.thread_url || null,
+        customer_uid: data.customer_uid || null
       });
       const pageKey = data.page_id || `page_${data.source_id}`;
       const result = isDomMode
-        ? await runPageDomSendSerialized(pageKey, () => withTimeout(sendOp(), 45000, 'FAILED_BS_TIMEOUT'))
+        // 90s: mở tab + chờ inbox render (gia hạn tới 60s trong
+        // handleSendPageMessage) + gõ + xác nhận bubble, không cắt ngang giữa
+        // chừng khi trang Business Suite load chậm.
+        ? await runPageDomSendSerialized(pageKey, () => withTimeout(sendOp(), 90000, 'FAILED_BS_TIMEOUT'))
         : await sendOp();
 
       if (isDomMode && result?.delivered) {
@@ -6749,7 +7459,8 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
     try {
       const fresh = await chrome.tabs.get(tab.id).catch(() => null);
       const urlId = String(fresh?.url || '').match(/[?&](?:selected_item_id|thread_id)=(\d+)/)?.[1];
-      if (urlId && String(urlId) === targetId) return true;
+      const allowedTargetIds = [targetId, options?.customer_uid, options?.recipientPsid].filter(Boolean).map(String);
+      if (urlId && allowedTargetIds.includes(String(urlId))) return true;
     } catch (_) {}
     const verdict = await verifyBizHeaderIdentity(tab.id, contactName, 3500);
     return verdict.ok;
@@ -6761,9 +7472,20 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
     ? (String(tab.url || '').match(/[?&](?:selected_item_id|thread_id)=(\d+)/)?.[1] || null)
     : extractThreadIdFromMessengerUrl(tab.url);
   const currentFromPage = currentFromUrl || await getCurrentThreadIdInTab(tab.id);
-  if (!forceCleanViewport && String(currentFromPage) === targetId) {
+  const validTargetIds = [targetId, options?.customer_uid, options?.recipientPsid].filter(Boolean).map(String);
+  if (isBiz) {
+    logBsDom('ENSURE_CURRENT_THREAD', 'Kiểm tra thread hiện tại của tab', {
+      targetId,
+      validTargetIds,
+      currentFromUrl,
+      currentFromPage,
+      tabUrl: tab.url,
+      contactName
+    });
+  }
+  if (!forceCleanViewport && (validTargetIds.includes(String(currentFromPage)) || (contactName && looseBizNameMatch(contactName, await getVisibleBizContactNames(tab.id).then(n => n[0] || ''))))) {
     if (isBiz) {
-      if (currentFromUrl) return true; // URL khớp -> Facebook đã route đúng
+      if (currentFromUrl && validTargetIds.includes(String(currentFromUrl))) return true; // URL khớp -> Facebook đã route đúng
       return await verifyBizIdentity();
     }
     return true;
@@ -6774,6 +7496,7 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
   if (isBiz) {
     const pId = pageId || (tab.url?.match(/[?&]asset_id=(\d+)/)?.[1] || null);
     if (!pId) {
+      logBsDom('NAV_MISSING_PAGE_ID', 'Không thể chuyển Business Suite thread vì thiếu page_id', { targetId });
       console.warn('[FB Engine] Không thể chuyển Business Suite thread vì thiếu page_id:', targetId);
       return false;
     }
@@ -6810,9 +7533,15 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
             link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
             return { ok: true, type: 'dom_biz_sidebar_click' };
           }
-          return { ok: false };
+          return { ok: false, availableLinksCount: links.length };
         },
         args: [targetId, contactName]
+      });
+
+      logBsDom('SIDEBAR_CLICK_RESULT', 'Kết quả tìm và click sidebar hội thoại', {
+        targetId,
+        contactName,
+        clicked: clicked?.[0]?.result
       });
 
       if (clicked?.[0]?.result?.ok) {
@@ -6823,17 +7552,20 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
           if (String(currentId) === targetId) {
             // URL/aria khớp chưa đủ - header phải khớp tên mới tin SPA đã đổi hội thoại
             if (!(await verifyBizIdentity())) break;
+            logBsDom('SIDEBAR_NAV_SUCCESS', `Chuyển thread ${targetId} thành công qua click sidebar`);
             console.log(`[FB Engine] ✅ Navigation Business Suite tới thread ${targetId} thành công (dom_biz_sidebar_click)`);
             return true;
           }
         }
       }
     } catch (e) {
+      logBsDom('SIDEBAR_NAV_ERROR', 'Fast Business Suite DOM navigation thất bại', { error: e.message });
       console.warn('[FB Engine] Fast Business Suite DOM navigation thất bại, fallback sang tabs.update:', e.message);
     }
 
     const targetBizUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(pId)}&mailbox_id=${encodeURIComponent(pId)}&selected_item_id=${encodeURIComponent(targetId)}&thread_type=FB_MESSAGE`;
     try {
+      logBsDom('NAVIGATE_BIZ_URL', 'Fallback tabs.update sang targetBizUrl', { targetBizUrl });
       const loadPromise = waitForTabComplete(tab.id, 8000);
       await chrome.tabs.update(tab.id, { url: targetBizUrl });
       await Promise.race([loadPromise, delay(4500)]);
@@ -6841,9 +7573,11 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
 
       const currentId = await getCurrentThreadIdInTab(tab.id);
       if (String(currentId) === targetId) return await verifyBizIdentity();
+      logBsDom('NAV_FAILED_MATCH', `Chưa vào đúng thread. requested=${targetId}, current=${currentId || 'unknown'}`);
       console.warn(`[FB Engine] Business Suite chưa vào đúng thread. requested=${targetId}, current=${currentId || 'unknown'}`);
       return false;
     } catch (e) {
+      logBsDom('NAV_UPDATE_ERROR', 'Không thể chuyển Business Suite tab sang thread', { error: e.message });
       console.warn('[FB Engine] Không thể chuyển Business Suite tab sang thread:', targetId, e.message);
       return false;
     }

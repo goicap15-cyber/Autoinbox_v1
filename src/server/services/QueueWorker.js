@@ -326,6 +326,33 @@ class QueueWorker {
         return null;
       }
     })();
+
+    const resolvedCustomerUid = message.customer_uid || (() => {
+      try {
+        const db = database || require('../database/db');
+        const extractUid = (url) => {
+          if (!url) return null;
+          const m1 = String(url).match(/[?&]id=(\d+)/);
+          if (m1) return m1[1];
+          const m2 = String(url).match(/facebook\.com\/(?:profile\.php\?id=)?(\d+)/);
+          if (m2 && !['1000', 'pages'].includes(m2[1])) return m2[1];
+          return null;
+        };
+        const contactRow = db.prepare('SELECT profile_url FROM contacts WHERE thread_id = ?').get(message.thread_id);
+        const uidFromContact = extractUid(contactRow?.profile_url);
+        if (uidFromContact) return uidFromContact;
+
+        if (resolvedContactName) {
+          const matchByName = db.prepare('SELECT profile_url FROM contacts WHERE name = ? AND profile_url IS NOT NULL LIMIT 1').get(resolvedContactName);
+          const uidByName = extractUid(matchByName?.profile_url);
+          if (uidByName) return uidByName;
+        }
+        return null;
+      } catch (_e) {
+        return null;
+      }
+    })();
+
     const envelope = {
       type: 'SEND_QUEUED_MESSAGE',
       data: {
@@ -336,6 +363,7 @@ class QueueWorker {
         recipient_thread_id: message.recipient_thread_id || null,
         thread_url: message.thread_url || null,
         expected_contact_name: resolvedContactName || null,
+        customer_uid: resolvedCustomerUid || null,
         account_id: message.account_id,
         content: message.content,
         source_type: message.source_type,

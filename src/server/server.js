@@ -1405,7 +1405,7 @@ async function sendPageThreadViaGraphAttachment(thread_id, text, client_message_
 
 async function sendPageThreadViaGraph(thread_id, text, client_message_id, socket) {
   const threadRow = db.prepare(`
-    SELECT t.id, t.account_id, t.contact_name, s.id AS source_id, s.external_id AS page_id, s.source_type
+    SELECT t.id, t.account_id, t.contact_name, t.thread_url, s.id AS source_id, s.external_id AS page_id, s.source_type, s.owner_account_id
     FROM threads t LEFT JOIN inbox_sources s ON s.id = t.source_id
     WHERE t.id = ?
   `).get(thread_id);
@@ -1429,6 +1429,93 @@ async function sendPageThreadViaGraph(thread_id, text, client_message_id, socket
   const pendingRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
   io.emit('NEW_MESSAGE', { ...pendingRow, status: 'pending' });
 
+  // Fallback DOM khi khách quá 24h: gửi qua Chrome admin thay vì Graph API.
+  const fallbackToDom = async (reason) => {
+    console.log(`[PageApi] 🔄 Quyết định chuyển luồng DOM — reason=${reason} rowId=${rowId} page=${threadRow.page_id} psid=${psid} owner_account_id=${threadRow.owner_account_id || 'none'} contact=${threadRow.contact_name || 'none'}`);
+    if (!threadRow.owner_account_id) {
+      db.prepare("UPDATE messages SET delivery_status = 'failed', delivery_error = ? WHERE id = ?")
+        .run('Page chưa gắn nick quản lý (owner_account_id).', rowId);
+      const failedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+      io.emit('NEW_MESSAGE', { ...failedRow, thread_id, account_id: threadRow.account_id });
+      const err = new Error('Page chưa gắn nick quản lý.');
+      err.code = 'PAGE_OWNER_UNKNOWN';
+      throw err;
+    }
+    const adminWs = extensionConnections.get(threadRow.owner_account_id);
+    if (!adminWs || adminWs.readyState !== 1) {
+      db.prepare("UPDATE messages SET delivery_status = 'failed', delivery_error = ?, delivery_channel = 'dom' WHERE id = ?")
+        .run('Chrome của nick quản lý Page chưa bật. Hãy mở Chrome, đăng nhập app rồi bấm "Thử lại".', rowId);
+      const failedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+      io.emit('NEW_MESSAGE', { ...failedRow, thread_id, account_id: threadRow.account_id });
+      const err = new Error('Chrome của nick quản lý Page chưa bật.');
+      err.code = 'FAILED_ADMIN_OFFLINE';
+      throw err;
+    }
+
+    // Giữ nguyên client_message_id gốc: UI tạo bubble bằng id này, đổi tên sẽ
+    // khiến mọi event kết quả (delivered/rejected) không khớp bubble -> kẹt
+    // "Đang gửi" mãi. Kết quả khớp bản ghi qua queue_id (= rowId) thay vì đổi tên.
+    db.prepare(`
+      UPDATE messages SET delivery_channel = 'dom' WHERE id = ?
+    `).run(rowId);
+
+    const extractUid = (url) => {
+      if (!url) return null;
+      const m1 = String(url).match(/[?&]id=(\d+)/);
+      if (m1) return m1[1];
+      const m2 = String(url).match(/facebook\.com\/(?:profile\.php\?id=)?(\d+)/);
+      if (m2 && !['1000', 'pages'].includes(m2[1])) return m2[1];
+      return null;
+    };
+    let resolvedCustomerUid = null;
+    try {
+      const contactRow = db.prepare('SELECT profile_url FROM contacts WHERE thread_id = ?').get(thread_id);
+      resolvedCustomerUid = extractUid(contactRow?.profile_url);
+      if (!resolvedCustomerUid && threadRow.contact_name) {
+        const matchByName = db.prepare('SELECT profile_url FROM contacts WHERE name = ? AND profile_url IS NOT NULL LIMIT 1').get(threadRow.contact_name);
+        resolvedCustomerUid = extractUid(matchByName?.profile_url);
+      }
+    } catch (_) {}
+
+    const envelope = {
+      type: 'SEND_QUEUED_MESSAGE',
+      data: {
+        contract_version: 1,
+        queue_id: rowId,
+        thread_id: thread_id,
+        recipient_thread_id: psid,
+        thread_url: threadRow.thread_url || null,
+        expected_contact_name: threadRow.contact_name || null,
+        customer_uid: resolvedCustomerUid || null,
+        account_id: threadRow.owner_account_id,
+        content: text,
+        source_type: 'page_messenger',
+        page_id: threadRow.page_id,
+        source_id: threadRow.source_id,
+        dispatch_mode: 'business_suite_single_tab'
+      }
+    };
+    try {
+      adminWs.send(JSON.stringify(envelope));
+    } catch (sendErr) {
+      db.prepare("UPDATE messages SET delivery_status = 'failed', delivery_error = ? WHERE id = ?")
+        .run('Không gửi được lệnh cho Chrome admin.', rowId);
+      const failedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+      io.emit('NEW_MESSAGE', { ...failedRow, thread_id, account_id: threadRow.account_id });
+      const err = new Error('Không gửi được lệnh cho Chrome admin.');
+      err.code = 'DOM_DISPATCH_FAILED';
+      throw err;
+    }
+    console.log(`[PageApi] 🔄 Chuyển luồng DOM: rowId=${rowId} page=${threadRow.page_id} psid=${psid} admin=${threadRow.owner_account_id}`);
+    return { success: true, dispatchedViaDom: true };
+  };
+
+  // Kiểm tra cửa sổ 24h — nếu ngoài 24h, đi thẳng DOM thay vì gọi API rồi mới lỗi.
+  const window = pageApiService.classifyReplyWindow(thread_id);
+  if (window.status === 'outside') {
+    return await fallbackToDom('REPLY_WINDOW_OUTSIDE_24H');
+  }
+
   const result = await pageApiService.sendPageMessage(threadRow.source_id, psid, text);
   if (result.success) {
     db.prepare(`
@@ -1439,6 +1526,11 @@ async function sendPageThreadViaGraph(thread_id, text, client_message_id, socket
     io.emit('NEW_MESSAGE', { ...sentRow, thread_id, account_id: threadRow.account_id });
     io.emit('THREAD_LIST_UPDATED', { thread_id, account_id: threadRow.account_id });
     return { success: true };
+  }
+
+  // Meta xác nhận ngoài cửa sổ 24h (2018001) → chuyển luồng DOM.
+  if (result.fallbackToDom) {
+    return await fallbackToDom('GRAPH_2018001_OUTSIDE_WINDOW');
   }
 
   db.prepare(`
@@ -4778,6 +4870,15 @@ wss.on('connection', (ws, req) => {
           } catch (_) {}
           break;
         }
+        case 'BS_DOM_DEBUG': {
+          try {
+            const entry = msg.data || {};
+            const prefix = `[BS_DOM_DEBUG][${entry.stage || 'INFO'}]`;
+            console.log(`${prefix} ${entry.message || ''}`, entry.details ? JSON.stringify(entry.details) : '');
+            fs.appendFileSync(path.join(APP_DATA_ROOT, 'business-suite-debug.log'), JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n');
+          } catch (_) {}
+          break;
+        }
         case 'UPDATE_LINK_PREVIEW_IMAGE': {
           try {
             const { url_hash, image_url, title } = msg.data || {};
@@ -5282,19 +5383,25 @@ wss.on('connection', (ws, req) => {
               } else {
                 MessageQueueRepository.updateStatus(queue_id, 'sent', null, db);
               }
-              const domClientId = 'queue_' + queue_id;
-              const domPendingId = 'pending_' + domClientId;
-              db.prepare(`
-                UPDATE messages
-                SET delivery_status = 'sent', delivery_error = NULL
-                WHERE (client_message_id = ? OR fb_message_id = ?) AND is_outgoing = 1
-                  AND delivery_status = 'pending'
-              `).run(domClientId, domPendingId);
+            }
+            // Cập nhật messages cho cả campaign queue và manual fallback.
+            // Manual fallback không có message_queue entry — queue_id CHÍNH LÀ
+            // id bản ghi messages (fallbackToDom dùng rowId làm queue_id), nên
+            // khớp thêm theo id và giữ nguyên client_message_id gốc cho UI.
+            const domClientId = 'queue_' + queue_id;
+            const domPendingId = 'pending_' + domClientId;
+            const updated = db.prepare(`
+              UPDATE messages
+              SET delivery_status = 'sent', delivery_error = NULL
+              WHERE (client_message_id = ? OR fb_message_id = ? OR id = ?) AND is_outgoing = 1
+                AND delivery_status = 'pending'
+            `).run(domClientId, domPendingId, queue_id);
+            if (updated.changes > 0) {
               const domMessage = db.prepare(`
                 SELECT * FROM messages
-                WHERE (client_message_id = ? OR fb_message_id = ?) AND is_outgoing = 1
+                WHERE (client_message_id = ? OR fb_message_id = ? OR id = ?) AND is_outgoing = 1
                 ORDER BY id DESC LIMIT 1
-              `).get(domClientId, domPendingId);
+              `).get(domClientId, domPendingId, queue_id);
               if (domMessage) {
                 io.emit('NEW_MESSAGE', { ...domMessage, thread_id: domMessage.thread_id });
                 io.emit('THREAD_LIST_UPDATED', { thread_id: domMessage.thread_id });
@@ -5327,6 +5434,51 @@ wss.on('connection', (ws, req) => {
           MessageQueueRepository.updateStatus(queue_id, 'failed', failureReason);
           if (queueWorker.onQueueFail) {
             queueWorker.onQueueFail({ id: queue_id, thread_id: queueRow ? queueRow.thread_id : null }, failureReason);
+          }
+
+          // Đồng bộ trạng thái thất bại cho tin nhắn gửi tay (manual send fallback sang DOM).
+          // Manual fallback không có message_queue entry — khớp thêm theo id = queue_id.
+          // Lỗi kỹ thuật được dịch thành thông báo tiếng Việt để nhân viên hiểu;
+          // bubble nhận event bằng client_message_id GỐC (không đổi tên ở fallbackToDom).
+          const DOM_FALLBACK_ERROR_TEXT = {
+            COMPOSER_NOT_FOUND: 'Không tìm thấy ô soạn tin trên Business Suite — tin chưa được gửi. Hãy thử lại sau vài giây.',
+            FAILED_BS_TIMEOUT: 'Chrome admin phản hồi quá chậm — tin chưa được gửi. Hãy bấm "Thử lại".',
+            FACEBOOK_TAB_NOT_FOUND: 'Không mở được tab Business Suite — hãy kiểm tra Chrome admin rồi thử lại.',
+            THREAD_ROUTE_MISMATCH: 'Tab Business Suite chưa mở đúng hội thoại — tin chưa được gửi. Hãy thử lại.',
+            CONTACT_IDENTITY_MISMATCH: 'Tab Business Suite đang mở khách hàng khác — tin chưa được gửi. Hãy thử lại.'
+          };
+          const failureText = DOM_FALLBACK_ERROR_TEXT[failureReason] || failureReason;
+          const domFailClientId = 'queue_' + queue_id;
+          const domFailPendingId = 'pending_' + domFailClientId;
+          const failUpdated = db.prepare(`
+            UPDATE messages
+            SET delivery_status = 'failed', delivery_error = ?
+            WHERE (client_message_id = ? OR fb_message_id = ? OR id = ?) AND is_outgoing = 1
+              AND delivery_status = 'pending'
+          `).run(failureText, domFailClientId, domFailPendingId, queue_id);
+          if (failUpdated.changes > 0) {
+            const failedMsg = db.prepare(`
+              SELECT * FROM messages WHERE (client_message_id = ? OR fb_message_id = ? OR id = ?) AND is_outgoing = 1 ORDER BY id DESC LIMIT 1
+            `).get(domFailClientId, domFailPendingId, queue_id);
+            if (failedMsg) {
+              io.emit('NEW_MESSAGE', { ...failedMsg, thread_id: failedMsg.thread_id, account_id: failedMsg.account_id });
+              io.emit('MESSAGE_SEND_FAILED', {
+                thread_id: failedMsg.thread_id,
+                client_message_id: failedMsg.client_message_id,
+                success: false,
+                status: 'failed',
+                error: failureText,
+                error_code: failureReason
+              });
+              io.emit('MESSAGE_SEND_STATUS', {
+                thread_id: failedMsg.thread_id,
+                client_message_id: failedMsg.client_message_id,
+                message_id: failedMsg.id,
+                status: 'failed',
+                error: { message: failureText },
+                updated_at: new Date().toISOString()
+              });
+            }
           }
           break;
         }
@@ -7850,6 +8002,22 @@ app.get('/api/threads/:id/messages', async (req, res) => {
   inboundMediaHydration.hydrateThread(req.params.id);
   // A failed outbound attempt is terminal. Remove it before reading so an old
   // pending row can never reappear as a retry bubble after app startup.
+  // Trước khi xoá, phát lỗi cho UI bằng client_message_id gốc để bubble
+  // "Đang gửi" còn treo trên màn hình được cập nhật thành thất bại (kèm lý
+  // do) thay vì biến mất im lặng khi người dùng mở lại thread.
+  const failedRows = db.prepare(`
+    SELECT id, thread_id, client_message_id, delivery_error FROM messages
+    WHERE thread_id = ? AND is_outgoing = 1 AND delivery_status = 'failed'
+  `).all(req.params.id);
+  for (const failedRow of failedRows) {
+    io.emit('MESSAGE_SEND_FAILED', {
+      thread_id: failedRow.thread_id,
+      client_message_id: failedRow.client_message_id,
+      success: false,
+      status: 'failed',
+      error: failedRow.delivery_error || 'Tin nhắn không gửi được.'
+    });
+  }
   deleteOutboundMessageRows({ threadId: req.params.id, failedOnly: true });
 
   // Cleanup stale pending/temporary rows that were already confirmed via DOM / FB mid
@@ -8343,6 +8511,16 @@ function startServer() {
             errorCode: 'FAILED_ADMIN_OFFLINE'
           };
         }
+        let resolvedCustomerUid = null;
+        try {
+          const contactRow = db.prepare('SELECT profile_url FROM contacts WHERE thread_id = ?').get(message.thread_id);
+          resolvedCustomerUid = extractUid(contactRow?.profile_url);
+          if (!resolvedCustomerUid && threadRow.contact_name) {
+            const matchByName = db.prepare('SELECT profile_url FROM contacts WHERE name = ? AND profile_url IS NOT NULL LIMIT 1').get(threadRow.contact_name);
+            resolvedCustomerUid = extractUid(matchByName?.profile_url);
+          }
+        } catch (_) {}
+
         const envelope = {
           type: 'SEND_QUEUED_MESSAGE',
           data: {
@@ -8353,6 +8531,7 @@ function startServer() {
             recipient_thread_id: psid,
             thread_url: threadRow.thread_url || null,
             expected_contact_name: threadRow.contact_name || null,
+            customer_uid: resolvedCustomerUid || null,
             account_id: threadRow.owner_account_id,
             content: message.content,
             source_type: 'page_messenger',
