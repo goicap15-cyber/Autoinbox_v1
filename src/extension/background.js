@@ -4716,23 +4716,39 @@ async function confirmPageDomSend(tabId, content) {
       target: { tabId },
       func: (needle) => {
         const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+        // UI Business Suite mới KHÔNG có div[role="main"] (chỉ Messenger cũ có)
+        // -> fallback quét toàn trang, nhưng chỉ đếm text nằm trong cột chat
+        // giữa: loại ô soạn, sidebar/nav, thread list (left < 450) và panel
+        // thông tin khách bên phải (left > innerWidth - 400). Không lọc vậy
+        // thì tin ngắn kiểu "ok" sẽ khớp nhầm chữ "Faceb**ok**" ở khắp nơi.
         const main = document.querySelector('div[role="main"]');
-        if (!main) return { found: false, blocked: false };
+        const useDocument = !main;
+        const scope = main || document;
+        const isInChatColumn = (el) => {
+          if (useDocument && el.closest('[role="navigation"], [role="complementary"], aside')) return false;
+          if (!useDocument) return true;
+          const rect = el.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return false;
+          if (rect.left < 450) return false;
+          if (rect.left > window.innerWidth - 400) return false;
+          return true;
+        };
         let found = false;
         let blocked = false;
-        const walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
+        const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
         let node;
         while ((node = walker.nextNode())) {
           const el = node.parentElement;
           if (!el) continue;
           // Bỏ qua ô soạn thảo — text còn nằm trong composer nghĩa là chưa bay
           if (el.closest('[contenteditable="true"], [role="textbox"]')) continue;
+          if (!isInChatColumn(el)) continue;
           const text = clean(node.textContent);
           if (!text) continue;
           if (needle && text.includes(needle)) found = true;
           if (/không còn nhận tin nhắn|no longer receive messages|isn'?t available|unavailable to message/i.test(text)) blocked = true;
         }
-        return { found, blocked };
+        return { found, blocked, scope: useDocument ? 'document_chat_column' : 'main' };
       },
       args: [needle]
     }).then((rows) => rows?.[0]?.result || { found: false, blocked: false }).catch(() => ({ found: false, blocked: false }));
@@ -4742,7 +4758,7 @@ async function confirmPageDomSend(tabId, content) {
       err.code = 'CUSTOMER_BLOCKED';
       throw err;
     }
-    if (probe.found) return { confirmed: true };
+    if (probe.found) return { confirmed: true, scope: probe.scope };
     await delay(500);
   }
   let snapshot = null;
@@ -4750,8 +4766,28 @@ async function confirmPageDomSend(tabId, content) {
     snapshot = await chrome.scripting.executeScript({
       target: { tabId },
       func: () => {
+        // Chụp ĐÚNG vùng mà bước xác nhận quét (fallback cột chat khi UI mới)
         const main = document.querySelector('div[role="main"]');
-        return { url: location.href, text: (main?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 500) };
+        const useDocument = !main;
+        const scope = main || document;
+        const parts = [];
+        const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+          const el = node.parentElement;
+          if (!el) continue;
+          if (el.closest('[contenteditable="true"], [role="textbox"]')) continue;
+          if (useDocument) {
+            if (el.closest('[role="navigation"], [role="complementary"], aside')) continue;
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) continue;
+            if (rect.left < 450) continue;
+            if (rect.left > window.innerWidth - 400) continue;
+          }
+          const text = String(node.textContent || '').replace(/\s+/g, ' ').trim();
+          if (text) parts.push(text);
+        }
+        return { url: location.href, scope: useDocument ? 'document_chat_column' : 'main', text: parts.join(' | ').slice(0, 500) };
       }
     }).then((rows) => rows?.[0]?.result || null).catch(() => null);
   } catch (_) {}

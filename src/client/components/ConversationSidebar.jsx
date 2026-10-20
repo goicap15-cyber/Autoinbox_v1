@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Search, Edit, Filter, Megaphone, RefreshCw, X }  from 'lucide-react';
 import ConversationFilters from './ConversationFilters.jsx';
 import ConversationItem from './ConversationItem.jsx';
@@ -12,6 +12,54 @@ import {
   normalizeFilters
 } from '../utils/conversationFilters.js';
 import { sortDueReminders } from '../utils/reminderPresentation.js';
+
+const THREAD_RENDER_BATCH_SIZE = 80;
+
+const ConversationThreadList = React.memo(function ConversationThreadList({
+  threads, resetKey, activeThreadId, onSelectThread, accounts, inboxSources,
+  campaignSelectionMode, selectedCampaignThreadIds, onToggleCampaignThread,
+  onToggleUnread, onTogglePin
+}) {
+  const [renderedThreadCount, setRenderedThreadCount] = useState(THREAD_RENDER_BATCH_SIZE);
+  const threadListRef = useRef(null);
+
+  useEffect(() => {
+    setRenderedThreadCount(THREAD_RENDER_BATCH_SIZE);
+    if (threadListRef.current) threadListRef.current.scrollTop = 0;
+  }, [resetKey]);
+
+  const handleScroll = (event) => {
+    const element = event.currentTarget;
+    if (threads.length <= renderedThreadCount) return;
+    if (element.scrollTop + element.clientHeight >= element.scrollHeight - 240) {
+      setRenderedThreadCount((count) => Math.min(count + THREAD_RENDER_BATCH_SIZE, threads.length));
+    }
+  };
+
+  if (threads.length === 0) {
+    return <div className="flex-1 min-h-0 overflow-y-auto"><EmptyState title="Không tìm thấy hội thoại" description="Thử đổi bộ lọc hoặc từ khóa tìm kiếm." /></div>;
+  }
+
+  return (
+    <div ref={threadListRef} onScroll={handleScroll} className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y bg-[var(--color-bg-panel)]">
+      {threads.slice(0, renderedThreadCount).map((thread) => (
+        <ConversationItem
+          key={thread.thread_key || thread.id}
+          thread={thread}
+          accounts={accounts}
+          inboxSources={inboxSources}
+          isSelected={String(thread.id) === String(activeThreadId)}
+          onSelect={onSelectThread}
+          selectionMode={campaignSelectionMode}
+          isChecked={selectedCampaignThreadIds.some((threadId) => String(threadId) === String(thread.id))}
+          onToggle={onToggleCampaignThread}
+          onToggleUnread={onToggleUnread}
+          onTogglePin={onTogglePin}
+        />
+      ))}
+    </div>
+  );
+});
 
 export default function ConversationSidebar({
   threads = [], activeThreadId, onSelectThread,
@@ -39,7 +87,8 @@ export default function ConversationSidebar({
     ? `Bộ lọc (${activeFilterCount} điều kiện đang bật)`
     : 'Bộ lọc';
 
-  const visibleThreads = threads.filter((thread) => {
+  const filteredThreads = useMemo(() => {
+    const visibleThreads = threads.filter((thread) => {
     if (dateFilter && dateFilterIds && !dateFilterIds.has(String(thread.id))) return false;
     if (!matchesConversationFilters(thread, appliedFilters)) return false;
     const isMessageRequest = ['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(String(thread.inbox_folder || 'INBOX'));
@@ -52,10 +101,19 @@ export default function ConversationSidebar({
     const query = searchQuery.trim().toLowerCase();
     if (!query) return true;
     return `${thread.contact_name || ''} ${thread.last_message || ''}`.toLowerCase().includes(query);
-  });
+    });
 
-  // Keep view membership intact, then promote due conversations with stable order.
-  const filteredThreads = sortDueReminders(visibleThreads);
+    // Keep view membership intact, then promote due conversations with stable order.
+    return sortDueReminders(visibleThreads);
+  }, [threads, dateFilter, dateFilterIds, appliedFilters, activeTab, searchQuery]);
+
+  const availableTagOptions = useMemo(() => getAvailableTagOptions(threads), [threads]);
+  const threadListResetKey = useMemo(() => JSON.stringify([
+    activeTab,
+    searchQuery,
+    dateFilter,
+    appliedFilters
+  ]), [activeTab, searchQuery, dateFilter, appliedFilters]);
 
   useEffect(() => {
     const handleKeyDown = (event) => {
@@ -156,7 +214,7 @@ export default function ConversationSidebar({
                 inboxSources={inboxSources}
                 accounts={accounts}
                 leadStatuses={leadStatuses}
-                tagOptions={getAvailableTagOptions(threads)}
+                tagOptions={availableTagOptions}
                 onApply={(nextFilters) => setAppliedFilters(nextFilters)}
                 onClose={() => setIsFilterPopoverOpen(false)}
                 openerRef={filterButtonRef}
@@ -191,27 +249,19 @@ export default function ConversationSidebar({
         )}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y bg-[var(--color-bg-panel)]">
-        {filteredThreads.length === 0 ? (
-          <EmptyState title="Không tìm thấy hội thoại" description="Thử đổi bộ lọc hoặc từ khóa tìm kiếm." />
-        ) : (
-          filteredThreads.map((thread) => (
-            <ConversationItem
-              key={thread.thread_key || thread.id}
-              thread={thread}
-              accounts={accounts}
-              inboxSources={inboxSources}
-              isSelected={String(thread.id) === String(activeThreadId)}
-              onSelect={() => onSelectThread(thread.id)}
-              selectionMode={campaignSelectionMode}
-              isChecked={selectedCampaignThreadIds.some((threadId) => String(threadId) === String(thread.id))}
-              onToggle={() => onToggleCampaignThread(thread.id)}
-              onToggleUnread={onToggleUnread}
-              onTogglePin={onTogglePin}
-            />
-          ))
-        )}
-      </div>
+      <ConversationThreadList
+        threads={filteredThreads}
+        resetKey={threadListResetKey}
+        activeThreadId={activeThreadId}
+        onSelectThread={onSelectThread}
+        accounts={accounts}
+        inboxSources={inboxSources}
+        campaignSelectionMode={campaignSelectionMode}
+        selectedCampaignThreadIds={selectedCampaignThreadIds}
+        onToggleCampaignThread={onToggleCampaignThread}
+        onToggleUnread={onToggleUnread}
+        onTogglePin={onTogglePin}
+      />
       {campaignSelectionMode && (
         <div className="flex shrink-0 items-center gap-2 border-t border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3">
           <button type="button" onClick={onCancelCampaignSelection} className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 text-xs font-semibold hover:bg-[var(--color-bg-hover)]"><X size={14} /> Hủy</button>

@@ -86,6 +86,23 @@ const messageIdentities = (message) => [
   message?.id != null ? `id:${message.id}` : null
 ].filter(Boolean);
 
+const messageSnapshotSignature = (items = []) => items.map((message) => JSON.stringify([
+  messageIdentities(message),
+  message?.content,
+  message?.text_content,
+  message?.media_url,
+  message?.local_media_path,
+  message?.attachment_id,
+  message?.attachment,
+  message?.media_type,
+  message?.timestamp_ms,
+  message?.sequence_order,
+  message?.is_outgoing,
+  message?.status,
+  message?.delivery_status,
+  message?.error
+])).join('\u001e');
+
 const messageText = (message) => String(
   message?.content ?? message?.text_content ?? message?.text ?? message?.message ?? ''
 ).trim();
@@ -795,27 +812,34 @@ export default function App() {
 
   }, [activeThreadId]);
 
-  // Socket events are the fast path; this local REST reconciliation is the
-  // completeness path. History persistence can finish just after the last
-  // socket burst, so refresh the open conversation cheaply once per second.
+  // Socket events are the fast path; REST remains a low-frequency recovery
+  // path for history writes that finish after the last socket burst. Avoid
+  // rebuilding App state when the persisted snapshot has not changed.
   useEffect(() => {
     if (!activeThreadId) return undefined;
     const threadIdStr = String(activeThreadId);
     let stopped = false;
+    let requestPending = false;
+    const controller = new AbortController();
     const reconcileFromDatabase = () => {
-      fetch(`/api/threads/${encodeURIComponent(threadIdStr)}/messages`)
+      if (stopped || requestPending) return;
+      requestPending = true;
+      fetch(`/api/threads/${encodeURIComponent(threadIdStr)}/messages`, { signal: controller.signal })
         .then((response) => response.json())
         .then((data) => {
           if (stopped || !Array.isArray(data)) return;
-          setMessages((previous) => ({
-            ...previous,
-            [threadIdStr]: reconcileOutgoingTextEchoes(mergeSnapshotSelfHealing(previous[threadIdStr] || [], preserveOrderAnchors(data, previous[threadIdStr] || [])))
-          }));
+          setMessages((previous) => {
+            const existing = previous[threadIdStr] || [];
+            const merged = reconcileOutgoingTextEchoes(mergeSnapshotSelfHealing(existing, preserveOrderAnchors(data, existing)));
+            if (messageSnapshotSignature(existing) === messageSnapshotSignature(merged)) return previous;
+            return { ...previous, [threadIdStr]: merged };
+          });
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => { requestPending = false; });
     };
-    const timer = setInterval(reconcileFromDatabase, 1000);
-    return () => { stopped = true; clearInterval(timer); };
+    const timer = setInterval(reconcileFromDatabase, 15000);
+    return () => { stopped = true; clearInterval(timer); controller.abort(); };
   }, [activeThreadId]);
 
   useEffect(() => {
@@ -1871,23 +1895,23 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  const startCampaignSelection = () => {
+  const startCampaignSelection = useCallback(() => {
     setActiveModal(null);
     setCampaignSelectionMode(true);
-  };
+  }, []);
 
-  const cancelCampaignSelection = () => {
+  const cancelCampaignSelection = useCallback(() => {
     setCampaignSelectionMode(false);
     setSelectedCampaignThreadIds([]);
-  };
+  }, []);
 
-  const toggleCampaignThread = (threadId) => {
+  const toggleCampaignThread = useCallback((threadId) => {
     setSelectedCampaignThreadIds((current) => (
       current.some((item) => String(item) === String(threadId))
         ? current.filter((item) => String(item) !== String(threadId))
         : [...current, threadId]
     ));
-  };
+  }, []);
 
   const openCampaign = (campaignId) => {
     setActiveCampaignId(campaignId);
@@ -1928,6 +1952,19 @@ export default function App() {
     ...(selectedThreadContact?.avatar_url ? { avatar_url: selectedThreadContact.avatar_url } : {})
   } : null;
   const activeMessages = activeThreadId ? (messages[String(activeThreadId)] || []) : [];
+  const handleSelectThread = useCallback((threadId) => {
+    const clickedThread = threads.find((thread) => String(thread.id) === String(threadId));
+    if (clickedThread && (Number(clickedThread.is_unread) === 1 || Number(clickedThread.unread_manual) === 1)) {
+      fetch('/api/threads/' + encodeURIComponent(String(threadId)) + '/unread', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ unread: 0 })
+      }).catch(() => {});
+    }
+    requestThreadNavigation(clickedThread);
+  }, [threads, requestThreadNavigation]);
+  const openSearchModal = useCallback(() => setActiveModal('search'), []);
+  const openCampaignModal = useCallback(() => setActiveModal('campaigns'), []);
   const currentAccount = selectedThread ? accounts.find(a => String(a.id) === String(selectedThread.account_id)) : null;
   const currentInboxSource = selectedThread ? inboxSources.find((source) => String(source.id) === String(selectedThread.source_id)) : null;
   const currentSenderIdentity = selectedThread ? {
@@ -2059,23 +2096,11 @@ export default function App() {
         dateFilterIds={dateFilterIds}
         onDateFilterChange={handleDateFilterChange}
         threads={threads} activeThreadId={activeThreadId}
-        onSelectThread={(threadId) => {
-          const clickedThread = threads.find((thread) => String(thread.id) === String(threadId));
-          // Mở hội thoại = coi như đã đọc: gỡ cờ chưa-đọc để hội thoại hạ về
-          // vị trí theo thời gian như hành vi Messenger.
-          if (clickedThread && (Number(clickedThread.is_unread) === 1 || Number(clickedThread.unread_manual) === 1)) {
-            fetch('/api/threads/' + encodeURIComponent(String(threadId)) + '/unread', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ unread: 0 })
-            }).catch(() => {});
-          }
-          requestThreadNavigation(clickedThread);
-        }}
+        onSelectThread={handleSelectThread}
         activeTab={activeTab} onTabChange={handleConversationTabChange}
         waitingCount={waitingCount}
         searchQuery={searchQuery} onSearchChange={setSearchQuery}
-        isConnected={isConnected} onOpenSearch={() => setActiveModal('search')}
+        isConnected={isConnected} onOpenSearch={openSearchModal}
         sidebarSyncActive={sidebarSyncActive}
         sidebarSyncSecondsRemaining={sidebarSyncSecondsRemaining}
         onToggleSidebarSync={handleToggleSidebarSync}
@@ -2087,7 +2112,7 @@ export default function App() {
         onToggleCampaignThread={toggleCampaignThread}
         onStartCampaignSelection={startCampaignSelection}
         onCancelCampaignSelection={cancelCampaignSelection}
-        onCreateCampaign={() => setActiveModal('campaigns')}
+        onCreateCampaign={openCampaignModal}
         onBulkHistorySync={handleBulkHistorySync}
         onToggleUnread={handleToggleThreadUnread}
         onTogglePin={handleToggleThreadPinned}

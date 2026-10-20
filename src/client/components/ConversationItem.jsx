@@ -19,7 +19,7 @@ function formatTime(value) {
   return parsed.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
 }
 
-export default function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSources = [], selectionMode = false, isChecked = false, onToggle, onToggleUnread, onTogglePin }) {
+function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSources = [], selectionMode = false, isChecked = false, onToggle, onToggleUnread, onTogglePin }) {
   const account = accounts.find((item) => String(item.id) === String(thread.account_id));
   const source = inboxSources.find((item) => String(item.id) === String(thread.source_id));
   const isOnline = account ? account.is_extension_connected !== false : true;
@@ -85,7 +85,7 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
   return (
     <button
       type="button"
-      onClick={selectionMode ? onToggle : onSelect}
+      onClick={() => (selectionMode ? onToggle?.(thread.id) : onSelect?.(thread.id))}
       onContextMenu={handleContextMenu}
       aria-pressed={selectionMode ? isChecked : undefined}
       aria-label={isReminderDue ? title + '. ' + reminderAriaLabel : title}
@@ -228,3 +228,5 @@ export default function ConversationItem({ thread, isSelected, onSelect, account
     </button>
   );
 }
+
+export default React.memo(ConversationItem);

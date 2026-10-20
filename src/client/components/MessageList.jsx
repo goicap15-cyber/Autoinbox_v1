@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useLayoutEffect, useState } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useState, useMemo } from 'react';
 import MessageBubble from './MessageBubble.jsx';
 import { MessageSquare, RefreshCw } from 'lucide-react';
 import { collapseMessengerMediaCompanions } from '../utils/messageDedup.js';
@@ -13,6 +13,7 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
   const previousFirstMessageRef = useRef('');
   const lastScrollTopRef = useRef(0);
   const lastScrollHeightRef = useRef(0);
+  const previousMessageIdsRef = useRef([]);
   // Neo giữ vị trí: bong bóng đầu tiên đang xem + offset của nó lúc cuộn cuối.
   // Dùng thay cho phép bù "scrollTop += chênh lệch chiều cao" - phép bù đó trượt
   // vị trí khi sync về vừa prepend tin cũ vừa append tin mới (reproduced
@@ -29,11 +30,12 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
   const scrollTimerRef = useRef(null);
   const syncWasActiveRef = useRef(false);
   const localSyncTimeoutRef = useRef(null);
+  const [visibleMessageCount, setVisibleMessageCount] = useState(120);
   // Wheel lên của operator gần nhất - dùng phân biệt với scrollTop bị trình
   // duyệt clamp khi nội dung co lại giữa chừng render (không phải thao tác user).
   const pendingUserWheelUpRef = useRef(false);
   const [localHistorySyncing, setLocalHistorySyncing] = useState(false);
-  const displayMessages = collapseMessengerMediaCompanions(messages).filter((msg) => {
+  const allDisplayMessages = useMemo(() => collapseMessengerMediaCompanions(messages).filter((msg) => {
     // A Messenger media row can arrive before its URL is hydrated. Keep that
     // row only when it has a real media identity; never render empty text
     // placeholders produced by the transient video shell.
@@ -50,11 +52,15 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     const isContactHeading = !Boolean(msg?.is_outgoing) && Boolean(content) && !media
       && contactName && content.toLocaleLowerCase('vi-VN') === contactName;
     return Boolean((content || media) && !isContactHeading);
-  });
+  }), [messages, activeThread?.contact_name]);
   // CRM-owned bubbles keep the client identity for their whole lifecycle.
   // The database id and Facebook mid arrive later and must not remount the
   // DOM node or make React treat the same image as a new bubble.
   const messageIdentity = (msg, index) => String(msg?.ui_render_key || msg?.client_message_id || msg?.id || msg?.fb_message_id || `${msg?.created_at || msg?.time || ''}:${index}`);
+  const displayMessages = useMemo(
+    () => allDisplayMessages.slice(Math.max(0, allDisplayMessages.length - visibleMessageCount)),
+    [allDisplayMessages, visibleMessageCount]
+  );
 
   useEffect(() => {
     const container = containerRef.current;
@@ -62,6 +68,8 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     if (!container || !threadId || previousThreadIdRef.current === threadId) return;
 
     previousThreadIdRef.current = threadId;
+    setVisibleMessageCount(120);
+    previousMessageIdsRef.current = allDisplayMessages.map(messageIdentity);
     jumpStateRef.current = { done: false, attempts: 0 };
     pendingDeltaRef.current = 0;
     pendingOlderSyncRef.current = false;
@@ -78,6 +86,24 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     }, 50);
     return () => clearTimeout(timer);
   }, [activeThread?.id]);
+
+  useEffect(() => {
+    const previousIds = previousMessageIdsRef.current;
+    const currentIds = allDisplayMessages.map(messageIdentity);
+    if (previousIds.length && currentIds.length > previousIds.length) {
+      const previousFirstIndex = currentIds.indexOf(previousIds[0]);
+      if (previousFirstIndex > 0) {
+        setVisibleMessageCount((count) => Math.min(allDisplayMessages.length, count + previousFirstIndex));
+      }
+    }
+    previousMessageIdsRef.current = currentIds;
+  }, [allDisplayMessages]);
+
+  useEffect(() => {
+    if (!jumpToDate) return;
+    const targetIndex = allDisplayMessages.findIndex((message) => getMessageDateKey(message) === jumpToDate);
+    if (targetIndex >= 0) setVisibleMessageCount(allDisplayMessages.length - targetIndex);
+  }, [jumpToDate, allDisplayMessages]);
 
   useLayoutEffect(() => {
     const container = containerRef.current;
@@ -138,7 +164,7 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     previousFirstMessageRef.current = nextFirst;
     const release = requestAnimationFrame(() => { suppressScrollRef.current = false; });
     return () => cancelAnimationFrame(release);
-  }, [messages, jumpToDate]);
+  }, [messages, displayMessages, jumpToDate]);
 
   // Keep the viewport pinned to the newest message when media/layout
   // finishes loading. Do not disturb an operator who is reading history.
@@ -288,6 +314,16 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
   return (
     <div ref={containerRef} onScroll={handleScroll} onWheel={handleWheel} className="chat-messages bg-[var(--color-bg-app)] flex-1 overflow-y-auto px-4 py-5">
       <div className="chat-content-wrapper relative max-w-3xl mx-auto">
+        {displayMessages.length < allDisplayMessages.length && (
+          <button
+            type="button"
+            onClick={() => setVisibleMessageCount((count) => Math.min(count + 100, allDisplayMessages.length))}
+            className="mx-auto mb-3 flex items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg-panel)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)]"
+            aria-label={`Tải thêm ${allDisplayMessages.length - displayMessages.length} tin nhắn cũ hơn`}
+          >
+            Tải thêm {Math.min(100, allDisplayMessages.length - displayMessages.length)} tin cũ hơn
+          </button>
+        )}
         {activeThread?.history_completed === 1 && displayMessages.length > 0 && (
           <div className="flex items-center justify-center gap-2 text-xs text-[var(--color-text-muted)] bg-[var(--color-bg-panel)] border border-[var(--color-border)] rounded-full px-3 py-1.5 mx-auto mb-3 w-fit select-none">
             <span>Đã tải hết toàn bộ lịch sử</span>

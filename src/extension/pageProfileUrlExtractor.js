@@ -101,10 +101,9 @@
   /**
    * Trích xuất liên kết trang cá nhân Facebook từ phần tử DOM (cột chi tiết)
    * @param {Element} container - DOM node của cột chi tiết (right rail)
-   * @param {string} [fallbackThreadId] - ID của thread dự phòng nếu không có link DOM
    * @returns {string|null}
    */
-  function extractProfileUrlFromElement(container, fallbackThreadId) {
+  function extractProfileUrlFromElement(container) {
     if (container) {
       try {
         // Tìm tất cả các thẻ <a> trỏ tới facebook.com
@@ -138,11 +137,9 @@
       } catch (_) {}
     }
 
-    // Fallback: Nếu không tìm thấy link trong DOM nhưng threadId là UID số hợp lệ (10-18 số)
-    if (fallbackThreadId && /^\d{10,18}$/.test(String(fallbackThreadId))) {
-      return `https://www.facebook.com/profile.php?id=${String(fallbackThreadId)}`;
-    }
-
+    // Không phịa profile.php?id=<threadId> khi không có link DOM: thread id
+    // Page (selected_item_id/PSID) không phải UID toàn cục của khách, phịa ra
+    // là link chết trang trắng (reproduce 2026-10-19).
     return null;
   }
 

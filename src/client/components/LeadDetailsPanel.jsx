@@ -837,17 +837,12 @@ export default function LeadDetailsPanel({ contactInfo, onSaveContact, onExportL
           Facebook Messenger
         </div>
         {(() => {
-          const segments = String(contactInfo?.thread_id || '').split(':').filter(Boolean);
-          const fbId = segments.length ? segments[segments.length - 1] : '';
-          const isPage = contactInfo?.source_type === 'page_messenger';
-          const explicitUrl = contactInfo?.profile_url;
-          const isNumericUid = /^\d{10,18}$/.test(fbId);
-          const fallbackUidUrl = isNumericUid ? 'https://www.facebook.com/profile.php?id=' + fbId : null;
-          // Thread id E2EE cá nhân (/messages/e2ee/t/<id>) KHÔNG phải UID của
-          // khách - phịa profile.php?id=<thread id> cho link chết (reproduce
-          // 2026-10-07). Hội thoại cá nhân chỉ hiện nút khi extension đã gửi
-          // link profile thật (THREAD_METADATA_UPDATED -> contacts.profile_url).
-          const profileUrl = explicitUrl || (isPage ? fallbackUidUrl : null);
+          // Chỉ hiện nút khi extension đã scrape được link profile thật từ DOM
+          // (THREAD_METADATA_UPDATED -> contacts.profile_url). Không phịa
+          // profile.php?id=<thread id> - thread id cá nhân (E2EE) lẫn Page
+          // (PSID/conversation id) đều KHÔNG phải UID của khách -> link chết
+          // trang trắng (reproduce 2026-10-07 và 2026-10-19).
+          const profileUrl = contactInfo?.profile_url || null;
           if (!profileUrl) {
             return (
               <div className="mt-2 flex items-center justify-center">

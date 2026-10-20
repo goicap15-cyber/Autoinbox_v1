@@ -5704,12 +5704,17 @@ io.on('connection', (socket) => {
     if (!threadId || !enterpriseAccess.canAccessThread(socket.user, threadId)) return;
     const thread = db.prepare(`
       SELECT t.id, t.external_thread_id, t.account_id, t.thread_url, t.contact_name,
-             t.sync_status, t.sync_cursor, t.history_completed,
+             t.sync_status, t.sync_cursor, t.history_completed, t.source_id,
              s.source_type, s.external_id AS page_id
       FROM threads t LEFT JOIN inbox_sources s ON s.id = t.source_id
       WHERE t.id = ?
     `).get(threadId);
     if (!thread?.account_id) return;
+
+    // B1: thread Page thiếu tên thật -> làm giàu qua Messenger Profile API
+    if (thread.source_type === 'page_messenger' && thread.source_id && thread.external_thread_id) {
+      pageApiService.enrichPageContactProfile(thread.id, thread.source_id, thread.external_thread_id, io).catch(() => {});
+    }
 
     if ((direction === 'older' || (direction === 'viewport' && Number(scroll_delta) < 0)) && Number(thread.history_completed) === 1) {
       console.log(`[REQUEST_SYNC_THREAD_MESSAGES] thread=${threadId} skip=history_completed`);

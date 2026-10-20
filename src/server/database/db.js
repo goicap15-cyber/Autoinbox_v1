@@ -1353,6 +1353,40 @@ const migrations = [
       }
       console.log('[DB] Migration v20261014001: Added messages.delivery_channel (graph|dom).');
     }
+  },
+  {
+    // Extension Page từng phịa contacts.profile_url = profile.php?id=<thread id>
+    // khi không scrape được link thật; thread id Page (selected_item_id/PSID)
+    // không phải UID toàn cục -> link chết trang trắng. Xoá link phịa (uid
+    // trong URL trùng thread id / external id), giữ link thật đã scrape.
+    version: 20261019001,
+    name: 'purge_fabricated_page_profile_urls',
+    up: (db) => {
+      const rows = db.prepare(`
+        SELECT c.thread_id AS thread_id, c.profile_url AS profile_url,
+               t.id AS t_id, t.external_thread_id AS t_ext
+        FROM contacts c
+        JOIN threads t ON t.id = c.thread_id
+        WHERE c.profile_url LIKE '%profile.php?id=%'
+      `).all();
+      const update = db.prepare('UPDATE contacts SET profile_url = NULL WHERE thread_id = ?');
+      let purged = 0;
+      for (const row of rows) {
+        const match = String(row.profile_url || '').match(/profile\.php\?id=(\d+)/);
+        if (!match) continue;
+        const uid = match[1];
+        const idCandidates = [row.t_id, row.t_ext]
+          .filter(Boolean)
+          .flatMap((v) => String(v).split(':'))
+          .map((v) => v.trim())
+          .filter(Boolean);
+        if (idCandidates.includes(uid)) {
+          update.run(row.thread_id);
+          purged += 1;
+        }
+      }
+      console.log(`[DB] Migration v20261019001: Purged ${purged} fabricated page profile_url(s).`);
+    }
   }
 ];
 

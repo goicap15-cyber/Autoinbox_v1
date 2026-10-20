@@ -64,8 +64,11 @@ export default function ChatHeader({
   const customerName = activeThread.nickname || activeThread.contact_name || activeThread.name || 'Khách hàng';
   const avatarColor = pickAvatarColor(activeThread.id || customerName);
   const showAccountPill = accounts.length > 1;
+  // Page: external_thread_id là PSID/conversation id, KHÔNG phải UID của khách
+  // - phịa facebook.com/<id> từ nó là link chết trang trắng (reproduce
+  // 2026-10-19). Chỉ dùng link thật extension đã scrape (contacts.profile_url).
   const messengerUrl = sourceType === 'page_messenger'
-    ? (activeThread.profile_url || (activeThread.external_thread_id && /^\d{10,18}$/.test(String(activeThread.external_thread_id)) ? `https://facebook.com/${activeThread.external_thread_id}` : null))
+    ? (activeThread.profile_url || null)
     : (activeThread.thread_url || `https://facebook.com/messages/t/${activeThread.external_thread_id || activeThread.id}`);
   const [chromeToggling, setChromeToggling] = React.useState(false);
   const isChromeRunning = account?.is_chrome_running === true;

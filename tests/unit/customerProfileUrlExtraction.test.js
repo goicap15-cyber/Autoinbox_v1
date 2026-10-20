@@ -52,18 +52,13 @@ test('isProfileLinkIndicator recognizes profile cues in text and href', () => {
   assert.equal(isProfileLinkIndicator('https://business.facebook.com/settings', 'Cài đặt'), false);
 });
 
-test('extractProfileUrlFromElement fallback to numeric threadId when no container exists', () => {
-  assert.equal(
-    extractProfileUrlFromElement(null, '100018089229407'),
-    'https://www.facebook.com/profile.php?id=100018089229407'
-  );
-  assert.equal(
-    extractProfileUrlFromElement(null, '61592703398056'),
-    'https://www.facebook.com/profile.php?id=61592703398056'
-  );
-  // Non-numeric or short string threadId must not produce fake URL
+test('extractProfileUrlFromElement never fabricates URL from threadId', () => {
+  // Thread id (selected_item_id/PSID) không phải UID của khách - phịa
+  // profile.php?id=<threadId> cho link chết trang trắng (reproduce 2026-10-19).
+  assert.equal(extractProfileUrlFromElement(null, '100018089229407'), null);
+  assert.equal(extractProfileUrlFromElement(null, '61592703398056'), null);
   assert.equal(extractProfileUrlFromElement(null, 'short_id'), null);
-  assert.equal(extractProfileUrlFromElement(null, '12345'), null);
+  assert.equal(extractProfileUrlFromElement(null), null);
 });
 
 test('ContactService.update persists and retrieves profile_url in SQLite', () => {

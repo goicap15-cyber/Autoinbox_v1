@@ -16,6 +16,7 @@ const InboxSourceService = require('./InboxSourceService');
 const ConversationRepository = require('../repositories/ConversationRepository');
 const PhoneCaptureService = require('./PhoneCaptureService');
 const { extractLeadInfo } = require('../utils/leadExtractor');
+const { saveAvatarFromBase64OrUrl } = require('../utils/avatarManager');
 
 const GRAPH_VERSION = 'v21.0';
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
@@ -207,6 +208,72 @@ async function graphGet(path, params, database = getDb()) {
   const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(10000) });
   const data = await res.json().catch(() => ({}));
   return data;
+}
+
+// ── Messenger Profile API: tên + avatar thật của khách theo PSID ──
+// GET /<PSID>?fields=first_name,last_name,profile_pic là endpoint DUY NHẤT
+// Facebook cấp cho Page: KHÔNG có username/profile URL/UID toàn cục — link
+// profile chỉ lấy được qua scrape DOM (page_content.js).
+async function fetchMessengerCustomerProfile(sourceId, psid, database = getDb()) {
+  try {
+    const token = InboxSourceService.getDecryptedToken(sourceId, database);
+    if (!token) return null;
+    const res = await graphGet(String(psid), {
+      fields: 'first_name,last_name,profile_pic',
+      access_token: token,
+    }, database);
+    if (!res || res.error) {
+      if (res?.error) console.warn(`[PageApi] Lấy profile khách psid=${psid} lỗi:`, res.error.message);
+      return null;
+    }
+    const name = [res.first_name, res.last_name].filter(Boolean).join(' ').trim() || null;
+    const profilePic = typeof res.profile_pic === 'string' && res.profile_pic.startsWith('http') ? res.profile_pic : null;
+    if (!name && !profilePic) return null;
+    return { name, profile_pic: profilePic };
+  } catch (err) {
+    console.warn(`[PageApi] Lấy profile khách psid=${psid} lỗi:`, err.message);
+    return null;
+  }
+}
+
+// Làm giàu contacts (tên + avatar) cho thread Page. Chỉ chạy khi contacts
+// chưa có tên thật — 1 call Graph/PSID trong đời. Fire-and-forget từ webhook
+// và REQUEST_SYNC_THREAD_MESSAGES; emit CONTACT_UPDATED cho UI tự refresh.
+const inFlightCustomerProfiles = new Set();
+async function enrichPageContactProfile(threadId, sourceId, psid, io, database = getDb()) {
+  const key = `${sourceId}:${psid}`;
+  if (inFlightCustomerProfiles.has(key)) return;
+  const existing = database.prepare('SELECT name FROM contacts WHERE thread_id = ?').get(threadId);
+  if (existing?.name && existing.name !== 'Khách hàng') return;
+  inFlightCustomerProfiles.add(key);
+  try {
+    const profile = await fetchMessengerCustomerProfile(sourceId, psid, database);
+    if (!profile) return;
+    let localAvatarPath = null;
+    if (profile.profile_pic) {
+      localAvatarPath = await saveAvatarFromBase64OrUrl(profile.profile_pic, threadId);
+    }
+    if (profile.name) {
+      database.prepare('UPDATE threads SET contact_name = ? WHERE id = ?').run(profile.name, threadId);
+    }
+    database.prepare(`
+      INSERT INTO contacts (thread_id, name, avatar_url)
+      VALUES (?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET
+        name = COALESCE(excluded.name, contacts.name),
+        avatar_url = COALESCE(excluded.avatar_url, contacts.avatar_url)
+    `).run(threadId, profile.name, localAvatarPath);
+    if (io) {
+      io.emit('CONTACT_UPDATED', {
+        thread_id: threadId,
+        ...(profile.name ? { name: profile.name } : {}),
+        ...(localAvatarPath ? { avatar_url: localAvatarPath } : {})
+      });
+    }
+    console.log(`[PageApi] 👤 Profile khách psid=${psid} thread=${threadId}: name="${profile.name || '-'}" avatar=${localAvatarPath ? 'OK' : 'không tải được'}`);
+  } finally {
+    inFlightCustomerProfiles.delete(key);
+  }
 }
 
 // Gửi tin nhắn Page qua Send API. Trả { success, messageId } hoặc { error, errorCode }.
@@ -766,6 +833,64 @@ async function resubscribeAllPages(database = getDb()) {
   return { total: sources.length, ok };
 }
 
+// ── B1+B2: nối hội thoại page về thread cũ t_<conv> của extension ──
+// B0 verify 2026-10-19: Graph trả conv.id trùng phần số với thread cũ
+// (405/684 conv khớp `t_...` cùng source). Biết conv id thì ghi tin vào
+// thread cũ — không tạo thêm thread psid song song (twin) nữa.
+const pageThreadCache = new Map(); // `${sourceId}:${psid}` -> threadId (ấm cho webhook, không cần biết conv)
+const pageThreadCacheWarming = new Set(); // chống chồng Graph call warm cho cùng 1 psid
+const loggedConvLinks = new Set(); // log 🔗 mỗi cặp conv→thread 1 lần
+const MAX_PAGE_THREAD_CACHE = 10000;
+
+function rememberPageThread(sourceId, psid, threadId) {
+  if (!sourceId || !psid || !threadId) return;
+  if (pageThreadCache.size > MAX_PAGE_THREAD_CACHE) pageThreadCache.clear();
+  pageThreadCache.set(String(sourceId) + ':' + String(psid), String(threadId));
+}
+
+function resolveConvLinkedThread(source, convId, database) {
+  const raw = String(convId || '').trim();
+  const convKey = raw.replace(/^t_/, '');
+  if (!raw || !convKey) return null;
+  const candidates = [raw, 't_' + convKey, convKey];
+  return database.prepare(`
+    SELECT id, COALESCE(external_thread_id, id) AS external_thread_id FROM threads
+    WHERE source_id = ? AND (id IN (?, ?, ?) OR COALESCE(external_thread_id, '') IN (?, ?, ?))
+    LIMIT 1
+  `).get(source.id, ...candidates, ...candidates) || null;
+}
+
+// Webhook chỉ biết psid. Fire-and-forget: hỏi Graph conv của psid 1 lần rồi
+// ghim kết quả vào cache — event sau nhảy thẳng vào thread cũ, hết tạo twin.
+async function warmPageThreadCache(source, contactPsid, fallbackThreadId, database) {
+  const cacheKey = source.id + ':' + contactPsid;
+  try {
+    const token = InboxSourceService.getDecryptedToken(source.id, database);
+    if (!token) return;
+    const data = await graphGet(source.external_id + '/conversations', {
+      user_id: contactPsid,
+      fields: 'id',
+      limit: '1',
+      access_token: token,
+    }, database);
+    if (data.error) return;
+    const convId = data.data?.[0]?.id;
+    if (convId) {
+      const linked = resolveConvLinkedThread(source, convId, database);
+      if (linked) {
+        rememberPageThread(source.id, contactPsid, linked.id);
+        console.log('[PageApi] 🔗 webhook psid=' + contactPsid + ' → thread cũ ' + linked.id + ' (conv=' + convId + ', page=' + source.external_id + ')');
+        return;
+      }
+    }
+    if (fallbackThreadId) rememberPageThread(source.id, contactPsid, fallbackThreadId);
+  } catch (_) {
+    // mạng/token lỗi — event sau sẽ warm lại
+  } finally {
+    pageThreadCacheWarming.delete(cacheKey);
+  }
+}
+
 function processMessagingEvent(event, source, io, database) {
   const message = event.message;
   if (!message) return null;
@@ -778,30 +903,54 @@ function processMessagingEvent(event, source, io, database) {
   const text = message.text || '';
   const ts = Number(event.timestamp || Date.now());
 
+  // B2: tra cache ấm trước — watcher/warm đã ghim thread cũ t_<conv> cho psid
+  // này thì tin đổ thẳng vào thread cũ, không tạo twin psid nữa. Cache trượt
+  // thì rơi về logic psid cũ và kích hoạt warm (fire-and-forget) cho event sau.
+  const cacheKey = source.id + ':' + contactPsid;
+  let cachedThread = pageThreadCache.has(cacheKey)
+    ? ConversationRepository.getThread(pageThreadCache.get(cacheKey), database)
+    : null;
+  if (cachedThread && String(cachedThread.source_id || '') !== String(source.id)) cachedThread = null;
+
   // Đa page / đa account: cùng một khách có thể nhắn NHIỀU page (thậm chí
   // qua account khác) — thread bare psid đã tồn tại ở nguồn KHÁC thì buộc
   // namespacing page:<pageId>:<psid> ngay từ đầu, tránh INSERT trùng khóa.
   let threadId = contactPsid;
-  const clash = database.prepare(
-    "SELECT id, source_id, account_id FROM threads WHERE id = ? OR COALESCE(external_thread_id, '') = ?"
-  ).get(contactPsid, contactPsid);
-  if (clash && String(clash.source_id || '') !== String(source.id)) {
-    threadId = 'page:' + pageId + ':' + contactPsid;
+  let externalThreadId = contactPsid;
+  if (cachedThread) {
+    threadId = cachedThread.id;
+    // external_thread_id thật của thread cũ (t_...): khiến upsertThread khớp
+    // đúng row thread cũ, không đụng thread psid nào khác trong cùng source.
+    externalThreadId = String(cachedThread.external_thread_id || cachedThread.id);
+  } else {
+    const clash = database.prepare(
+      "SELECT id, source_id, account_id FROM threads WHERE id = ? OR COALESCE(external_thread_id, '') = ?"
+    ).get(contactPsid, contactPsid);
+    if (clash && String(clash.source_id || '') !== String(source.id)) {
+      threadId = 'page:' + pageId + ':' + contactPsid;
+    }
   }
 
   const thread = ConversationRepository.upsertThread({
     id: threadId,
     account_id: source.owner_account_id || null,
     source_id: source.id,
-    external_thread_id: contactPsid,
+    external_thread_id: externalThreadId,
     contact_name: null,
     last_message: (text || '[Đính kèm]').substring(0, 200),
     is_unread: isOutgoing ? 0 : 1,
   }, database);
   if (!thread) return null;
+  rememberPageThread(source.id, contactPsid, thread.id);
+  if (!cachedThread && !pageThreadCacheWarming.has(cacheKey)) {
+    pageThreadCacheWarming.add(cacheKey);
+    warmPageThreadCache(source, contactPsid, thread.id, database);
+  }
   if (!thread.source_id) {
     database.prepare('UPDATE threads SET source_id = ? WHERE id = ?').run(source.id, thread.id);
   }
+  // Fire-and-forget: tự skip nếu contacts đã có tên thật hoặc đang fetch
+  enrichPageContactProfile(thread.id, source.id, contactPsid, io, database).catch(() => {});
   // Thread của source thuộc về chủ hiện hành — re-point nếu trước đây bị bind
   // vào account khác (account test cũ), ngược lại tin đổ vào account chết và
   // inbox của account đang dùng không thấy gì. Page chưa có chủ thì giữ nguyên.
@@ -912,7 +1061,33 @@ let pageWatcherTimer = null;
 let pageWatcherBusy = false;
 const pageWatcherState = new Map(); // sourceId -> Map(convId -> updated_time ms)
 
-function ensurePageThread(source, contactPsid, contactName, database) {
+function ensurePageThread(source, contactPsid, contactName, database, { convId } = {}) {
+  // B1: biết conv id (watcher) → tra thread cũ t_<conv> trước. Thấy thì ghi
+  // thẳng vào thread cũ — hết tạo twin psid song song với hội thoại trên web.
+  const linked = convId ? resolveConvLinkedThread(source, convId, database) : null;
+  if (linked) {
+    const incomingName = String(contactName || '').trim();
+    database.prepare(
+      'UPDATE threads SET contact_name = COALESCE(?, contact_name), is_unread = 0 WHERE id = ?'
+    ).run(incomingName && incomingName !== 'Khách hàng' ? incomingName : null, linked.id);
+    const linkedThread = ConversationRepository.getThread(linked.id, database);
+    if (!linkedThread) return null;
+    rememberPageThread(source.id, contactPsid, linkedThread.id);
+    const linkLogKey = convId + '→' + linkedThread.id;
+    if (!loggedConvLinks.has(linkLogKey)) {
+      if (loggedConvLinks.size > 5000) loggedConvLinks.clear();
+      loggedConvLinks.add(linkLogKey);
+      watcherLog('🔗 conv=' + convId + ' → thread cũ ' + linkedThread.id + ' (psid=' + contactPsid + ')');
+    }
+    enrichPageContactProfile(linkedThread.id, source.id, contactPsid, null, database).catch(() => {});
+    const linkedOwnerId = source.owner_account_id ? String(source.owner_account_id) : null;
+    if (linkedOwnerId) {
+      database.prepare(
+        'UPDATE threads SET account_id = ? WHERE id = ? AND (account_id IS NULL OR account_id != ?)'
+      ).run(linkedOwnerId, linkedThread.id, linkedOwnerId);
+    }
+    return linkedThread;
+  }
   let threadId = contactPsid;
   const clash = database.prepare(
     "SELECT id, source_id FROM threads WHERE id = ? OR COALESCE(external_thread_id, '') = ?"
@@ -929,9 +1104,12 @@ function ensurePageThread(source, contactPsid, contactName, database) {
     is_unread: 0,
   }, database);
   if (!thread) return null;
+  rememberPageThread(source.id, contactPsid, thread.id);
   if (!thread.source_id) {
     database.prepare('UPDATE threads SET source_id = ? WHERE id = ?').run(source.id, thread.id);
   }
+  // Watcher/referral không emit trực tiếp — persist; UI tự nạp ở lần refresh
+  enrichPageContactProfile(thread.id, source.id, contactPsid, null, database).catch(() => {});
   // owner_account_id bắt buộc phải là account THẬT — FK threads.account_id → accounts.id.
   // Watcher từng SELECT thiếu cột owner_account_id khiến fallback ID page đổ vào
   // account_id → FOREIGN KEY constraint failed, mất toàn bộ tin (lỗi 2026-10-06).
@@ -990,7 +1168,7 @@ async function watchPageConversations(source, io, database) {
         access_token: token,
       }, database);
       if (msgData.error) { failed++; watcherLog('kéo tin conv ' + conv.id + ' LỖI: ' + (msgData.error.message || '')); continue; }
-      const thread = ensurePageThread(source, psid, participant?.name || null, database);
+      const thread = ensurePageThread(source, psid, participant?.name || null, database, { convId: conv.id });
       if (!thread) { failed++; watcherLog('conv ' + conv.id + ': ensurePageThread trả null (psid=' + psid + ')'); continue; }
       for (const msg of (msgData.data || []).reverse()) {
         await enrichAttachmentUrls(msg, token, database);
@@ -1140,6 +1318,8 @@ module.exports = {
   listPages,
   savePages,
   sendPageMessage,
+  fetchMessengerCustomerProfile,
+  enrichPageContactProfile,
   getLastCustomerMessageAt,
   classifyReplyWindow,
   PAGE_REPLY_WINDOW_MS,

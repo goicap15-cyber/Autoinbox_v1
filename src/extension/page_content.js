@@ -192,6 +192,9 @@ if (isBusiness) {
     let lastReportedContactName = null;
     let lastReportedAvatarUrl = null;
     let lastReportedProfileUrl = null;
+    // Diagnostic bóc field profile (tạm): 1 dump right-rail / thread switch
+    let lastDiagThreadId = null;
+    let lastDiagAt = 0;
 
     // Verified via live DevTools inspection: Business Suite never exposes a real
     // per-message clock time (no data-timestamp/title/hover label). What DOM order
@@ -616,11 +619,14 @@ if (isBusiness) {
         return null;
     }
 
-    // Trích xuất Profile URL: ưu tiên module FbPageProfileUrlExtractor
-    function extractProfileUrlFromElement(container, fallbackThreadId) {
+    // Trích xuất Profile URL: ưu tiên module FbPageProfileUrlExtractor.
+    // KHÔNG phịa profile.php?id=<threadId> khi không tìm thấy link trong DOM -
+    // thread id Page (selected_item_id/PSID) không phải UID toàn cục của khách,
+    // phịa ra là link chết trang trắng (reproduce 2026-10-19).
+    function extractProfileUrlFromElement(container) {
         const extractor = globalThis.FbPageProfileUrlExtractor || (typeof window !== 'undefined' && window.FbPageProfileUrlExtractor);
         if (extractor && typeof extractor.extractProfileUrlFromElement === 'function') {
-            return extractor.extractProfileUrlFromElement(container, fallbackThreadId);
+            return extractor.extractProfileUrlFromElement(container);
         }
         if (container) {
             try {
@@ -632,9 +638,6 @@ if (isBusiness) {
                     if (m) return `https://www.facebook.com/profile.php?id=${m[1]}`;
                 }
             } catch (_) {}
-        }
-        if (fallbackThreadId && /^\d{10,18}$/.test(String(fallbackThreadId))) {
-            return `https://www.facebook.com/profile.php?id=${String(fallbackThreadId)}`;
         }
         return null;
     }
@@ -1354,6 +1357,7 @@ if (isBusiness) {
                 lastReportedContactName = null;
                 lastReportedAvatarUrl = null;
                 lastReportedProfileUrl = null;
+                lastDiagThreadId = null;
                 lastSyncedMountedSignature = '';
                 seedTimestampAnchorsForThread(currentThreadId);
             }
@@ -1550,19 +1554,42 @@ if (isBusiness) {
                 }
             }
 
+            // DIAGNOSTIC tạm (tìm link profile 2026-10-19): dump anchor trong
+            // right rail để phân biệt "Business Suite không có link profile"
+            // vs "link bị extractor từ chối". Xem data/composer-debug.log
+            // (kind=page_profile_diag). Bỏ khi kết luận xong.
+            if (currentThreadId && timeSinceSwitch >= 1500
+                && (currentThreadId !== lastDiagThreadId || Date.now() - lastDiagAt > 30000)) {
+                lastDiagThreadId = currentThreadId;
+                lastDiagAt = Date.now();
+                try {
+                    const diagRail = rightPane || document.querySelector('[role="complementary"]');
+                    const diagAnchors = diagRail
+                        ? Array.from(diagRail.querySelectorAll('a[href]')).slice(0, 25).map((a) => (a.getAttribute('href') || '').slice(0, 180))
+                        : [];
+                    chrome.runtime.sendMessage({
+                        type: 'CONTENT_DEBUG',
+                        data: {
+                            kind: 'page_profile_diag',
+                            thread_id: currentThreadId,
+                            right_pane: !!rightPane,
+                            right_pane_valid: !!isRightPaneValid,
+                            anchor_count: diagAnchors.length,
+                            anchors: diagAnchors
+                        }
+                    }).catch(() => {});
+                } catch (_) {}
+            }
+
             if (isRightPaneValid && rightPane) {
                 const rightAvatar = extractAvatarFromElement(rightPane);
                 if (rightAvatar) {
                     candidateAvatarUrl = rightAvatar;
                     candidateTier = 2;
                 }
-                const rightProfile = extractProfileUrlFromElement(rightPane, currentThreadId);
+                const rightProfile = extractProfileUrlFromElement(rightPane);
                 if (rightProfile) {
                     currentProfileUrl = rightProfile;
-                }
-            } else if (currentThreadId && /^\d{10,18}$/.test(String(currentThreadId))) {
-                if (!currentProfileUrl) {
-                    currentProfileUrl = `https://www.facebook.com/profile.php?id=${String(currentThreadId)}`;
                 }
             }
 
