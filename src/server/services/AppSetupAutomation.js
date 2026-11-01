@@ -40,6 +40,7 @@ const DEPS = {
   getOrCreateVerifyToken: () => '',
   recordRun: () => {},
   upsertPages: () => {},
+  reclaimPages: () => 0,
   listPages: () => [],
   savePages: () => {},
   appAdd: () => {},
@@ -47,6 +48,7 @@ const DEPS = {
   appGetLatest: () => null,
   appRemove: () => {},
   appList: () => [],
+  appMergeScanned: () => ({ added: 0, updated: 0, total: 0 }),
   clearPageTokens: () => {},
   removeAccountPages: () => {},
   knownPageIds: () => [],
@@ -90,31 +92,48 @@ const lastPasswords = new Map();
 // Các input chờ user từ CRM trong luồng đăng ký developer: syncId -> { type: resolve }
 const regWaiters = new Map();
 
+// Nhiều worker tab có thể chờ cùng một loại input user (vd tick tay webhook
+// khi lấy token song song) — lưu DANH SÁCH waiter theo type, một lần user
+// bấm xác nhận gỡ hết thay vì waiter sau đè waiter trước rồi treo 10 phút.
 function waitRegisterInput(job, type, timeoutMs, timeoutMsg) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => {
-      if (job.regWait) delete job.regWait[type];
+      const list = (job.regWait && job.regWait[type]) || [];
+      const i = list.findIndex((w) => w.resolve === resolve);
+      if (i >= 0) list.splice(i, 1);
       reject(new Error(timeoutMsg));
     }, timeoutMs);
     job.regWait = job.regWait || {};
-    job.regWait[type] = {
-      resolve: (v) => { clearTimeout(t); delete job.regWait[type]; resolve(v); },
-      reject: (e) => { clearTimeout(t); delete job.regWait[type]; reject(e); },
-    };
+    const list = job.regWait[type] || (job.regWait[type] = []);
+    list.push({
+      resolve: (v) => {
+        clearTimeout(t);
+        const i = list.findIndex((w) => w.resolve === resolve);
+        if (i >= 0) list.splice(i, 1);
+        resolve(v);
+      },
+      reject: (e) => {
+        clearTimeout(t);
+        const i = list.findIndex((w) => w.reject === reject);
+        if (i >= 0) list.splice(i, 1);
+        reject(e);
+      },
+    });
   });
 }
 
 function resolveRegisterInput(syncId, type, value) {
   const job = jobs.get(syncId);
-  if (!job || !job.regWait || !job.regWait[type]) return false;
-  job.regWait[type].resolve(value);
+  const list = job && job.regWait && job.regWait[type];
+  if (!list || !list.length) return false;
+  for (const w of [...list]) w.resolve(value);
   return true;
 }
 
 function cancelRegisterWaiters(job, reason) {
   if (!job.regWait) return;
   for (const type of Object.keys(job.regWait)) {
-    job.regWait[type].reject(new Error(reason));
+    for (const w of [...job.regWait[type]]) w.reject(new Error(reason));
   }
   job.regWait = {};
 }
@@ -210,6 +229,7 @@ function setStatus(job, status, message) {
 
 // Lỗi: đóng Chrome luôn — kết quả đã chụp lại tại dataDir/sync-error.png
 function failSoft(job, error) {
+  if (['success', 'error'].includes(job.status)) return; // đã hủy/xong rồi — giữ nguyên thông báo cũ
   job.error = String(error);
   job.status = 'error';
   job.message = job.error;
@@ -996,7 +1016,11 @@ async function clickMatching(page, source, selector) {
 async function passwordVisible(page) {
   return page
     .evaluate(() => {
-      const i = document.querySelector('#ajax_password, input[data-testid="reauth_password_field"]');
+      // Dialog re-auth mới của Meta render input không có #ajax_password /
+      // data-testid cũ — thêm input[type="password"] nhìn thấy được làm
+      // fallback (reproduce 2026-10-07 17:4x: "Hãy nhập lại mật khẩu" hiện
+      // giữa flow Tạo ứng dụng mà automation không nhận ra, job đứng mãi).
+      const i = document.querySelector('#ajax_password, input[data-testid="reauth_password_field"], input[type="password"]');
       return !!(i && i.offsetParent);
     })
     .catch(() => false);
@@ -1112,6 +1136,14 @@ async function pickOtherOption(job, page) {
 }
 
 function askPassword(job, page) {
+  // Worker tab chạy song song có thể gặp form re-auth cùng lúc — xếp hàng để
+  // job.waitPwd (1 slot) không bị đè; mật khẩu đã nhập trong phiên được tái dùng
+  // nên lần chờ sau thường tự điền, không hỏi lại user thêm lần nữa.
+  job.pwdChain = (job.pwdChain || Promise.resolve()).catch(() => {});
+  return job.pwdChain.then(() => askPasswordOnce(job, page));
+}
+
+async function askPasswordOnce(job, page) {
   return (async () => {
     // Ưu tiên mật khẩu user đã nhập trong phiên này (theo uid, chỉ giữ trong RAM)
     const lp = lastPasswords.get(job.uid);
@@ -2102,6 +2134,47 @@ function startPageSetup(appId, pageIds, uid, webhookUrl) {
   return { job };
 }
 
+// Tab worker song song cho Lấy token: mở lại trang cấu hình app với cùng phiên
+// (cookie đã lấy sẵn) và mở rộng card "Tạo mã truy cập" chờ xử lý page riêng.
+async function openPageSetupWorkerTab(job, browser, cookies) {
+  const wp = await browser.newPage();
+  await wp.setUserAgent(UA);
+  await wp.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
+  await injectSession(wp, { cookies });
+  await wp.goto(`https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
+  if (/log_in|login\.php/.test(wp.url() || '')) {
+    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM.');
+  }
+  await sleep(2500);
+  for (let i = 0; i < 5; i++) {
+    const st = await expandCard(wp, 'tạo mã truy cập|generate access token');
+    if (st !== 'no-heading') break;
+    await sleep(1500);
+  }
+  return wp;
+}
+
+// Bảng token có thể render chậm trên tab vừa mở — chờ hàng của page xuất hiện
+// (mở rộng card lại mỗi vòng) trước khi bấm Add subscription / Tạo.
+async function waitPageSetupRow(tab, pageId, timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const has = await tab
+      .evaluate((pid) => {
+        const rows = [...document.querySelectorAll('tbody tr[role="row"]')];
+        return rows.some((r) => {
+          const s = r.querySelector('span[label]');
+          return s && s.getAttribute('label') === pid;
+        });
+      }, String(pageId))
+      .catch(() => false);
+    if (has) return true;
+    await expandCard(tab, 'tạo mã truy cập|generate access token').catch(() => {});
+    await sleep(1500);
+  }
+  return false;
+}
+
 async function runPageSetup(job, uid) {
   const browser = await launchAutomationChrome();
   job.browser = browser;
@@ -2116,7 +2189,8 @@ async function runPageSetup(job, uid) {
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
 
-  await injectSession(page, { cookies: await ensureAccountCookies(job, uid) });
+  const sessionCookies = await ensureAccountCookies(job, uid);
+  await injectSession(page, { cookies: sessionCookies });
 
   setStatus(job, 'loading_apps', 'Đang mở cấu hình Messenger…');
   await page.goto(`https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
@@ -2192,14 +2266,56 @@ async function runPageSetup(job, uid) {
   }
 
   const results = [];
-  for (const pageId of targets) {
-    setStatus(job, 'subscribing', `Đang đăng ký webhook cho trang ${pageId}…`);
-    await subscribePageFields(job, page, pageId);
+  // Xử lý song song bằng nhiều tab Chrome trên cùng 1 cửa sổ: mỗi tab mở lại
+  // trang cấu hình app, nhận pageId từ hàng đợi chung rồi tự đăng ký webhook +
+  // tạo token cho page của nó. Dialog subscribe/token là DOM riêng từng tab nên
+  // các tab không giành nhau; form re-auth dùng chung job.waitPwd qua lock
+  // trong askPassword. 3 tab là mức an toàn cho Facebook (nhiều hơn dễ dính
+  // checkpoint) và đủ nhẹ cho máy khách.
+  const PAGE_SETUP_PARALLEL_TABS = 3;
+  const workerCount = Math.max(1, Math.min(PAGE_SETUP_PARALLEL_TABS, targets.length));
+  let cursor = 0;
+  let doneCount = 0;
 
-    setStatus(job, 'generating_token', `Đang tạo Page Access Token cho trang ${pageId}…`);
-    const token = await generatePageToken(job, page, pageId);
-    results.push({ pageId, token: token || null });
+  const worker = async (tab) => {
+    while (job.browser && !['success', 'error'].includes(job.status)) {
+      const idx = cursor;
+      cursor += 1;
+      if (idx >= targets.length) break;
+      const pageId = targets[idx];
+      try {
+        if (!await waitPageSetupRow(tab, pageId)) {
+          try { DEPS.log('[pages] Không thấy hàng của trang ' + pageId + ' trong bảng token — bỏ qua.'); } catch (_) {}
+          results.push({ pageId, token: null });
+          doneCount += 1;
+          continue;
+        }
+        setStatus(job, 'subscribing', `Đang đăng ký webhook cho trang ${pageId} (${doneCount + 1}/${targets.length}, ${workerCount} luồng)…`);
+        await subscribePageFields(job, tab, pageId);
+
+        setStatus(job, 'generating_token', `Đang tạo Page Access Token cho trang ${pageId} (${doneCount + 1}/${targets.length}, ${workerCount} luồng)…`);
+        const token = await generatePageToken(job, tab, pageId);
+        results.push({ pageId, token: token || null });
+        doneCount += 1;
+        setStatus(job, 'generating_token', `Xong ${doneCount}/${targets.length} trang…`);
+      } catch (e) {
+        if (!job.browser) throw e; // Chrome bị đóng — dừng toàn bộ worker
+        try { DEPS.log('[pages] Lỗi xử lý trang ' + pageId + ': ' + ((e && e.message) || e)); } catch (_) {}
+        results.push({ pageId, token: null });
+        doneCount += 1;
+      }
+    }
+  };
+
+  const tabs = [page];
+  for (let i = 1; i < workerCount; i++) {
+    try { tabs.push(await openPageSetupWorkerTab(job, browser, sessionCookies)); } catch (e) {
+      if (!job.browser) throw e;
+      try { DEPS.log('[pages] Không mở được tab song song #' + (i + 1) + ': ' + ((e && e.message) || e)); } catch (_) {}
+      break;
+    }
   }
+  await Promise.all(tabs.map((t) => worker(t)));
 
   // Cập nhật token vào pages.json + bản ghi app mới nhất
   const allPages = DEPS.listPages(job.uid);
@@ -2218,14 +2334,20 @@ async function runPageSetup(job, uid) {
   // Đăng ký webhook qua Graph ngay với token vừa lấy — nếu bước DOM
   // (subscribeAppToPageObject) fail âm thầm thì bước này cứu, và kết quả
   // được BÁO RÕ cho user thay vì im lặng (báo lỗi 2026-10-06).
+  // Chạy 5 luồng cùng lúc — mỗi page là 1 POST Graph độc lập.
   const subResults = [];
-  for (const r of results) {
-    if (!r.token) continue;
-    setStatus(job, 'subscribing', `Đang đăng ký webhook cho trang ${r.pageId} (Graph)…`);
-    const sub = await graphSubscribePage(r.pageId, r.token);
-    subResults.push({ pageId: r.pageId, ...sub });
-    try { DEPS.log(`[subscribe] Graph ${r.pageId}: ${sub.ok ? 'OK' : 'FAIL - ' + sub.reason}`); } catch (_) {}
-  }
+  const tokenResults = results.filter((r) => r.token);
+  let subCursor = 0;
+  setStatus(job, 'subscribing', `Đang đăng ký webhook qua Graph cho ${tokenResults.length} trang…`);
+  await Promise.all(Array.from({ length: Math.min(5, Math.max(1, tokenResults.length)) }, async () => {
+    while (subCursor < tokenResults.length && job.browser) {
+      const r = tokenResults[subCursor];
+      subCursor += 1;
+      const sub = await graphSubscribePage(r.pageId, r.token);
+      subResults.push({ pageId: r.pageId, ...sub });
+      try { DEPS.log(`[subscribe] Graph ${r.pageId}: ${sub.ok ? 'OK' : 'FAIL - ' + sub.reason}`); } catch (_) {}
+    }
+  }));
 
   const okCount = results.filter((r) => r.token).length;
   const summary = results.map((r) => {
@@ -2383,7 +2505,7 @@ async function subscribePageFields(job, page, pageId) {
     await clickWhenEnabled(page, CONFIRM_SUBSCRIBE_RE, 20000);
   }
   await sleep(2500);
-  await page.screenshot({ path: path.join(DATA_DIR, 'subscribe-debug.png') }).catch(() => {});
+  await page.screenshot({ path: path.join(DATA_DIR, `subscribe-debug-${pageId}.png`) }).catch(() => {});
   // Đóng dialog nếu còn
   await clickMatching(page, '^(?:đóng|close|x)$', '[role="button"], button');
   await sleep(1000);
@@ -2572,8 +2694,9 @@ async function generatePageToken(job, page, pageId) {
   }
   if (valid(token)) token = token.trim();
 
-  // Chụp lại màn hình dialog token để đối chiếu nếu cần debug
-  await page.screenshot({ path: path.join(DATA_DIR, 'token-debug.png') }).catch(() => {});
+  // Chụp lại màn hình dialog token để đối chiếu nếu cần debug (tên theo page
+  // vì các tab song song chụp cùng lúc, ghi đè nhau thì mất dấu vết)
+  await page.screenshot({ path: path.join(DATA_DIR, `token-debug-${pageId}.png`) }).catch(() => {});
 
   // Đóng dialog
   await clickMatching(page, '^(?:đóng|close|đã hiểu|got it|ok|x|done|xong)$', '[role="button"], button');
@@ -2581,22 +2704,27 @@ async function generatePageToken(job, page, pageId) {
   return valid(token) ? token.trim() : null;
 }
 
-/* ---------- Đồng bộ PAGE MỚI: quét danh sách page của account, chỉ thêm page chưa có ----------
+/* ---------- Đồng bộ PAGE: quét danh sách page của account ----------
  * Nguồn: bảng "Tạo mã truy cập" trong messenger_api_settings — bấm See more
- * mở bảng rồi cuộn xuống tới khi hết page mới. Page đã có trong DB thì bỏ qua.
- * Page nào đã có trong inbox_sources (mọi trạng thái) thì bỏ qua.
+ * mở bảng rồi cuộn xuống tới khi hết page. Page chưa có trong DB thì thêm mới;
+ * page đã có nhưng chủ là account khác/mồ côi (xóa tk rồi login lại) thì gắn
+ * lại về account đang chạy.
  */
-function startPageSync(uid) {
+function startPageSync(uid, appId = null) {
   if (getActive()) return { error: 'Đã có tác vụ đang chạy. Hãy hủy hoặc chờ xong.' };
+  // User có thể chọn app cụ thể trong CRM (popup chọn app) — không chọn thì
+  // dùng app mới nhất như trước.
+  const requested = /^\d+$/.test(String(appId || '')) ? String(appId) : null;
   const latest = DEPS.appGetLatest(uid);
-  const appId = latest && /^\d+$/.test(String(latest.appId || '')) ? String(latest.appId) : null;
-  if (!appId) return { error: 'Chưa có app nào. Hãy bấm "Tạo app & Webhook" trước.' };
+  const target = requested
+    || (latest && /^\d+$/.test(String(latest.appId || '')) ? String(latest.appId) : null);
+  if (!target) return { error: 'Chưa có app nào. Hãy bấm "Tạo app & Webhook" hoặc "Đồng bộ app" trước.' };
   const id = crypto.randomUUID();
   const job = {
     id,
     uid,
     kind: 'sync-pages',
-    appId,
+    appId: target,
     status: 'opening_browser',
     message: 'Đang mở cửa sổ Chrome…',
     error: null,
@@ -2681,10 +2809,154 @@ async function runPageSync(job, uid) {
   if (newOnes.length) {
     DEPS.upsertPages(uid, newOnes.map((p) => ({ pageId: String(p.pageId), name: p.name || ('Page ' + p.pageId) })));
   }
-  const msg = 'Đã quét ' + all.length + ' page: ' + (newOnes.length ? ('có ' + newOnes.length + ' page MỚI — đã thêm vào danh sách (' + newOnes.map((p) => p.name).slice(0, 5).join(', ') + (newOnes.length > 5 ? '…' : '') + ')') : 'không có page mới nào.') + ' Bấm "Lấy token" nếu page mới cần token.';
+  // Page đã known nhưng chủ là account khác/mồ côi (xóa tk rồi login lại là ca
+  // chính) — gắn lại về account đang chạy Đồng bộ, không thì popup mãi trống.
+  const reclaimed = DEPS.reclaimPages(
+    uid,
+    all.filter((p) => known.has(String(p.pageId))).map((p) => String(p.pageId))
+  );
+  const parts = [];
+  if (newOnes.length) {
+    parts.push('thêm ' + newOnes.length + ' page mới (' + newOnes.map((p) => p.name).slice(0, 5).join(', ') + (newOnes.length > 5 ? '…' : '') + ')');
+  }
+  if (reclaimed) parts.push('gắn lại ' + reclaimed + ' page về account này');
+  const msg = 'Đã quét ' + all.length + ' page: '
+    + (parts.length ? parts.join('; ') + '.' : 'không có gì thay đổi.')
+    + ' Bấm "Lấy token" nếu page chưa có token.';
+  // Đóng dấu app vừa được dùng để đồng bộ page — CRM UI vẽ viền nhận biết
+  try { DEPS.appUpdate(uid, job.appId, { lastPageSyncAt: new Date().toISOString() }); } catch (_) {}
   setStatus(job, 'success', msg);
   DEPS.recordRun('success', msg);
   closeBrowser(job);
 }
 
-module.exports = { configurePageSetupAutomation, startPageSync, startAppCreation, startDeleteApp, startPageSetup, getJob, getActive, cancelSync, submitPassword, resumeSync, resolveRegisterInput, resendRegisterSms };
+/* ---------- Đồng bộ app: quét MỌI app trên developers.facebook.com/apps/ ---------- */
+
+function startAppsScan(uid) {
+  if (getActive()) return { error: 'Đã có tác vụ đang chạy. Hãy hủy hoặc chờ xong.' };
+  const id = crypto.randomUUID();
+  const job = {
+    id,
+    uid,
+    kind: 'sync-apps',
+    status: 'opening_browser',
+    message: 'Đang mở cửa sổ Chrome…',
+    error: null,
+    browser: null,
+    page: null,
+    createdAt: Date.now(),
+  };
+  jobs.set(id, job);
+  activeId = id;
+  runAppsScan(job, uid).catch((e) => failSoft(job, (e && e.message) || 'Lỗi không xác định'));
+  return { job };
+}
+
+// Đọc card app trong DOM danh sách: App ID từ href /apps/<id>/dashboard/,
+// tên từ [role="heading"], chế độ/loại từ dòng text "Chế độ: …" / "Loại: …".
+// Không bám class tự sinh của FB — chỉ dùng href + role + text.
+async function scrapeAppCards(page) {
+  return page
+    .evaluate(() => {
+      const vis = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
+      const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+      const anchors = [...document.querySelectorAll('a[href*="/apps/"]')]
+        .filter((a) => vis(a) && /\/apps\/\d+\/dashboard/.test(a.getAttribute('href') || ''));
+      const out = [];
+      const seen = new Set();
+      for (const a of anchors) {
+        const m = (a.getAttribute('href') || '').match(/\/apps\/(\d+)\/dashboard/);
+        if (!m || seen.has(m[1])) continue;
+        const appId = m[1];
+        // Card = tổ tiên gần nhất chứa heading tên app + dòng "Chế độ";
+        // fallback: tổ tiên gần nhất chứa heading (layout FB có thể khác).
+        let card = null;
+        let fallback = null;
+        let node = a;
+        for (let k = 0; k < 15 && node; k++) {
+          node = node.parentElement;
+          if (!node) break;
+          const hasHeading = !!node.querySelector('[role="heading"]');
+          if (!fallback && hasHeading) fallback = node;
+          if (hasHeading && /(?:chế độ|mode)\s*:/i.test(node.textContent || '')) { card = node; break; }
+        }
+        seen.add(appId);
+        if (!card && !fallback) {
+          out.push({ appId, name: null, mode: null, type: null });
+          continue;
+        }
+        const root = card || fallback;
+        const text = root.textContent || '';
+        const heading = root.querySelector('[role="heading"]');
+        const modeM = text.match(/(?:chế độ|mode)\s*:\s*(.{2,60}?)(?=\s*(?:loại|type)\s*:|$)/i);
+        const typeM = text.match(/(?:loại|type)\s*:\s*(.{2,60}?)(?=\s*(?:chế độ|mode)\s*:|$)/i);
+        out.push({
+          appId,
+          name: heading ? clean(heading.textContent) : null,
+          mode: modeM ? clean(modeM[1]) : null,
+          type: typeM ? clean(typeM[1]) : null,
+        });
+      }
+      return out;
+    })
+    .catch(() => []);
+}
+
+async function runAppsScan(job, uid) {
+  const browser = await launchAutomationChrome();
+  job.browser = browser;
+  browser.on('disconnected', () => {
+    job.browser = null;
+    if (!['success', 'error'].includes(job.status)) failSoft(job, 'Cửa sổ Chrome đã bị đóng.');
+  });
+  const page = await browser.newPage();
+  job.page = page;
+  await page.setUserAgent(UA);
+  await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
+  await injectSession(page, { cookies: await ensureAccountCookies(job, uid) });
+
+  setStatus(job, 'loading_apps', 'Đang mở danh sách ứng dụng…');
+  await page.goto(APPS_URL, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+  if (/log_in|login\.php/.test(page.url() || '')) {
+    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM rồi chạy lại.');
+  }
+  await page
+    .waitForSelector('a[href*="/apps/"]', { timeout: 30000 })
+    .catch(() => {});
+  await sleep(1500);
+
+  // Cuộn + quét tới khi 3 vòng liền không thấy app mới (FB lazy-render danh sách)
+  const seen = new Map();
+  let stable = 0;
+  for (let round = 0; round < 40; round++) {
+    const found = await scrapeAppCards(page);
+    let added = 0;
+    for (const a of found) {
+      if (!seen.has(a.appId)) { seen.set(a.appId, a); added++; }
+    }
+    setStatus(job, 'scanning', 'Đang quét: đã thấy ' + seen.size + ' ứng dụng' + (added ? ' (+' + added + ' mới)' : '') + '…');
+    if (added === 0) {
+      stable++;
+      if (stable >= 3) break;
+    } else stable = 0;
+    await page.evaluate(() => { window.scrollBy(0, 2000); }).catch(() => {});
+    await sleep(1200);
+  }
+
+  if (!seen.size) {
+    await errorShot(page, 'sync-error.png');
+    throw new Error('Không quét được ứng dụng nào trên trang Apps. Hãy kiểm tra cửa sổ Chrome.');
+  }
+
+  const all = [...seen.values()];
+  const r = DEPS.appMergeScanned(uid, all);
+  const names = all.map((a) => a.name).filter(Boolean);
+  const msg = 'Đã đồng bộ ' + all.length + ' ứng dụng'
+    + (names.length ? ': ' + names.slice(0, 4).join(', ') + (names.length > 4 ? '…' : '') : '')
+    + ' — thêm mới ' + r.added + ', cập nhật ' + r.updated + '.';
+  setStatus(job, 'success', msg);
+  DEPS.recordRun('success', msg);
+  closeBrowser(job);
+}
+
+module.exports = { configurePageSetupAutomation, startPageSync, startAppCreation, startDeleteApp, startPageSetup, startAppsScan, getJob, getActive, cancelSync, submitPassword, resumeSync, resolveRegisterInput, resendRegisterSms };
