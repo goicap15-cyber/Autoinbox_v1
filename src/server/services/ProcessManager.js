@@ -1155,6 +1155,29 @@ if ($processedCount -eq 0) {
     return procInfo.status || 'STOPPED';
   }
 
+  // Browser CDP đang gắn với process/pending key (dùng cho automation nhập cookie).
+  getAttachedBrowser(key) {
+    const entry = this.processes.get(String(key));
+    if (!entry) return null;
+    if (entry.pid && !this.isProcessAlive(entry.pid)) {
+      this.processes.delete(String(key));
+      return null;
+    }
+    return entry.browser && entry.browser.connected ? entry.browser : null;
+  }
+
+  // Đóng mọi Chrome pending_* còn treo (phiên nhập chưa promote thành account) —
+  // gọi khi watchdog huỷ đợt nhập để không dồn window "ma".
+  stopPendingProcesses() {
+    const pendingKeys = [...this.processes.keys()].filter((key) => String(key).startsWith('pending_'));
+    for (const key of pendingKeys) {
+      try { this.stopAccountProcess(key); } catch (err) {
+        console.warn(`[ProcessManager] Không dừng được pending process ${key}:`, err.message);
+      }
+    }
+    return pendingKeys.length;
+  }
+
   minimizeAccountForSync(accountId) {
     const procInfo = this.processes.get(accountId);
     if (!procInfo?.pid) return false;

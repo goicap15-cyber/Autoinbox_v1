@@ -111,6 +111,20 @@ function isBareVietnamMobileText(text) {
 
     /^Bạn đã phản hồi ghi chú của (?:họ|họ\.|họ\.?)$/i,
     /^Bạn đã trả lời tin của .+\.$/i,
+    // Header trích dẫn reply của Messenger: bubble quote render "Bạn đã trả
+    // lời {tên người được reply}" (EN "You replied to {name}") trong row tin
+    // reply - DOM nhặt thành tin outgoing riêng với mid thật (reproduce
+    // 2026-10-11: nhóm Bi-aaaaaaa dính "Bạn đã trả lời Tiến Quang"/"...Linh").
+    // Tin operator thật dạng "Bạn đã trả lời chưa?" / "Bạn đã trả lời em rồi"
+    // phải sống sót -> loại từ nối/câu hỏi ở đuôi trước khi nhận diện. Đồng bộ
+    // với src/server/utils/textFilter.js và heal (4c) trong server.js.
+    /^Bạn đã trả lời (?!(?:.*\s)?(?:chưa|rồi|xong|sao|đâu|gì|à|hả|nhỉ|nha|thôi|luôn|vậy|đấy|đó|nhé)\s*[?！?.!…]*$)[^?！?\n]{1,60}$/iu,
+    /^You replied to (?!(?:.*\s)?(?:yet|already|right|now|ok|okay)\s*[?！?.!…]*$)[^?！?\n]{1,60}$/iu,
+    // Chiều ngược: quote reply của KHÁCH render "{tên khách} đã trả lời bạn" /
+    // "{name} replied to you" - cùng lớp metadata, reproduce 2026-10-11
+    // (thread Li Min Tài ×3). Từ nối đuôi được giữ lại như phía trên.
+    /^(?!.+(?:chưa|rồi|xong|sao|đâu|gì|à|hả|nhỉ|nha|thôi|luôn|vậy|đấy|đó|nhé)\s*[?！?.!…]*$)[^?！?\n]{1,48} đã trả lời bạn\.?$/iu,
+    /^(?!.+(?:yet|already|right|now|ok|okay)\s*[?！?.!…]*$)[^?！?\n]{1,48} replied to you\.?$/iu,
     // Chip gợi ý trả lời của Messenger (suggested replies hiện dưới ô soạn thảo,
     // vd 'Trao đổi thêm?') - DOM observer đọc nhầm thành bubble tin của khách.
     /^Trao đổi thêm\??$/i,

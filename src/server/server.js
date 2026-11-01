@@ -73,8 +73,12 @@ LinkPreviewService.onImageNeeded = (urlHash, url) => {
     }
   }
 };
+<<<<<<< Updated upstream
 const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
 const { normalizePreviewText, shouldFlipUnreadFromPreview, shouldBumpUnreadFromSidebar, HintUnreadTracker } = require('./utils/unreadGuard');
+=======
+const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isSidebarActivityNotification, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
+>>>>>>> Stashed changes
 const { sidebarShouldSkipSweep, isStaleThreadLastActivity } = require('./utils/sidebarCompare');
 const { isKnownPageSystemNotice } = require('./utils/pageSystemNotice');
 const { parsePageIdFromInput } = require('./utils/pageIdParser');
@@ -95,6 +99,8 @@ const AccountService = require('./services/AccountService');
 const FollowupService = require('./services/FollowupService');
 const InboxSourceService = require('./services/InboxSourceService');
 const InboxSyncScheduler = require('./services/InboxSyncScheduler');
+const VietSeedingImportService = require('./services/VietSeedingImportService');
+const CommentLeadsService = require('./services/CommentLeadsService');
 const InitialMessageSweepService = require('./services/InitialMessageSweepService');
 // Chức năng Page chạy bằng Messenger Platform chính thức (Graph API + webhook)
 const pageApiService = require('./services/PageApiService');
@@ -897,6 +903,76 @@ function isRenderableStoredMessage(message = {}) {
   );
 }
 
+// Avatar thành viên hội thoại NHÓM: lưu file local theo (thread, tên thành
+// viên) - khác avatar tổng của thread (contacts.avatar_url). Chỉ ghi khi chưa
+// có để một URL CDN hết hạn không xóa avatar tốt đã lưu.
+async function upsertMemberAvatar(threadId, senderName, avatarData, { onlyIfMissing = true } = {}) {
+  const name = String(senderName || '').trim();
+  const data = String(avatarData || '');
+  if (!threadId || !name || !data) return null;
+  try {
+    if (onlyIfMissing) {
+      const existing = db.prepare(
+        'SELECT avatar_url FROM message_sender_avatars WHERE thread_id = ? AND sender_name = ?'
+      ).get(String(threadId), name);
+      if (existing?.avatar_url) return existing.avatar_url;
+    }
+    const slug = crypto.createHash('md5').update(`${threadId}::${name}`).digest('hex').substring(0, 10);
+    const localAvatarPath = await saveAvatarFromBase64OrUrl(data, `sender_${threadId}_${slug}`);
+    if (!localAvatarPath) return null;
+    db.prepare(`
+      INSERT INTO message_sender_avatars (thread_id, sender_name, avatar_url, updated_at)
+      VALUES (?, ?, ?, datetime('now'))
+      ON CONFLICT(thread_id, sender_name) DO UPDATE SET
+        avatar_url = COALESCE(excluded.avatar_url, message_sender_avatars.avatar_url),
+        updated_at = datetime('now')
+    `).run(String(threadId), name, localAvatarPath);
+    return localAvatarPath;
+  } catch (err) {
+    console.warn('[WS] Member avatar save failed:', err.message);
+    return null;
+  }
+}
+
+// Quote reply: tìm tin gốc được trích dẫn theo nội dung reply_to_text trong
+// cùng thread. Ưu tiên tin đứng TRƯỚC reply (timestamp <=) và gần nhất; nếu
+// không có thì tin gần nhất bất kể phía (history-sync timestamp có thể lệch).
+// Trả về { id, name } — id = messages.id của tin gốc (UI click-lướt theo
+// data-msg-key), name = "Bạn" nếu tin gốc do operator gửi, còn lại
+// sender_name (nhóm lưu tên thành viên) / contact_name (1-1).
+function resolveReplyTargetRow(threadId, replyToText, beforeTsMs = null) {
+  const text = String(replyToText || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+  if (!text || !threadId) return null;
+  const base = `
+    SELECT m.id, m.is_outgoing, m.sender_name, t.contact_name
+    FROM messages m JOIN threads t ON t.id = m.thread_id
+    WHERE m.thread_id = ? AND TRIM(REPLACE(REPLACE(m.content, char(10), ' '), char(13), ' ')) = ?`;
+  const ts = Number.isFinite(Number(beforeTsMs)) && Number(beforeTsMs) > 0 ? Number(beforeTsMs) : null;
+  let row = db.prepare(`${base} AND m.timestamp_ms <= ? ORDER BY m.timestamp_ms DESC, m.id DESC LIMIT 1`)
+    .get(threadId, text, ts ?? Number.MAX_SAFE_INTEGER);
+  if (!row && ts != null) {
+    row = db.prepare(`${base} ORDER BY ABS(m.timestamp_ms - ?) ASC LIMIT 1`).get(threadId, text, ts);
+  }
+  if (!row) row = db.prepare(`${base} ORDER BY m.timestamp_ms DESC, m.id DESC LIMIT 1`).get(threadId, text);
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    name: Number(row.is_outgoing) === 1
+      ? 'Bạn'
+      : (String(row.sender_name || '').trim() || String(row.contact_name || '').trim() || null)
+  };
+}
+
+function storeReplyTargetForRow(messageRowId, threadId, replyToText, beforeTsMs = null) {
+  const target = resolveReplyTargetRow(threadId, replyToText, beforeTsMs);
+  if (!target) return false;
+  try {
+    db.prepare('UPDATE messages SET reply_to_id = ?, reply_to_sender_name = ? WHERE id = ?')
+      .run(target.id, target.name, messageRowId);
+    return true;
+  } catch (_) { return false; }
+}
+
 function prepareMessagesForClient(rows = []) {
   const prepared = rows
     .map((row) => {
@@ -910,6 +986,30 @@ function prepareMessagesForClient(rows = []) {
     // installed. Hide an incoming echo of the operator's just-sent text here
     // too, not only at the WebSocket write boundary.
     .filter((row) => !isRecentOutgoingTextEcho(row.thread_id, row));
+  // Avatar từng thành viên nhóm: tra theo (thread_id, sender_name) một lượt
+  // cho cả snapshot thay vì query per-row.
+  const memberNamesByThread = new Map();
+  for (const row of prepared) {
+    const name = String(row.sender_name || '').trim();
+    if (!name || Number(row.is_outgoing) === 1) continue;
+    if (!memberNamesByThread.has(row.thread_id)) memberNamesByThread.set(row.thread_id, new Set());
+    memberNamesByThread.get(row.thread_id).add(name);
+  }
+  for (const [threadId, names] of memberNamesByThread) {
+    try {
+      const nameList = [...names];
+      const avatarRows = db.prepare(`
+        SELECT sender_name, avatar_url FROM message_sender_avatars
+        WHERE thread_id = ? AND sender_name IN (${nameList.map(() => '?').join(',')})
+      `).all(threadId, ...nameList);
+      const avatarByName = new Map(avatarRows.map((r) => [String(r.sender_name), r.avatar_url]));
+      for (const row of prepared) {
+        const name = String(row.sender_name || '').trim();
+        const localAvatar = name && avatarByName.get(name);
+        if (localAvatar) row.sender_avatar_url = localAvatar;
+      }
+    } catch (_) { /* enrich là lành hóa */ }
+  }
   LinkPreviewService.attachPreviews(prepared);
   return prepared;
 }
@@ -1090,7 +1190,72 @@ function cleanupStalePendingOutbound(threadId) {
   return deletedCount;
 }
 
-async function sendViaExtension(thread_id, text, client_message_id = null) {
+function normMentionKey(name) {
+  return String(name || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Bóc tách "@Tên" user TỰ GÕ trong text (không chọn dropdown CRM => mentions rỗng).
+// Đối chiếu group_members đã quét: với mỗi @ đầu dòng/sau khoảng trắng, thử khớp
+// tên dài nhất trước (tối đa 6 từ); tên phải đứng trước khoảng trắng hoặc cuối
+// text — giống điều kiện extension dùng để biến chip. Không khớp => text thường.
+function autoDetectMentionsFromText(text, threadId) {
+  const raw = String(text || '');
+  if (!raw.includes('@')) return [];
+  let members;
+  try {
+    members = db.prepare('SELECT name FROM group_members WHERE thread_id = ?').all(threadId)
+      .map((r) => String(r?.name || '').trim())
+      .filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+  if (!members.length) return [];
+  const byKey = new Map();
+  for (const name of members) {
+    const key = normMentionKey(name);
+    if (key && !byKey.has(key)) byKey.set(key, name);
+  }
+  const found = [];
+  const seen = new Set();
+  const re = /(^|\s)@([^\n@]{1,120})/g;
+  let match;
+  while ((match = re.exec(raw)) !== null) {
+    const tokens = String(match[2] || '').split(/\s+/).filter(Boolean);
+    for (let len = Math.min(6, tokens.length); len >= 1; len--) {
+      const name = byKey.get(normMentionKey(tokens.slice(0, len).join(' ')));
+      if (name) {
+        if (!seen.has(name)) { seen.add(name); found.push({ name, user_id: '' }); }
+        break;
+      }
+    }
+  }
+  return found;
+}
+
+async function sendViaExtension(thread_id, text, client_message_id = null, mentions = null) {
+  // Mention chọn từ composer CRM (dùng để extension click dropdown gốc của FB
+  // khi gõ tin) — sanitize tối đa 20 mục, chỉ giữ name + user_id.
+  let mentionList = Array.isArray(mentions)
+    ? mentions.slice(0, 20)
+      .map((m) => ({ name: String(m?.name || '').trim().slice(0, 80), user_id: String(m?.user_id ?? m?.userId ?? '').trim().slice(0, 40) }))
+      .filter((m) => m.name)
+    : [];
+  const autoMentions = autoDetectMentionsFromText(text, thread_id);
+  if (autoMentions.length) {
+    const keys = new Set(mentionList.map((m) => normMentionKey(m.name)));
+    for (const am of autoMentions) {
+      const key = normMentionKey(am.name);
+      if (!keys.has(key)) { keys.add(key); mentionList.push(am); }
+    }
+    mentionList = mentionList.slice(0, 20);
+    console.log(`[Mention] auto-split thread=${thread_id}: ${mentionList.map((m) => m.name).join(' | ')}`);
+  }
   // Tìm account_id của thread
   const thread = db.prepare(
     'SELECT account_id, contact_name, thread_url FROM threads WHERE id = ?'
@@ -1165,6 +1330,7 @@ async function sendViaExtension(thread_id, text, client_message_id = null) {
         expected_contact_name: thread.contact_name || null,
         content: text,
         client_message_id: clientMsgId,
+        ...(mentionList.length ? { mentions: mentionList } : {})
       }
     }));
     trace('BACKEND_DISPATCHED_EXTENSION');
@@ -1292,6 +1458,7 @@ setupAutomation.configurePageSetupAutomation({
     try { appendRotating(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status, note: String(note || '').slice(0, 300) }) + '\n', 10 * 1024 * 1024); } catch (_) {}
   },
   upsertPages: (accountId, pages) => pageApiService.upsertPages(accountId, pages),
+  reclaimPages: (accountId, pageIds) => pageApiService.reclaimPages(accountId, pageIds),
   listPages: (accountId) => pageApiService.listPages(accountId),
   savePages: (accountId, pages) => pageApiService.savePages(accountId, pages),
   appAdd: (accountId, rec) => pageApiService.appAdd(accountId, rec),
@@ -1299,6 +1466,7 @@ setupAutomation.configurePageSetupAutomation({
   appGetLatest: (accountId) => pageApiService.appGetLatest(accountId),
   appRemove: (accountId, appId) => pageApiService.appRemove(accountId, appId),
   appList: (accountId) => pageApiService.appList(accountId),
+  appMergeScanned: (accountId, apps) => pageApiService.appMergeScanned(accountId, apps),
   clearPageTokens: (accountId) => pageApiService.clearPageTokens(accountId),
   removeAccountPages: (accountId) => pageApiService.removeAccountPages(accountId),
   knownPageIds: () => pageApiService.knownPageIds(),
@@ -1611,7 +1779,16 @@ function updateQueueStatusFromClientMessage(clientMessageId, status, errorReason
   if (typeof clientMessageId !== 'string' || !clientMessageId.startsWith('queue_')) return false;
   const queueId = clientMessageId.slice('queue_'.length);
   if (!queueId) return false;
-  return MessageQueueRepository.updateStatus(queueId, status, errorReason);
+  const updated = MessageQueueRepository.updateStatus(queueId, status, errorReason);
+  if (updated && status === 'sent') {
+    try { CommentLeadsService.markQueueSent(queueId); } catch (_) { /* lead tracking best-effort */ }
+  }
+  // Lead phải đi theo cả hướng failure: không thì gửi lỗi để lead 'queued' vĩnh viễn
+  // (reproduce 2026-10-13: THREAD_ROUTE_MISMATCH chặn gửi, lead 24 kẹt 'queued').
+  if (updated && status === 'failed') {
+    try { CommentLeadsService.markQueueFailed(queueId, errorReason); } catch (_) { /* lead tracking best-effort */ }
+  }
+  return updated;
 }
 
 function ensureThreadRecord({ threadId, accountId, contactName, pageId, initialLastMessage = 'Chưa có tin nhắn' }, database = db) {
@@ -2081,6 +2258,7 @@ wss.on('connection', (ws, req) => {
               db.prepare(`DELETE FROM messages
                 WHERE (client_message_id = ? OR fb_message_id = ?) AND is_outgoing = 1
               `).run(client_message_id, `pending_${client_message_id}`);
+              updateQueueStatusFromClientMessage(client_message_id, 'failed', failureText);
               io.emit('MESSAGE_SEND_FAILED', { thread_id, client_message_id, success: false, status: 'failed', error: failureText, error_code });
             }
           }
@@ -2096,6 +2274,40 @@ wss.on('connection', (ws, req) => {
             appendComposerDebugLog({ at: new Date().toISOString(), source: 'CONTENT_DEBUG', ...msg.data });
           } catch (error) {
             console.error('[CONTENT_DEBUG] Ghi log thất bại:', error.message);
+          }
+          break;
+        }
+
+        case 'SYNC_GROUP_MEMBERS_RESULT': {
+          // Extension quét xong panel "Thành viên trong đoạn chat" — thay list
+          // member nhóm trong DB và phát THREAD_MEMBERS cho mọi client CRM.
+          try {
+            const d = msg.data || {};
+            const gmThreadId = String(d.thread_id || '');
+            const gmMembers = Array.isArray(d.members) ? d.members : [];
+            syncDebug('group_members_result', { thread: gmThreadId.slice(0, 30), account: String(d.account_id || '').slice(0, 20), count: gmMembers.length, source: d.source || null });
+            if (gmThreadId && gmMembers.length) {
+              const gmThread = db.prepare('SELECT account_id FROM threads WHERE id = ?').get(gmThreadId);
+              if (gmThread && String(gmThread.account_id || '') === String(d.account_id || '')) {
+                const replaceMembers = db.transaction((list) => {
+                  db.prepare('DELETE FROM group_members WHERE thread_id = ?').run(gmThreadId);
+                  const ins = db.prepare('INSERT OR REPLACE INTO group_members (thread_id, name, avatar_url) VALUES (?, ?, ?)');
+                  for (const m of list.slice(0, 500)) {
+                    const name = String(m?.name || '').trim();
+                    if (!name) continue;
+                    ins.run(gmThreadId, name.slice(0, 120), String(m?.avatar || '').trim().slice(0, 2000) || null);
+                  }
+                });
+                replaceMembers(gmMembers);
+                io.emit('THREAD_MEMBERS', {
+                  thread_id: gmThreadId,
+                  members: db.prepare('SELECT name, avatar_url FROM group_members WHERE thread_id = ? ORDER BY name COLLATE NOCASE').all(gmThreadId)
+                });
+                console.log(`[GroupMembers] 🧑‍🤝‍🧑 thread=${gmThreadId} lưu ${gmMembers.length} thành viên nhóm.`);
+              }
+            }
+          } catch (error) {
+            console.error('[GroupMembers] Lưu danh sách thành viên lỗi:', error.message);
           }
           break;
         }
@@ -2793,7 +3005,16 @@ wss.on('connection', (ws, req) => {
           if (tsMs > 0) {
             const newestRow = db.prepare('SELECT MAX(timestamp_ms) AS maxTs FROM messages WHERE thread_id = ?').get(canonicalThreadId);
             const newestTs = Number(newestRow?.maxTs || 0);
-            if (newestTs > tsMs && (Date.now() - tsMs) < 15 * 60 * 1000) {
+            // Chỉ đẩy khi tin nằm CÙNG PHÚT với ts mới nhất: bump toàn cục cũ
+            // nuốt cả tin catch-up đến trễ (nhãn '09:26' thật nhưng vào DB sau
+            // tin '09:31'), phá phút thật khiến normalizeMessageSequence sort
+            // theo thứ tự ingest của đợt burst -> sai vị trí (reproduce
+            // 2026-10-15 09:30 thread Hai Anh: lộn/1 năm/Nói chung chen giữa
+            // ukii a và bubble reply). Khác phút = tin cũ hơn thật, giữ nguyên
+            // nhãn phút để minute-sort xếp đúng chỗ.
+            const sameMinute = newestTs > 0
+              && Math.floor(newestTs / 60000) === Math.floor(tsMs / 60000);
+            if (newestTs > tsMs && sameMinute && (Date.now() - tsMs) < 15 * 60 * 1000) {
               tsMs = newestTs + 1;
               m.created_at = new Date(tsMs).toISOString();
             }
@@ -3088,7 +3309,49 @@ wss.on('connection', (ws, req) => {
             }, db);
             if (promotedPreview) stableMessageId = promotedPreview.fbMessageId;
           }
+          // Cùng bong bóng vật lý quét lại với __bubble_N TRÔI (số bong bóng
+          // hydrate đằng trước đổi giữa các pass -> bubble_idx đổi -> id đổi)
+          // khiến UNIQUE(fb_message_id) mù và tin lặp 2 lần. Cùng family mid
+          // gốc + cùng nội dung + cùng chiều trong thread = chính tin đã lưu
+          // (reproduce 2026-10-15: "ý à là khách hàng..." đôi
+          // jGrG__bubble_2 + __bubble_3 trong thread Hai Anh). Bỏ qua cả hai
+          // chiều trôi (suffix->thuần và thuần->suffix); id khớp EXACT thì
+          // để luồng INSERT IGNORE/squat-heal phía dưới xử lý như cũ.
           const existingStableMessage = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+          if (!existingStableMessage && !m.client_message_id) {
+            const driftFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+            const likeEscaped = driftFamilyId.replace(/[_%]/g, (c) => `\\${c}`);
+            const driftGhostRow = db.prepare(`
+              SELECT id FROM messages
+              WHERE thread_id = ?
+                AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+                AND TRIM(content) = TRIM(?)
+                AND is_outgoing = ?
+              LIMIT 1
+            `).get(m.thread_id, driftFamilyId, `${likeEscaped}__bubble_%`, m.content || '', isOutgoing ? 1 : 0);
+            if (driftGhostRow) {
+              // Quét lại với id TRÔI vẫn mang khối quote: bơm thẳng vào row
+              // đã lưu thay vì bỏ lỡ backfill quote của tin reply cũ (luồng
+              // exact-id hiếm khi lặp lại sau khi row đã tồn tại).
+              const driftIncomingQuote = m.reply_quote_text ? String(m.reply_quote_text).trim().slice(0, 500) : '';
+              if (driftIncomingQuote) {
+                try {
+                  db.prepare(
+                    "UPDATE messages SET reply_to_text = COALESCE(NULLIF(TRIM(COALESCE(reply_to_text, '')), ''), ?) WHERE id = ?"
+                  ).run(driftIncomingQuote, driftGhostRow.id);
+                  storeReplyTargetForRow(driftGhostRow.id, m.thread_id, driftIncomingQuote, null);
+                } catch (driftQuoteError) {
+                  console.warn('[WS] Backfill quote qua drift guard thất bại:', driftQuoteError.message);
+                }
+              }
+              syncDebug('WS_SKIP_BUBBLE_INDEX_DRIFT_GHOST', {
+                thread: m.thread_id,
+                fb_message_id: String(stableMessageId).substring(0, 70),
+                family: driftFamilyId.substring(0, 70)
+              });
+              break;
+            }
+          }
           const sequenceRow = db.prepare(`
             SELECT MAX(COALESCE(sequence_order, id)) AS max_sequence
             FROM messages WHERE thread_id = ?
@@ -3126,10 +3389,13 @@ wss.on('connection', (ws, req) => {
           }
           let insertMsgResult = db.prepare(`
             INSERT OR IGNORE INTO messages
-              (thread_id, fb_message_id, sender_id, content, media_type, media_url, local_media_path, is_outgoing, direction_status, sequence_order, timestamp_ms, timestamp_source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `).run(m.thread_id, stableMessageId, safeSenderId, m.content,
-            m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt);
+              (thread_id, fb_message_id, sender_id, sender_name, content, media_type, media_url, local_media_path, is_outgoing, direction_status, sequence_order, timestamp_ms, timestamp_source, created_at, reply_to_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(m.thread_id, stableMessageId, safeSenderId,
+            !isOutgoing ? (String(m.member_name || '').trim() || null) : null,
+            m.content,
+            m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt,
+            m.reply_quote_text ? String(m.reply_quote_text).slice(0, 500) : null);
 
           // Multi-account: cùng một tin vật lý được mọi tab acc đăng nhập quan
           // sát với CÙNG mid, nhưng UNIQUE(fb_message_id) toàn cục chỉ cho một
@@ -3143,10 +3409,13 @@ wss.on('connection', (ws, req) => {
               const mirrorMessageId = `${stableMessageId}::${m.thread_id}`;
               insertMsgResult = db.prepare(`
                 INSERT OR IGNORE INTO messages
-                  (thread_id, fb_message_id, sender_id, content, media_type, media_url, local_media_path, is_outgoing, direction_status, sequence_order, timestamp_ms, timestamp_source, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              `).run(m.thread_id, mirrorMessageId, safeSenderId, m.content,
-                m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt);
+                  (thread_id, fb_message_id, sender_id, sender_name, content, media_type, media_url, local_media_path, is_outgoing, direction_status, sequence_order, timestamp_ms, timestamp_source, created_at, reply_to_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              `).run(m.thread_id, mirrorMessageId, safeSenderId,
+                !isOutgoing ? (String(m.member_name || '').trim() || null) : null,
+                m.content,
+                m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt,
+                m.reply_quote_text ? String(m.reply_quote_text).slice(0, 500) : null);
               stableMessageId = mirrorMessageId;
               if (insertMsgResult.changes > 0) {
                 syncDebug('WS_MIRROR_CROSS_ACCOUNT', {
@@ -3195,6 +3464,11 @@ wss.on('connection', (ws, req) => {
           }
 
           let wasNewMessage = insertMsgResult.changes > 0;
+          // Tin reply mới: nối tới tin gốc (id + tên) để UI hiện tên người
+          // được trả lời và click quote lướt tới tin gốc.
+          if (wasNewMessage && m.reply_quote_text) {
+            storeReplyTargetForRow(Number(insertMsgResult.lastInsertRowid), m.thread_id, m.reply_quote_text, tsMs);
+          }
           if (wasNewMessage) {
             // Row ma lật chiều có thể đã chèn TRƯỚC base trong cùng đợt quét
             // (guard phía trên cần base đã tồn tại) - base vừa đổ vào thì dọn
@@ -3235,6 +3509,8 @@ wss.on('connection', (ws, req) => {
 
           let mediaWasUpdated = false;
 
+          let replyWasUpdated = false;
+
           if (!wasNewMessage) {
             // Messenger often mounts a video row before its durable URL/poster
             // is hydrated. Enrich the same native id instead of discarding it.
@@ -3262,6 +3538,24 @@ wss.on('connection', (ws, req) => {
               `).run(incomingMediaType, m.media_url || null, m.local_media_path || null,
                 m.content || null, m.content || null, stableMessageId);
               mediaWasUpdated = mediaUpdate.changes > 0;
+            }
+            // Row đã lưu trước khi có tính năng đồng bộ trả lời: backfill quote
+            // khi lần quan sát sau mang kèm khối trích dẫn (giữ quote cũ nếu
+            // đã có - COALESCE tránh ghi đè bằng rỗng).
+            const incomingQuote = m.reply_quote_text ? String(m.reply_quote_text).trim().slice(0, 500) : '';
+            if (incomingQuote) {
+              try {
+                const quoteUpdate = db.prepare(
+                  'UPDATE messages SET reply_to_text = COALESCE(NULLIF(TRIM(COALESCE(reply_to_text, \'\')), \'\'), ?) WHERE fb_message_id = ?'
+                ).run(incomingQuote, stableMessageId);
+                replyWasUpdated = quoteUpdate.changes > 0;
+                if (replyWasUpdated) {
+                  const quoteTargetRow = db.prepare('SELECT id, timestamp_ms FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+                  if (quoteTargetRow) storeReplyTargetForRow(quoteTargetRow.id, m.thread_id, incomingQuote, quoteTargetRow.timestamp_ms);
+                }
+              } catch (quoteError) {
+                console.warn('[WS] Backfill reply quote thất bại:', quoteError.message);
+              }
             }
             // Tin đã tồn tại: nhờ ConversationRepository quyết định có cần nâng cấp
             // timestamp/is_outgoing không (logic dùng chung, có test riêng).
@@ -3296,7 +3590,7 @@ wss.on('connection', (ws, req) => {
             // move the bubble without inserting a duplicate message.
           }
 
-          if (wasNewMessage || directionWasUpdated || mediaWasUpdated) {
+          if (wasNewMessage || directionWasUpdated || mediaWasUpdated || replyWasUpdated) {
             const earlyPersistedMessage = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(stableMessageId);
             // Link share bi Messenger unfurl thanh tin media rieng (video/image
             // khong co noi dung) -> xoa tin link-text vua gui truoc do (cung
@@ -3341,6 +3635,10 @@ wss.on('connection', (ws, req) => {
                 ...m,
                 ...earlyPersistedMessage,
                 account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null,
+                // Avatar thành viên nhóm đi trong member_avatar (payload observer)
+                // - map sang field client MessageBubble đang đọc để bubble mới
+                // hiện avatar ngay, không chờ đợt refetch sau khi tải file local.
+                sender_avatar: m.member_avatar || undefined,
                 timestamp_ms: tsMs,
                 timestamp_source: tsSource,
                 created_at: createdAt,
@@ -3385,6 +3683,41 @@ wss.on('connection', (ws, req) => {
               } catch (err) {
                 console.warn('[WS] Avatar save failed:', err.message);
               }
+            }
+          }
+
+          // Avatar thành viên NHÓM: tin đến kèm member_avatar (URL avatar nhỏ
+          // cạnh bubble trong DOM). Tải nền, không chặn emit tin - client mở
+          // thread sẽ refetch qua ping THREAD_MESSAGES_UPDATED khi file xong.
+          const memberNameForAvatar = (!isOutgoing && String(m.member_name || '').trim()) || '';
+          const memberAvatarData = memberNameForAvatar && String(m.member_avatar || '').startsWith('http')
+            ? String(m.member_avatar)
+            : '';
+          if (memberNameForAvatar && memberAvatarData) {
+            const hadMemberAvatar = !!db.prepare(
+              'SELECT avatar_url FROM message_sender_avatars WHERE thread_id = ? AND sender_name = ?'
+            ).get(m.thread_id, memberNameForAvatar)?.avatar_url;
+            if (!hadMemberAvatar) {
+              upsertMemberAvatar(m.thread_id, memberNameForAvatar, memberAvatarData).then((savedPath) => {
+                if (savedPath) {
+                  syncDebug('WS_MEMBER_AVATAR_SAVED', {
+                    thread: m.thread_id,
+                    sender_name: memberNameForAvatar
+                  });
+                  // Client chỉ merge messages kèm theo event này (không refetch
+                  // REST) - phải emit lại snapshot enriched thì bubble đang mở
+                  // mới đổi sang avatar thành viên vừa tải.
+                  const refreshedRows = db.prepare(`
+                    SELECT * FROM messages WHERE thread_id = ?
+                    ORDER BY COALESCE(sequence_order, id) ASC, id ASC
+                  `).all(m.thread_id);
+                  io.emit('THREAD_MESSAGES_UPDATED', {
+                    thread_id: m.thread_id,
+                    account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null,
+                    messages: prepareMessagesForClient(refreshedRows)
+                  });
+                }
+              });
             }
           }
 
@@ -3917,6 +4250,25 @@ wss.on('connection', (ws, req) => {
                     db.prepare('UPDATE threads SET unread_manual = 0 WHERE id = ? AND unread_manual != 0').run(existingInternalThreadId);
                   }
                 }
+                // Thông báo hoạt động (cuộc gọi nhỡ, thêm/rời nhóm, chrome UI
+                // "Trả lời?"...) và preview outgoing KHÔNG bao giờ là tin khách —
+                // FB treo chấm xanh thật nhưng nếu để qua đường preview thì
+                // bubble provisional gắn unread_manual=1 dính VĨNH VIỄN -> badge
+                // "1" ảo mãi không tắt (reproduce 2026-10-16: 6+ row như thế).
+                // Gỡ luôn cờ manual rác để heal các badge ảo đang dính từ trước;
+                // tin khách thật về bằng đường riêng sẽ tự đánh unread lại.
+                const nameEchoPreview = (() => {
+                  const pv = String(rawSidebarPreview || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                  const nm = String(name || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                  return !!pv && !!nm && pv === nm;
+                })();
+                const activityNotification = isSidebarActivityNotification(rawSidebarPreview)
+                  || t.preview_is_outgoing === true
+                  || nameEchoPreview;
+                if (activityNotification && Number(t.is_unread) === 1) {
+                  syncUnread = 0;
+                  db.prepare('UPDATE threads SET unread_manual = 0 WHERE id = ? AND unread_manual != 0').run(existingInternalThreadId);
+                }
                 const storedThread = ConversationRepository.upsertThread({
                   id: threadId,
                   external_thread_id: t.external_thread_id || threadId,
@@ -3957,6 +4309,7 @@ wss.on('connection', (ws, req) => {
                           contact_name: name || previousThread?.contact_name || null,
                     page_id: threadPageId || (boundPageSource?.pageId ?? null),
                     preview_content: cleanLastMsg,
+                    preview_is_outgoing: t.preview_is_outgoing === true,
                     preview_is_like: t.is_like === true,
                     row_fresh: rowFresh,
                     row_fresh_new: rowFreshNew,
@@ -4049,9 +4402,51 @@ wss.on('connection', (ws, req) => {
             // The repository later promotes this sidebar_preview_* row to
             // Facebook's native id when history sync confirms the same text.
             for (const changed of changedUnreadThreads) {
-              const previewContent = cleanMessageText(changed.preview_content);
+              let previewContent = cleanMessageText(changed.preview_content);
+              // Preview của NHÓM dán tên người gửi vào trước nội dung
+              // ("Bảo Long: Xmzmmz"). Đối chiếu theo phần SAU tiền tố: nếu
+              // tin thật cùng nội dung đã có trong thread thì preview này
+              // KHÔNG phải tin mới - bỏ qua hoàn toàn (reproduce 2026-10-15
+              // nhóm Cfggh: "Hai: aloo" + "Bảo Long: Xmzmmz" chen cạnh tin
+              // sạch vì khớp exact thất bại rồi INSERT provisional).
               const canonicalThreadId = resolveInternalThreadId(db, changed.account_id, changed.thread_id, changed.page_id || null) || changed.thread_id;
-              if (previewContent && !/^[\s\u00b7\u2022.\-|•·]+$/.test(previewContent)) {
+              let previewContentNoGroupPrefix = null;
+              let previewSenderName = null;
+              const groupPrefixMatch = previewContent.match(/^([^:\n]{1,80}):\s+(.+)$/s);
+              if (groupPrefixMatch) {
+                previewContentNoGroupPrefix = groupPrefixMatch[2].trim();
+                // Nhóm thật (>=2 sender incoming khác nhau): tách prefix vào
+                // sender_name để bubble nhóm render tên thành viên như tin
+                // thật thay vì content dán "Hai: kđkdk" (2026-10-15). Guard
+                // tên người + suffix không lồng prefix nữa để text 1-1 dạng
+                // "Lưu ý: xyz" không bị tách mất nội dung.
+                const prefixName = groupPrefixMatch[1].trim();
+                const looksLikePersonName = prefixName.length >= 2 && prefixName.length <= 40
+                  && /^[\p{L}\p{M}][\p{L}\p{M}\s.'\-]*$/u.test(prefixName)
+                  && prefixName.split(/\s+/).length <= 5;
+                if (looksLikePersonName && !/^[^:\n]{1,80}:\s+/.test(previewContentNoGroupPrefix)
+                  && Number(db.prepare("SELECT COUNT(DISTINCT sender_name) AS n FROM messages WHERE thread_id = ? AND is_outgoing = 0 AND sender_name IS NOT NULL AND TRIM(sender_name) != ''").get(canonicalThreadId).n) >= 2) {
+                  previewSenderName = prefixName;
+                  previewContent = previewContentNoGroupPrefix;
+                }
+              }
+              // Bộ dò sidebar thi thoảng nhặt nhầm span UI của Messenger làm
+              // snippet ("Trả lời?" trên row) hoặc chính TÊN thread (khi
+              // snippet thật trống) — không bao giờ là tin của khách, chặn ở
+              // đây để không sinh bong bóng ma; tin thật vẫn về qua history/
+              // realtime sync với mid thật (reproduce 2026-10-15: bubble
+              // "Trả lời?" ở 3 thread + bubble tên chính nó ở Đoàn Toản).
+              const SIDEBAR_CHROME_RE = /^(?:trả\s*lời\s*\??|đang gõ(?: tin nhắn)?|đã xem(?: tin nhắn)?|đã nhìn(?: tin nhắn)?|xem tin nhắn|tin nhắn mới|gửi tin nhắn|hủy bỏ|đang gọi\W*)$/i;
+              const previewNameKey = String(changed.contact_name || '').toLowerCase().replace(/\s+/g, ' ').trim();
+              const previewContentKey = previewContent.toLowerCase().replace(/\s+/g, ' ').trim();
+              // Thông báo hoạt động (bỏ lỡ cuộc gọi, thêm/rời nhóm...) và preview
+              // outgoing không bao giờ là tin khách — không tạo bong bóng provisional
+              // (chúng là nguồn badge "1" ảo vì đường này gắn unread_manual=1).
+              if (!previewContent || SIDEBAR_CHROME_RE.test(previewContent)
+                || (previewNameKey && previewContentKey === previewNameKey)
+                || isSidebarActivityNotification(previewContent)
+                || changed.preview_is_outgoing === true) continue;
+              if (!/^[\s\u00b7\u2022.\-|•·]+$/.test(previewContent)) {
                 const previewTimestamp = Date.now();
                 const previewHash = crypto.createHash('sha1')
                   .update(String(changed.account_id) + '|' + String(canonicalThreadId) + '|' + previewContent)
@@ -4059,6 +4454,7 @@ wss.on('connection', (ws, req) => {
                 // Stable per thread+content: repeated sidebar scans cannot
                 // manufacture duplicate provisional bubbles from old previews.
                 const previewId = 'sidebar_preview_' + previewHash;
+<<<<<<< Updated upstream
                 // Sidebar re-reports OLD bubbles as fresh customer activity
                 // when the preview text drifts slightly between scans (đổi
                 // khoảng trắng, tiền tố "Bạn: ", biến thể emoji - sau mỗi lần
@@ -4078,9 +4474,40 @@ wss.on('connection', (ws, req) => {
                   ? recentRealMessages.some((m) => normalizePreviewText(m.content) === normalizedPreview)
                   : false;
                 if (!normalizedDupe) {
+=======
+                // Sau mỗi lần CRM gửi tin (text/video), last_message của thread
+                // đổi sang tin outgoing nên preview cũ của khách (đã được bắt
+                // bằng fb_message_id thật) lại nhìn "thay đổi" với bộ dò sidebar
+                // và sinh bong bóng provisional trùng nội dung (reproduced
+                // 2026-09-17: gửi video xong, tin cũ của khách hiện lại lần
+                // nữa). Nếu thread đã có tin thật (không phải provisional) cùng
+                // nội dung trong 24h thì bỏ qua - history sync vẫn chạy phía
+                // dưới và sẽ confirm/promote row sẵn có thay vì tạo mới.
+                const alreadyRealIncoming = db.prepare(`
+                  SELECT 1 FROM messages
+                  WHERE thread_id = ? AND is_outgoing = 0 AND (content = ? OR (? IS NOT NULL AND content = ?))
+                    AND fb_message_id NOT LIKE 'sidebar_preview_%'
+                    AND timestamp_ms >= ?
+                  LIMIT 1
+                `).get(canonicalThreadId, previewContent, previewContentNoGroupPrefix, previewContentNoGroupPrefix, previewTimestamp - 24 * 60 * 60 * 1000);
+                // The sidebar scanner re-reports an OLD operator bubble as
+                // fresh customer activity whenever the thread preview flips
+                // back to it after a CRM send (reproduced 2026-09-30:
+                // 'sldsldsldl' sent 2026-09-22 reappeared the same day as a
+                // left-side bubble stamped now). Content that already exists
+                // in this thread in ANY direction is never a new message.
+                const contentAlreadyInThread = db.prepare(`
+                  SELECT 1 FROM messages
+                  WHERE thread_id = ? AND (content = ? OR (? IS NOT NULL AND content = ?))
+                    AND fb_message_id NOT LIKE 'sidebar_preview_%'
+                  LIMIT 1
+                `).get(canonicalThreadId, previewContent, previewContentNoGroupPrefix, previewContentNoGroupPrefix);
+                if (!alreadyRealIncoming && !contentAlreadyInThread) {
+>>>>>>> Stashed changes
                 const previewPersistence = ConversationRepository.saveMessagesTransaction(canonicalThreadId, [{
                   fb_message_id: previewId,
                   content: previewContent,
+                  member_name: previewSenderName || undefined,
                   media_type: 'text',
                   timestamp_ms: previewTimestamp,
                   timestamp_source: 'realtime_fallback',
@@ -4248,15 +4675,21 @@ wss.on('connection', (ws, req) => {
               r.due_at AS reminder_due_at, r.note AS reminder_note, r.status AS reminder_status,
               s.source_type, s.display_name AS source_name, s.status AS source_status,
               s.external_id AS source_external_id,
-              CASE WHEN s.source_type = 'page_messenger' THEN s.external_id ELSE NULL END AS page_id
+              CASE WHEN s.source_type = 'page_messenger' THEN s.external_id ELSE NULL END AS page_id,
+              lm.max_ts AS last_msg_ts
             FROM threads t
             LEFT JOIN contacts c ON c.thread_id = t.id
             LEFT JOIN lead_statuses ls ON ls.id = c.status_id
             LEFT JOIN conversation_reminders r ON r.thread_id = t.id AND r.status = 'active'
             LEFT JOIN inbox_sources s ON s.id = t.source_id
+            LEFT JOIN (
+              SELECT thread_id, MAX(timestamp_ms) AS max_ts
+              FROM messages WHERE timestamp_ms > 0 GROUP BY thread_id
+            ) lm ON lm.thread_id = t.id
             WHERE t.account_id = ?
-            ORDER BY julianday(t.last_activity) DESC, t.id DESC
+            ORDER BY COALESCE(NULLIF(lm.max_ts, 0), CAST(strftime('%s', t.last_activity) AS INTEGER) * 1000) DESC, t.id DESC
           `).all(account_id);
+          ConversationRepository.attachRealActivity(allThreads, db);
           // Realtime jobs used to emit every stored conversation every 350ms.
           // That forced the entire chat view (including videos) to rerender
           // and visibly blink. Full/manual sync keeps the legacy full payload;
@@ -4391,6 +4824,13 @@ wss.on('connection', (ws, req) => {
                   console.log(`[WS] History Guard: skip CRM outbound text echo parsed as incoming: thread=${thread_id} content="${sanitizeLog(m.content, 60)}"`);
                   return false;
                 }
+                // Group chat name fragment: incoming text identical to its own
+                // sender label is DOM chrome, not a message.
+                if (!m.is_outgoing && String(m.member_name || '').trim()
+                  && String(m.content || '').trim().toLowerCase() === String(m.member_name).trim().toLowerCase()) {
+                  console.log(`[WS] History Guard: skip group name fragment: thread=${thread_id} name="${sanitizeLog(m.member_name, 40)}"`);
+                  return false;
+                }
                 return true;
               });
 
@@ -4511,6 +4951,20 @@ wss.on('connection', (ws, req) => {
                 timestamp_source: message.timestamp_source || 'fallback'
               };
             });
+            // Avatar thành viên nhóm từ lịch sử: gom theo tên (một thành viên
+            // nhắn nhiều tin chỉ tải 1 lần) rồi lưu song song trước khi persist
+            // để emit cuối cùng đã kèm avatar qua prepareMessagesForClient.
+            const memberAvatarJobs = new Map();
+            for (const historyMessage of validMessages) {
+              const historyMemberName = String(historyMessage.member_name || '').trim();
+              const historyMemberAvatar = String(historyMessage.member_avatar || '');
+              if (Number(historyMessage.is_outgoing) === 1 || !historyMemberName || !historyMemberAvatar.startsWith('http')) continue;
+              if (!memberAvatarJobs.has(historyMemberName)) memberAvatarJobs.set(historyMemberName, historyMemberAvatar);
+            }
+            if (memberAvatarJobs.size > 0) {
+              await Promise.all([...memberAvatarJobs].map(([historyMemberName, historyMemberAvatar]) =>
+                upsertMemberAvatar(thread_id, historyMemberName, historyMemberAvatar)));
+            }
             const persistence = ConversationRepository.saveMessagesTransaction(thread_id, sequencedMessages);
             // History may arrive after realtime already confirmed the local
             // attachment row. Collapse the late Facebook base/_media echo in
@@ -5839,7 +6293,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('SEND_MESSAGE', async (payload = {}) => {
-    const { thread_id, content, client_message_id, attachment_id, contract_version } = payload;
+    const { thread_id, content, client_message_id, attachment_id, contract_version, mentions } = payload;
     const isRichMessage = Number(contract_version) === 2 || Boolean(attachment_id);
     if (!enterpriseAccess.canAccessThread(socket.user, thread_id)) {
       return socket.emit('SEND_ERROR', { client_message_id, code: 'ACCOUNT_NOT_ASSIGNED', error: 'Tài khoản Facebook chưa được Admin cấp cho bạn.' });
@@ -5920,7 +6374,7 @@ io.on('connection', (socket) => {
         return;
       }
 
-      await sendViaExtension(thread_id, content, client_message_id);
+      await sendViaExtension(thread_id, content, client_message_id, mentions);
     } catch (err) {
       console.error('[Socket] Lỗi gửi tin nhắn:', err.message);
       try {
@@ -6320,6 +6774,10 @@ app.get('/api/page-api/accounts/:id/pages', (req, res) => {
       note: a.note || '',
       webhook_url: a.webhookUrl || null,
       created_at: a.createdAt,
+      mode: a.mode || null,
+      type: a.type || null,
+      source: a.source || null,
+      last_page_sync_at: a.lastPageSyncAt || null,
     })),
   });
 });
@@ -6359,13 +6817,27 @@ app.post('/api/page-api/accounts/:id/delete-app', async (req, res) => {
   res.json({ success: true, sync_id: r.job.id });
 });
 
-// "Đồng bộ": quét danh sách page của account (cuộn tải hết), chỉ THÊM page mới
-// — page đã có trong hệ thống (mọi trạng thái) thì bỏ qua.
+// "Đồng bộ": quét danh sách page của account — user chọn app trước (popup),
+// không chọn app thì dùng app mới nhất. Thêm page mới + gắn lại page cũ đang
+// thuộc account khác/mồ côi về account này (xóa tk rồi login lại là ca chính).
 app.post('/api/page-api/accounts/:id/sync-pages', async (req, res) => {
   if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
     return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
   }
-  const r = setupAutomation.startPageSync(String(req.params.id));
+  const appId = String((req.body || {}).appId || '').trim();
+  const r = setupAutomation.startPageSync(String(req.params.id), appId);
+  if (r.error) return res.status(409).json({ success: false, error: r.error });
+  res.json({ success: true, sync_id: r.job.id });
+});
+
+// "Đồng bộ app": mở developers.facebook.com/apps/ quét MỌI app của tài khoản
+// (kể cả app tạo ngoài CRM) — có sẵn thì cập nhật tên/chế độ, chưa có thì thêm
+// vào cuối danh sách (không đổi app đang dùng).
+app.post('/api/page-api/accounts/:id/sync-apps', async (req, res) => {
+  if (!enterpriseAccess.canAccessAccount(req.user, req.params.id)) {
+    return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản Facebook' });
+  }
+  const r = setupAutomation.startAppsScan(String(req.params.id));
   if (r.error) return res.status(409).json({ success: false, error: r.error });
   res.json({ success: true, sync_id: r.job.id });
 });
@@ -6960,6 +7432,135 @@ app.get('/api/facebook-setup/:pendingKey/status', (req, res) => {
   }
   res.json({ success: true, completed: Boolean(completion), account_id: completion?.account_id || null });
 });
+
+// ── Viet Seeding: nhập hàng loạt account Facebook bằng cookie từ API export ──
+const isFbAccountAdmin = (user) => enterpriseAccess.isCompanyAdmin(user)
+  || (user?.role === 'ADMIN' && user?.username === 'admin');
+
+app.get('/api/accounts/vietseeding/config', (req, res) => {
+  if (!isFbAccountAdmin(req.user)) {
+    return res.status(403).json({ success: false, error: 'Chỉ Admin doanh nghiệp được cấu hình nhập cookie.' });
+  }
+  res.json({ success: true, ...VietSeedingImportService.getConfigSummary() });
+});
+
+app.post('/api/accounts/vietseeding/config', (req, res) => {
+  if (!isFbAccountAdmin(req.user)) {
+    return res.status(403).json({ success: false, error: 'Chỉ Admin doanh nghiệp được cấu hình nhập cookie.' });
+  }
+  const summary = VietSeedingImportService.saveConfig({
+    api_key: typeof req.body?.api_key === 'string' ? req.body.api_key : undefined
+  });
+  res.json({ success: true, ...summary });
+});
+
+app.get('/api/accounts/vietseeding/import-status', (req, res) => {
+  if (!isFbAccountAdmin(req.user)) {
+    return res.status(403).json({ success: false, error: 'Chỉ Admin doanh nghiệp được xem tiến trình nhập.' });
+  }
+  res.json({ success: true, job: VietSeedingImportService.getJobStatus() });
+});
+
+app.post('/api/accounts/vietseeding/list-accounts', async (req, res) => {
+  if (!isFbAccountAdmin(req.user)) {
+    return res.status(403).json({ success: false, error: 'Chỉ Admin doanh nghiệp được xem danh sách tài khoản.' });
+  }
+  try {
+    const limit = Math.max(1, Math.min(100, Number(req.body?.limit) || 20));
+    const result = await VietSeedingImportService.listAccountsForSelection(limit, processManager);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/accounts/vietseeding/import', (req, res) => {
+  if (!isFbAccountAdmin(req.user)) {
+    return res.status(403).json({ success: false, error: 'Chỉ Admin doanh nghiệp được nhập tài khoản từ Viet Seeding.' });
+  }
+  try {
+    const limit = Math.max(1, Math.min(100, Number(req.body?.limit) || 10));
+    const identifiers = Array.isArray(req.body?.identifiers)
+      ? req.body.identifiers.map((v) => String(v || '').trim()).filter(Boolean).slice(0, 100)
+      : null;
+    const job = VietSeedingImportService.startImport({
+      limit,
+      identifiers,
+      ownerUserId: req.user.id,
+      processManager,
+      registerOwner: (pendingKey, userId) => pendingAccountOwners.set(pendingKey, userId),
+      releaseOwner: (pendingKey) => pendingAccountOwners.delete(pendingKey)
+    });
+    console.log(`[API] Bắt đầu đợt nhập Viet Seeding (limit=${limit}) bởi user ${req.user.id}: ${job.job_id}`);
+    res.json({ success: true, ...job });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Comment leads: khách bình luận bài viết → tin nhắn chờ (QueueWorker 24/7) ──
+app.get('/api/comment-leads/config', (req, res) => {
+  res.json({ success: true, configured: CommentLeadsService.isConfigured() });
+});
+
+app.get('/api/comment-leads', (req, res) => {
+  res.json({ success: true, ...CommentLeadsService.listLeads() });
+});
+
+app.post('/api/comment-leads/scan', async (req, res) => {
+  try {
+    const result = await CommentLeadsService.scanPost(req.body?.post_url);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/comment-leads/fetch', async (req, res) => {
+  try {
+    const result = await CommentLeadsService.fetchLeads(req.body?.post_url);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/comment-leads/enqueue', (req, res) => {
+  try {
+    // Không cần chọn tay: tự lấy account đầu tiên đang nối extension.
+    // QueueWorker fail vĩnh viễn row khi extension vắng (không retry) —
+    // không có account online nào thì chặn luôn thay vì bắn mù fail hết.
+    let accountId = String(req.body?.account_id || '').trim();
+    if (!accountId) {
+      const accountRows = db.prepare('SELECT id FROM accounts').all();
+      accountId = accountRows.map((r) => String(r.id)).find((id) => {
+        const ws = extensionConnections.get(id);
+        return ws && ws.readyState === WebSocket.OPEN;
+      }) || '';
+      if (!accountId) {
+        try { CommentLeadsService.debugLog('enqueue: chặn 409 — không có tài khoản nào đang chạy Chrome'); } catch (_) {}
+        return res.status(409).json({ success: false, error: 'Chưa có tài khoản nào đang chạy Chrome — mở/Kết nối ít nhất 1 tài khoản rồi thử lại.' });
+      }
+    } else {
+      const ws = extensionConnections.get(accountId);
+      if (!ws || ws.readyState !== 1) {
+        try { CommentLeadsService.debugLog(`enqueue: chặn 409 — Chrome của account ${accountId} chưa kết nối`); } catch (_) {}
+        return res.status(409).json({ success: false, error: 'Chrome của tài khoản này chưa kết nối — mở/Kết nối tài khoản rồi thử lại.' });
+      }
+    }
+    try { CommentLeadsService.debugLog(`enqueue: request account=${accountId} post_url=${String(req.body?.post_url || '').trim() || '(trống)'}`); } catch (_) {}
+    const result = CommentLeadsService.enqueue({
+      postUrl: req.body?.post_url,
+      accountId,
+      content: String(req.body?.content || '').trim() || CommentLeadsService.DEFAULT_MESSAGE_TEMPLATE
+    });
+    if (result.queued > 0) io.emit('THREAD_LIST_UPDATED', {});
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
 app.delete('/api/accounts/:id', (req, res) => {
   try {
     const accountId = String(req.params.id || '').trim();
@@ -7130,6 +7731,8 @@ app.post('/api/threads/:id/seen', (req, res) => {
 });
 
 // Ghim / bỏ ghim hội thoại. Không gửi "pinned" trong body = toggle.
+// pinned_at = thời điểm ghim — nhóm ghim xếp theo nó (mới ghim lên đầu) nên
+// hội thoại ghim KHÔNG trôi theo tin nhắn mới; bỏ ghim mới tụt xuống nhóm thường.
 app.post('/api/threads/:id/pin', (req, res) => {
   try {
     const id = req.params.id;
@@ -7137,11 +7740,19 @@ app.post('/api/threads/:id/pin', (req, res) => {
     if (!row) return res.status(404).json({ error: 'Không tìm thấy hội thoại.' });
     const desired = req.body && req.body.pinned !== undefined ? Number(req.body.pinned) : null;
     const next = desired === null ? (Number(row.pinned) ? 0 : 1) : (desired ? 1 : 0);
+    let pinnedAt = null;
     if (next !== Number(row.pinned)) {
-      db.prepare('UPDATE threads SET pinned = ? WHERE id = ?').run(next, id);
+      if (next === 1) {
+        pinnedAt = db.prepare("SELECT strftime('%Y-%m-%d %H:%M:%f', 'now') AS ts").get().ts;
+        db.prepare('UPDATE threads SET pinned = ?, pinned_at = ? WHERE id = ?').run(next, pinnedAt, id);
+      } else {
+        db.prepare('UPDATE threads SET pinned = ?, pinned_at = NULL WHERE id = ?').run(next, id);
+      }
+    } else if (next === 1) {
+      pinnedAt = db.prepare('SELECT pinned_at FROM threads WHERE id = ?').get(id)?.pinned_at || null;
     }
-    io.emit('THREAD_PIN_CHANGED', { thread_id: String(id), pinned: next });
-    res.json({ success: true, id: String(id), pinned: next });
+    io.emit('THREAD_PIN_CHANGED', { thread_id: String(id), pinned: next, pinned_at: pinnedAt });
+    res.json({ success: true, id: String(id), pinned: next, pinned_at: pinnedAt });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Không thể cập nhật trạng thái ghim.' });
   }
@@ -7993,6 +8604,30 @@ app.get('/api/ollama/health', async (req, res) => {
   res.json({ online: isOnline });
 });
 
+// Danh sách thành viên nhóm đã quét từ panel "Thành viên trong đoạn chat".
+app.get('/api/threads/:id/members', (req, res) => {
+  if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
+  const members = db.prepare('SELECT name, avatar_url FROM group_members WHERE thread_id = ? ORDER BY name COLLATE NOCASE').all(String(req.params.id));
+  res.json({ success: true, members });
+});
+
+// Nhờ extension quét panel thành viên của thread (chỉ quét được khi tab
+// Messenger đang mở đúng thread đó; kết quả về qua SYNC_GROUP_MEMBERS_RESULT).
+app.post('/api/threads/:id/sync-members', (req, res) => {
+  if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
+  const thread = db.prepare('SELECT account_id, thread_url FROM threads WHERE id = ?').get(String(req.params.id));
+  if (!thread?.account_id) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
+  const extWs = extensionConnections.get(thread.account_id);
+  if (!extWs || extWs.readyState !== WebSocket.OPEN) {
+    return res.status(409).json({ error: 'Extension chưa kết nối cho tài khoản này' });
+  }
+  extWs.send(JSON.stringify({
+    type: 'SYNC_GROUP_MEMBERS',
+    data: { account_id: thread.account_id, thread_id: String(req.params.id), thread_url: String(thread.thread_url || '') }
+  }));
+  res.json({ ok: true });
+});
+
 // Messages REST API - With UI Guard Filter
 app.get('/api/threads/:id/messages', async (req, res) => {
   if (!enterpriseAccess.canAccessThread(req.user, req.params.id)) return res.status(404).json({ error: 'Không tìm thấy hội thoại' });
@@ -8257,11 +8892,24 @@ function startServer() {
       }
       const previewText = String(preview.content || '').trim();
       if (!previewText) continue;
+      // Preview NHÓM dán "Tên: " vào trước nội dung tin thật ("Bảo Long:
+      // Xmzmmz" ↔ tin thật "Xmzmmz") - khớp exact thất bại nên row provisional
+      // ở lại thành bong bóng ma cạnh tin sạch (reproduce 2026-10-15 nhóm
+      // Cfggh). Bóc tiền tố trước khi đối chiếu.
+      const groupPrefixStripped = previewText.match(/^([^:\n]{1,80}):\s+(.+)$/s);
+      const previewTextNoPrefix = groupPrefixStripped ? groupPrefixStripped[2].trim() : null;
       const truncated = previewText.replace(/(?:\u2026|\.{3})$/, '').trimEnd();
+      const truncatedNoPrefix = previewTextNoPrefix
+        ? previewTextNoPrefix.replace(/(?:\u2026|\.{3})$/, '').trimEnd()
+        : null;
       const isPrefixTwin = truncated.length >= 24;
+      const isPrefixTwinStripped = truncatedNoPrefix ? truncatedNoPrefix.length >= 24 : false;
       const matched = realIncomingByThread.get(preview.thread_id).some((row) => {
         const realText = String(row.content || '');
-        return realText === previewText || (isPrefixTwin && realText.startsWith(truncated));
+        return realText === previewText
+          || (previewTextNoPrefix && realText === previewTextNoPrefix)
+          || (isPrefixTwin && realText.startsWith(truncated))
+          || (isPrefixTwinStripped && realText.startsWith(truncatedNoPrefix));
       });
       if (matched) {
         deleteOrphanPreview.run(preview.id);
@@ -8434,9 +9082,167 @@ function startServer() {
       fixedMojibakeCount++;
     }
 
-    const totalJunk = deletedNoticeCount + dupThreadIds.size + sepThreadIds.size + fixedMojibakeCount;
+    // (4c) Header trích dẫn reply "Bạn đã trả lời {tên}" bị DOM nhặt thành tin
+    // outgoing riêng kèm mid thật (bubble quote Messenger render trong row tin
+    // reply - reproduce 2026-10-11: nhóm Bi-aaaaaaa). Metadata, không phải tin
+    // operator -> xóa (FTS tự dọn qua trigger; mid được giải phóng để sweep sau
+    // nhập lại tin reply thật). Tin thật "Bạn đã trả lời chưa?" được giữ nhờ
+    // loại từ nối/câu hỏi ở đuôi. Regex đồng bộ SYSTEM_PATTERNS trong
+    // src/server/utils/textFilter.js + src/extension/textFilter.js.
+    const REPLY_HEADER_RES = [
+      /^Bạn đã trả lời (?!(?:.*\s)?(?:chưa|rồi|xong|sao|đâu|gì|à|hả|nhỉ|nha|thôi|luôn|vậy|đấy|đó|nhé)\s*[?！?.!…]*$)[^?！?\n]{1,60}$/iu,
+      /^You replied to (?!(?:.*\s)?(?:yet|already|right|now|ok|okay)\s*[?！?.!…]*$)[^?！?\n]{1,60}$/iu
+    ];
+    const replyHeaderCandidates = db.prepare(`
+      SELECT id, thread_id, content FROM messages
+      WHERE is_outgoing = 1
+        AND (media_type IS NULL OR media_type = 'text')
+        AND (content LIKE 'Bạn đã trả lời %' OR content LIKE 'You replied to %')
+    `).all();
+    const deleteReplyHeader = db.prepare('DELETE FROM messages WHERE id = ?');
+    const previewNewest = db.prepare('SELECT content FROM messages WHERE thread_id = ? ORDER BY timestamp_ms DESC, id DESC LIMIT 1');
+    let deletedReplyHeaderCount = 0;
+    for (const row of replyHeaderCandidates) {
+      const text = String(row.content || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+      if (!REPLY_HEADER_RES.some((re) => re.test(text))) continue;
+      deleteReplyHeader.run(row.id);
+      const newest = previewNewest.get(row.thread_id);
+      setThreadPreview.run(newest?.content || '[Tin nhắn]', row.thread_id, row.content);
+      deletedReplyHeaderCount++;
+    }
+
+    // (4d) Nhãn tên người gửi hội thoại NHÓM bị nhặt thành tin riêng ("Tiến
+    // Quang"/"Linh"/"Tèo" - reproduce 2026-10-11: nhóm Bi-aaaaaaa 29 row,
+    // mỗi row chiếm một mid thật nên tin thật cùng mid bị UNIQUE chặn không
+    // bao giờ vào lại DB). Xóa CHÍNH XÁC các cụm đã verify bằng dry-run:
+    // tiêu chí chung kiểu "tên lặp >=3 lần" dry-run đã thấy nuốt cả tin thật
+    // ("Đúng rồi", "Khg got nhé") nên chỉ nhắm thread + content cụ thể.
+    // Mốc thời gian = trước ngày ship parser fix: phantom đều cũ hơn mốc,
+    // tin thật sinh SAU mốc không bao giờ bị đụng -> heal tự triệt tiêu.
+    const PHANTOM_LABEL_CUTOFF_MS = Date.parse('2026-10-11T00:00:00+07:00');
+    const phantomLabelCandidates = db.prepare(`
+      SELECT id, thread_id, content FROM messages
+      WHERE is_outgoing = 0
+        AND (timestamp_ms IS NULL OR timestamp_ms < ?)
+        AND (
+          (thread_id = '2211776809571916' AND content IN ('Tiến Quang', 'Linh', 'Tèo'))
+          OR (thread_id = '100071663024971' AND content = 'Li Min Tài đã trả lời bạn')
+        )
+    `).all(PHANTOM_LABEL_CUTOFF_MS);
+    let deletedPhantomLabelCount = 0;
+    for (const row of phantomLabelCandidates) {
+      deleteReplyHeader.run(row.id);
+      const newest = previewNewest.get(row.thread_id);
+      setThreadPreview.run(newest?.content || '[Tin nhắn]', row.thread_id, row.content);
+      deletedPhantomLabelCount++;
+    }
+
+    // (4e) Sau khi parser history bốc member_name, mọi row incoming mà NỘI
+    // DUNG == TÊN NGƯỜI GỬI là mảnh nhãn tên DOM (parser đã vá không bao giờ
+    // emit cặp content==member_name nữa). So khớp JS-side để normalize
+    // whitespace/case giống đúng skip phía extension.
+    const memberNameEchoCandidates = db.prepare(`
+      SELECT id, thread_id, content, sender_name FROM messages
+      WHERE is_outgoing = 0
+        AND sender_name IS NOT NULL AND TRIM(sender_name) != ''
+        AND (media_type IS NULL OR media_type = 'text')
+    `).all();
+    let deletedMemberNameEchoCount = 0;
+    const normWs = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    for (const row of memberNameEchoCandidates) {
+      if (normWs(row.content) !== normWs(row.sender_name)) continue;
+      deleteReplyHeader.run(row.id);
+      const newest = previewNewest.get(row.thread_id);
+      setThreadPreview.run(newest?.content || '[Tin nhắn]', row.thread_id, row.content);
+      deletedMemberNameEchoCount++;
+    }
+
+    // (4f) Header reply bên thứ ba "X đã trả lời Y" / "X replied to Y" lọt qua
+    // 2 parser DOM (content.js realtime + background.js history) ở pass
+    // hydration thiếu khối quote (h3 biến div) -> row ma song song tin reply
+    // thật kèm mid gốc, tái sinh sau mỗi lần dọn nếu chỉ dùng migration
+    // (reproduce 2026-10-15 nhóm Cfggh). Chỉ đụng row extension ingest
+    // (mid.$ / @msgr); row Graph watcher (m_...) như "X đã trả lời về một bài
+    // viết" là event page inbox, giữ. Tin quảng cáo "X đã trả lời một quảng
+    // cáo." là nội dung thật (isAdNotice), giữ. Regex đồng bộ
+    // REPLY_HEADER_BUBBLE_RE trong content.js + background.js.
+    const REPLY_HEADER_GHOST_RE = /^[^?！?\n]{1,48}\s(?:đã trả lời|replied to)\s(?!(?:.*\s)?(?:chưa|rồi|xong|sao|đâu|gì|à|hả|nhỉ|nha|nhé|thôi|luôn|vậy|đấy|đó|ạ|nhá|rùi|nè|được|yet|already|right|now|ok|okay)\s*[?！?.!…]*$)[^?！?\n]{1,60}$/iu;
+    const headerGhostCandidates = db.prepare(`
+      SELECT id, thread_id, content FROM messages
+      WHERE (content LIKE '% đã trả lời %' OR content LIKE '% replied to %')
+        AND (fb_message_id LIKE 'mid.$%' OR fb_message_id LIKE '%@msgr.%')
+        AND (media_type IS NULL OR media_type = 'text')
+    `).all();
+    let deletedHeaderGhostCount = 0;
+    const headerGhostThreadIds = new Set();
+    for (const row of headerGhostCandidates) {
+      const text = String(row.content || '').trim();
+      if (/quảng cáo|replied to (?:an |your )?ad/i.test(text)) continue;
+      if (/bài viết|story/i.test(text)) continue;
+      if (!REPLY_HEADER_GHOST_RE.test(text)) continue;
+      deleteReplyHeader.run(row.id);
+      const newest = previewNewest.get(row.thread_id);
+      setThreadPreview.run(newest?.content || '[Tin nhắn]', row.thread_id, row.content);
+      headerGhostThreadIds.add(row.thread_id);
+      deletedHeaderGhostCount++;
+    }
+    for (const ghostTid of headerGhostThreadIds) {
+      io.emit('THREAD_MESSAGES_UPDATED', { thread_id: ghostTid, account_id: null });
+    }
+
+    // (4g) Row preview NHÓM ingest trước khi ingestion tách prefix còn giữ
+    // content "Tên: nội dung" -> tách để bubble nhóm render tên thành viên
+    // như tin thật. Guard: prefix phải giống tên người (chữ/khoảng trắng,
+    // <=5 từ) + thread phải có >=2 sender incoming khác nhau (nhóm thật —
+    // 1-1 có text "Lưu ý: xyz" không bị tách mất nội dung).
+    const previewPrefixRows = db.prepare(`
+      SELECT id, thread_id, content FROM messages
+      WHERE fb_message_id LIKE 'sidebar_preview_%' AND content LIKE '%: %'
+    `).all();
+    const distinctIncomingSenders = db.prepare(`
+      SELECT COUNT(DISTINCT sender_name) AS n FROM messages
+      WHERE thread_id = ? AND is_outgoing = 0 AND sender_name IS NOT NULL AND TRIM(sender_name) != ''
+    `);
+    let fixedPreviewPrefixCount = 0;
+    const previewPrefixThreadIds = new Set();
+    for (const row of previewPrefixRows) {
+      const m = String(row.content || '').match(/^([^:\n]{1,40}):\s+(.+)$/s);
+      if (!m) continue;
+      const prefixName = m[1].trim();
+      const suffix = m[2].trim();
+      if (prefixName.length < 2 || prefixName.split(/\s+/).length > 5) continue;
+      if (!/^[\p{L}\p{M}][\p{L}\p{M}\s.'\-]*$/u.test(prefixName)) continue;
+      if (!suffix || /^[^:\n]{1,40}:\s+/.test(suffix)) continue;
+      if (Number(distinctIncomingSenders.get(row.thread_id).n) < 2) continue;
+      db.prepare("UPDATE messages SET content = ?, sender_name = COALESCE(NULLIF(TRIM(sender_name), ''), ?) WHERE id = ?").run(suffix, prefixName, row.id);
+      previewPrefixThreadIds.add(row.thread_id);
+      fixedPreviewPrefixCount++;
+    }
+    for (const prefixTid of previewPrefixThreadIds) {
+      io.emit('THREAD_MESSAGES_UPDATED', { thread_id: prefixTid, account_id: null });
+    }
+
+    // (4h) Backfill reply_to_id/reply_to_sender_name cho quote reply cũ: row
+    // lưu trước khi có cột (hoặc tin gốc đổ vào SAU tin reply trong cùng đợt
+    // sync) chưa có neo tin gốc -> UI không hiện tên và không click-lướt được.
+    const replyTargetBackfillRows = db.prepare(`
+      SELECT id, thread_id, reply_to_text, timestamp_ms FROM messages
+      WHERE reply_to_text IS NOT NULL AND TRIM(reply_to_text) != ''
+        AND reply_to_id IS NULL
+    `).all();
+    let backfilledReplyTargetCount = 0;
+    for (const row of replyTargetBackfillRows) {
+      if (storeReplyTargetForRow(row.id, row.thread_id, row.reply_to_text, row.timestamp_ms)) {
+        backfilledReplyTargetCount++;
+      }
+    }
+    if (backfilledReplyTargetCount > 0) {
+      console.log(`[DB] 🧹 Nối quote reply tới tin gốc: ${backfilledReplyTargetCount} tin.`);
+    }
+
+    const totalJunk = deletedNoticeCount + dupThreadIds.size + sepThreadIds.size + fixedMojibakeCount + deletedReplyHeaderCount + deletedPhantomLabelCount + deletedMemberNameEchoCount + deletedHeaderGhostCount + fixedPreviewPrefixCount;
     if (totalJunk > 0) {
-      console.log(`[DB] 🧹 Heal tin rác/nhân đôi: ${deletedNoticeCount} notice E2EE, ${dupThreadIds.size} bubble dom_ trùng mid thật, ${sepThreadIds.size} separator thời gian, ${fixedMojibakeCount} emoji mojibake (${totalJunk} vị trí)`);
+      console.log(`[DB] 🧹 Heal tin rác/nhân đôi: ${deletedNoticeCount} notice E2EE, ${dupThreadIds.size} bubble dom_ trùng mid thật, ${sepThreadIds.size} separator thời gian, ${fixedMojibakeCount} emoji mojibake, ${deletedReplyHeaderCount} header reply, ${deletedPhantomLabelCount} nhãn tên nhóm, ${deletedMemberNameEchoCount} mảnh tên==sender, ${deletedHeaderGhostCount} header reply ghost, ${fixedPreviewPrefixCount} preview dán prefix (${totalJunk} vị trí)`);
     }
 
     const activeThreads = db.prepare('SELECT DISTINCT thread_id FROM messages').all();
@@ -8583,6 +9389,7 @@ function startServer() {
       return { success: false, error: result.error, errorCode: result.errorCode };
     },
     onQueueFail: (message, reason) => {
+      try { CommentLeadsService.markQueueFailed(message.id, reason); } catch (_) { /* lead tracking best-effort */ }
       if (message.outbound_attempt_id) {
         const attempt = OutboundAttemptRepository.getById(message.outbound_attempt_id, db);
         const richMessage = attempt
@@ -8625,6 +9432,7 @@ function startServer() {
   const recoverySummary = CampaignRecoveryService.reconcile({ database: db });
   console.log('[CampaignRecovery]', recoverySummary);
   queueWorker.start();
+  CommentLeadsService.startReplyWatcher(io);
   if (CampaignService.getConfig().enabled) {
     setTimeout(() => campaignRunner.recover(), 1500);
   }

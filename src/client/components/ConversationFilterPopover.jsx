@@ -13,11 +13,6 @@ import {
   toggleQuickFilter
 } from '../utils/conversationFilters.js';
 
-const WORKFLOW_OPTIONS = [
-  { value: 'UNPROCESSED', label: 'Chưa xử lý', color: 'bg-sky-500' },
-  { value: 'ASSIGNED', label: 'Đang xử lý', color: 'bg-amber-500' },
-  { value: 'COMPLETED', label: 'Đã chốt', color: 'bg-emerald-500' }
-];
 const QUICK_OPTIONS = [
   { value: 'due', label: 'Cần nhắc', icon: BellRing },
   { value: 'unread', label: 'Chưa đọc', icon: Mail },
@@ -138,7 +133,6 @@ export default function ConversationFilterPopover({ isOpen, appliedFilters, inbo
           </div>;
         })()}
       </FilterSection>
-      <FilterSection title="Trạng thái xử lý" icon={CircleDot}><div className="grid grid-cols-3 gap-1">{WORKFLOW_OPTIONS.map((option) => <ToggleOption key={option.value} selected={draftFilters.workflowStates.includes(option.value)} onClick={() => toggle('workflowStates', option.value)} className="justify-center"><span className={'h-2 w-2 rounded-full ' + option.color} />{option.label}</ToggleOption>)}</div></FilterSection>
       {leadStatuses.length > 0 && <FilterSection title="Trạng thái khách hàng" icon={CircleDot}><div className="flex flex-wrap gap-1.5">{leadStatuses.map((status) => <ToggleOption key={status.id} selected={draftFilters.statusIds.includes(String(status.id))} onClick={() => toggle('statusIds', String(status.id))}><span className="h-2 w-2 rounded-full" style={{ backgroundColor: status.color || 'var(--color-accent)' }} />{status.name}</ToggleOption>)}</div></FilterSection>}
       <FilterSection title="Nhãn" icon={Tag}><div className="flex flex-wrap gap-1.5">{tagOptions.length ? tagOptions.map((tag) => <ToggleOption key={tag.value} selected={draftFilters.tagNames.includes(tag.value)} onClick={() => toggle('tagNames', tag.value)}><Tag size={11} />{tag.label}</ToggleOption>) : <p className="text-[11px] text-[var(--color-text-muted)]">Chưa có nhãn trong danh sách.</p>}</div></FilterSection>
       <FilterSection title="Tin nhắn & nhắc" icon={BellRing}><div className="grid grid-cols-2 gap-1.5"><ToggleOption selected={draftFilters.unreadStates.includes('unread')} onClick={() => toggle('unreadStates', 'unread')}><Mail size={12} />Chưa đọc</ToggleOption><ToggleOption selected={draftFilters.unreadStates.includes('read')} onClick={() => toggle('unreadStates', 'read')}><Mail size={12} />Đã đọc</ToggleOption>{[{ value: 'due', label: 'Đến hạn' }, { value: 'today', label: 'Hôm nay' }, { value: 'future', label: 'Sắp tới' }, { value: 'none', label: 'Không có nhắc' }].map((option) => <ToggleOption key={option.value} selected={draftFilters.reminderStates.includes(option.value)} onClick={() => toggle('reminderStates', option.value)}>{option.label}</ToggleOption>)}</div></FilterSection>

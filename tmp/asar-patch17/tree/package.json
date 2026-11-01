@@ -1,0 +1,30 @@
+{
+  "name": "autochatbot-fb-crm",
+  "version": "1.0.0",
+  "description": "FB Personal Messenger CRM - Desktop Application",
+  "author": "Adsup <contact@adsup.vn>",
+  "main": "src/electron.js",
+  "dependencies": {
+    "archiver": "^5.3.2",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "12.4.1",
+    "emoji-picker-react": "^4.19.1",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.2",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.475.0",
+    "puppeteer-core": "^25.9.0",
+    "react": "^19.0.0",
+    "react-colorful": "^5.8.0",
+    "react-dom": "^19.0.0",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
+    "ws": "^8.18.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.4.1": true,
+    "electron@31.0.0": true,
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.25.12": true
+  }
+}

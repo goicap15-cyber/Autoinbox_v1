@@ -1,0 +1,11 @@
+const asar = require('@electron/asar');
+const fs = require('fs');
+const path = require('path');
+const inAsar = asar.extractFile('tmp/asar-patch2/out-app.asar', 'dist\\extension\\background.js');
+const shipped = fs.readFileSync('release/win-unpacked/resources/extension/background.js');
+const dist = fs.readFileSync('dist/extension/background.js');
+console.log('asar size', inAsar.length, '| shipped size', shipped.length, '| dist size', dist.length);
+console.log('asar == shipped:', inAsar.equals(shipped));
+console.log('shipped == dist:', shipped.equals(dist));
+console.log('shipped has cold-outreach marker:', shipped.toString('utf8').includes('PROFILE_COMPOSER_NOT_FOUND'));
+console.log('asar ext has cold-outreach marker:', inAsar.toString('utf8').includes('PROFILE_COMPOSER_NOT_FOUND'));

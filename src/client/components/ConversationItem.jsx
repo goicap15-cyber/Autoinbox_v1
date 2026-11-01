@@ -38,6 +38,13 @@ function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSo
     setCtxMenu(null);
     if (onTogglePin) onTogglePin(thread, !isPinned);
   };
+  // Icon ghim trên dòng ghim bấm được = bỏ ghim luôn (không cần chuột phải).
+  const handleUnpinBadge = (event) => {
+    if (!onTogglePin || !isPinned) return;
+    event.stopPropagation();
+    event.preventDefault();
+    onTogglePin(thread, false);
+  };
   const handleToggleUnread = (event) => {
     if (!onToggleUnread) return;
     event.stopPropagation();
@@ -141,11 +148,19 @@ function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSo
           <span className={'text-sm truncate ' + (unreadCount > 0 ? 'font-bold' : 'font-semibold') + ' text-[var(--color-text-primary)]'}>{title}</span>
           <span className="flex items-center gap-1 flex-shrink-0">
             {isPinned && (
-              <span title="Đã ghim hội thoại" aria-label="Đã ghim hội thoại" className="text-[var(--color-accent)]">
+              <span
+                role="button"
+                tabIndex={0}
+                onClick={handleUnpinBadge}
+                onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') handleUnpinBadge(event); }}
+                title="Bấm để bỏ ghim"
+                aria-label="Bấm để bỏ ghim hội thoại"
+                className="text-[var(--color-accent)] cursor-pointer rounded-sm hover:text-[var(--color-danger)] hover:bg-[var(--color-bg-hover)] transition-colors"
+              >
                 <Pin size={11} strokeWidth={2.4} className="rotate-45" />
               </span>
             )}
-            <span className="text-xs text-[var(--color-text-muted)] font-mono">{formatTime(thread.last_activity)}</span>
+            <span className="text-xs text-[var(--color-text-muted)] font-mono">{formatTime(thread.last_msg_ts || thread.last_activity)}</span>
           </span>
         </div>
         <p className={'text-xs truncate mb-1.5 ' + (unreadCount > 0 ? 'text-[var(--color-text-primary)] font-semibold' : 'text-[var(--color-text-muted)]')}>{preview}</p>

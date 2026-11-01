@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { X, ExternalLink, ShieldAlert, RefreshCw, PlusCircle, Trash2, Monitor, Layers } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { X, ExternalLink, ShieldAlert, RefreshCw, PlusCircle, Trash2, Monitor, Layers, DownloadCloud, CheckCircle2 } from 'lucide-react';
 import ConfirmModal from './ConfirmModal';
 import PageSelectorModal from './PageSelectorModal';
 
@@ -23,6 +23,23 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
   const [pageConnectLoading, setPageConnectLoading] = useState(false);
   const [initialAccountIds, setInitialAccountIds] = useState(null);
   const [initialDisconnectedAccountIds, setInitialDisconnectedAccountIds] = useState(null);
+  const [vsConfig, setVsConfig] = useState(null);
+  const [vsKeyInput, setVsKeyInput] = useState('');
+  const [vsLimit, setVsLimit] = useState(10);
+  const [vsBusy, setVsBusy] = useState(false);
+  const [vsJob, setVsJob] = useState(null);
+  const [vsError, setVsError] = useState('');
+  const [vsList, setVsList] = useState(null);
+  const [vsListBusy, setVsListBusy] = useState(false);
+  const [vsSelected, setVsSelected] = useState(() => new Set());
+  const [vsDeadSkipped, setVsDeadSkipped] = useState(0);
+
+  // App re-render mỗi giây (đồng hồ + reconcile 1s) làm prop arrow-inline đổi
+  // identity liên tục — nếu đưa thẳng vào deps của effect có setInterval thì
+  // interval bị reset mỗi giây và KHÔNG BAO GIỜ fire (poll import-status chết
+  // đói, spinner treo vĩnh viễn). Giữ callback qua ref để interval ổn định.
+  const onSourcesChangedRef = useRef(onSourcesChanged);
+  useEffect(() => { onSourcesChangedRef.current = onSourcesChanged; }, [onSourcesChanged]);
 
   const loadInboxSources = async () => {
     try {
@@ -152,6 +169,166 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
       clearInterval(timer);
     };
   }, [addingSession, pendingKey, onSourcesChanged]);
+
+  // ── Viet Seeding: config + tiến trình nhập ──
+  useEffect(() => {
+    if (!isCompanyAdmin) return;
+    let stopped = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/accounts/vietseeding/config');
+        const data = await res.json();
+        if (!stopped && res.ok) setVsConfig({ configured: Boolean(data.configured), api_key_masked: data.api_key_masked });
+      } catch (_) {}
+      try {
+        const res = await fetch('/api/accounts/vietseeding/import-status');
+        const data = await res.json();
+        if (!stopped && data?.job) setVsJob(data.job);
+      } catch (_) {}
+    })();
+    return () => { stopped = true; };
+  }, [isCompanyAdmin]);
+
+  useEffect(() => {
+    if (!vsJob || vsJob.status !== 'RUNNING') return;
+    let stopped = false;
+    let failCount = 0;
+    const endLocalJob = (error) => {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      setVsJob((j) => (j && j.status === 'RUNNING' ? { ...j, status: 'FAILED', error } : j));
+    };
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch('/api/accounts/vietseeding/import-status');
+        const data = await res.json().catch(() => ({}));
+        if (stopped) return;
+        if (!res.ok || !data?.job) {
+          // Server không còn job nào trong lúc local đang RUNNING: app đã restart
+          // hoặc đợt nhập mất — kết thúc spinner thay vì quay vô hạn.
+          failCount += 1;
+          if (failCount >= 3) endLocalJob('Mất liên lạc với đợt nhập (app có thể đã khởi động lại). Kiểm tra danh sách tài khoản.');
+          return;
+        }
+        failCount = 0;
+        setVsJob(data.job);
+        if (data.job.status !== 'RUNNING') {
+          loadAccounts();
+          onSourcesChangedRef.current?.();
+        }
+      } catch (_) {
+        failCount += 1;
+        if (failCount >= 5) endLocalJob('Không truy vấn được tiến trình nhập — kiểm tra kết nối rồi thử lại.');
+      }
+    }, 2000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [vsJob?.id, vsJob?.status]);
+
+  const handleSaveVsKey = async () => {
+    setVsError('');
+    if (!vsKeyInput.trim()) {
+      setVsError('Nhập API key trước khi lưu.');
+      return;
+    }
+    setVsBusy(true);
+    try {
+      const res = await fetch('/api/accounts/vietseeding/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: vsKeyInput.trim() })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Không lưu được API key');
+      setVsConfig({ configured: true, api_key_masked: data.api_key_masked });
+      setVsKeyInput('');
+    } catch (err) {
+      setVsError(err.message);
+    } finally {
+      setVsBusy(false);
+    }
+  };
+
+  const handleVsFetchList = async () => {
+    setVsError('');
+    setVsListBusy(true);
+    try {
+      const res = await fetch('/api/accounts/vietseeding/list-accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: Math.max(1, Math.min(100, Number(vsLimit) || 10)) })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Không lấy được danh sách tài khoản');
+      setVsList(data.accounts || []);
+      setVsDeadSkipped(data.dead_skipped || 0);
+      setVsSelected(new Set());
+    } catch (err) {
+      setVsError(err.message);
+    } finally {
+      setVsListBusy(false);
+    }
+  };
+
+  const toggleVsSelected = (identifier) => {
+    setVsSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(identifier)) next.delete(identifier);
+      else next.add(identifier);
+      return next;
+    });
+  };
+
+  const toggleVsAll = () => {
+    setVsSelected((prev) => {
+      // "Chọn tất cả" chỉ tick các tk CHƯA có trong CRM — tk đã có sẵn server
+      // cũng bỏ qua (EXISTS) nên tick vào chỉ gây nhiễu kết quả.
+      const importableIds = (vsList || [])
+        .filter((a) => !accounts.some((acc) => String(acc.id) === String(a.identifier)))
+        .map((a) => a.identifier);
+      const allSelected = importableIds.length > 0 && importableIds.every((id) => prev.has(id));
+      return allSelected ? new Set() : new Set(importableIds);
+    });
+  };
+
+  const handleVsImport = async () => {
+    const selected = [...vsSelected];
+    if (!selected.length) {
+      setVsError('Chọn ít nhất một tài khoản trong danh sách trước khi nhập.');
+      return;
+    }
+    setVsError('');
+    setVsBusy(true);
+    try {
+      const res = await fetch('/api/accounts/vietseeding/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifiers: selected })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Không bắt đầu được đợt nhập');
+      setVsJob({
+        id: data.job_id,
+        status: 'RUNNING',
+        total: 0,
+        processed: 0,
+        imported: 0,
+        skipped: 0,
+        failed: 0,
+        current: null,
+        results: [],
+        note: null,
+        error: null
+      });
+    } catch (err) {
+      setVsError(err.message);
+    } finally {
+      setVsBusy(false);
+    }
+  };
 
   const handleAddNewAccount = async () => {
     setAccountActionError('');
@@ -351,6 +528,174 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
               >
                 Hủy
               </button>
+            </div>
+          )}
+
+          {/* Viet Seeding: nhập account hàng loạt bằng cookie từ API */}
+          {isCompanyAdmin && (
+            <div className="border-t border-slate-800 pt-4 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="text-xs font-semibold text-slate-100 uppercase tracking-wider flex items-center gap-1.5">
+                  <DownloadCloud size={14} className="text-emerald-400" />
+                  <span>Nhập từ Viet Seeding</span>
+                </h4>
+                {vsConfig?.configured && (
+                  <span className="text-[10px] text-emerald-400 font-mono">key: {vsConfig.api_key_masked}</span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                Lấy danh sách tài khoản từ API Viet Seeding (tk die bị loại sẵn theo trạng thái live), tích chọn
+                tk muốn nhập rồi bấm nhập. Chrome sẽ mở lần lượt từng tk đã chọn — không cần gõ mật khẩu,
+                không cần OTP nếu cookie còn sống.
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="password"
+                  value={vsKeyInput}
+                  onChange={(e) => setVsKeyInput(e.target.value)}
+                  placeholder={vsConfig?.configured ? 'Đã lưu key — nhập key mới để thay thế' : 'API key Viet Seeding (Bearer)'}
+                  className="flex-1 min-w-0 px-2.5 py-1.5 bg-slate-950 border border-slate-700/60 rounded-md text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-slate-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveVsKey}
+                  disabled={vsBusy || !vsKeyInput.trim()}
+                  className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/60 transition-colors disabled:opacity-40 shrink-0"
+                >
+                  Lưu key
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] text-slate-400 shrink-0" title="Số tk lấy từ API mỗi lần bấm">Số lượng</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={vsLimit}
+                  onChange={(e) => setVsLimit(e.target.value)}
+                  className="w-16 px-2 py-1.5 bg-slate-950 border border-slate-700/60 rounded-md text-xs text-slate-200 focus:outline-none focus:border-slate-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleVsFetchList}
+                  disabled={vsListBusy || vsBusy || vsJob?.status === 'RUNNING'}
+                  className="flex-1 px-3 py-1.5 rounded-md text-xs font-bold bg-sky-600 hover:bg-sky-500 text-white transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5"
+                >
+                  {vsListBusy
+                    ? (<><RefreshCw size={13} className="animate-spin" /><span>Đang lấy danh sách…</span></>)
+                    : (<><RefreshCw size={13} /><span>Lấy danh sách tài khoản</span></>)}
+                </button>
+              </div>
+
+              {vsList && (
+                <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-2 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        className="accent-emerald-500"
+                        checked={(vsList || []).length > 0 && (vsList || []).every((a) => vsSelected.has(a.identifier))}
+                        onChange={toggleVsAll}
+                      />
+                      <span>Chọn tất cả ({(vsList || []).length} live{vsSelected.size ? ` · đã tích ${vsSelected.size}` : ''})</span>
+                    </label>
+                    <span className="text-[10px] text-slate-500 shrink-0">
+                      {vsDeadSkipped > 0 ? `bỏ qua ${vsDeadSkipped} tk die` : 'không có tk die'}
+                    </span>
+                  </div>
+                  <div className="max-h-40 overflow-y-auto space-y-0.5 pr-1">
+                    {vsList.map((a) => {
+                      // Tag + tên tính LIVE theo accounts hiện tại của CRM (refresh 3s):
+                      // xóa tk khỏi CRM là row tự về "live" và hiện tên từ API (nếu có).
+                      const crmAccount = accounts.find((acc) => String(acc.id) === String(a.identifier));
+                      const name = a.name || crmAccount?.name || null;
+                      return (
+                        <label key={a.identifier} className="flex items-center gap-2 rounded px-1 py-0.5 hover:bg-slate-900 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="accent-emerald-500 shrink-0"
+                            checked={vsSelected.has(a.identifier)}
+                            onChange={() => toggleVsSelected(a.identifier)}
+                          />
+                          <span className="font-mono text-[11px] text-slate-400 truncate">{a.identifier}</span>
+                          {name && <span className="text-[11px] text-slate-200 truncate flex-1 min-w-0" title={name}>{name}</span>}
+                          <span className={'ml-auto shrink-0 text-[10px] ' + (crmAccount ? 'text-sky-400' : 'text-emerald-400')}>
+                            {crmAccount ? 'đã có sẵn' : (a.status || 'live')}
+                          </span>
+                        </label>
+                      );
+                    })}
+                    {!vsList.length && (
+                      <div className="text-[11px] text-slate-500 px-1 py-2">API không có tài khoản live nào trong lô này.</div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleVsImport}
+                    disabled={vsBusy || vsJob?.status === 'RUNNING' || vsSelected.size === 0}
+                    className="w-full px-3 py-1.5 rounded-md text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5"
+                  >
+                    {vsJob?.status === 'RUNNING'
+                      ? (<><RefreshCw size={13} className="animate-spin" /><span>Đang nhập…</span></>)
+                      : (<><DownloadCloud size={13} /><span>Nhập {vsSelected.size} tài khoản đã chọn</span></>)}
+                  </button>
+                </div>
+              )}
+
+              {vsJob && (
+                <div className="p-2.5 rounded-lg border border-slate-800 bg-slate-950/60 text-[11px] space-y-1.5">
+                  <div className="flex items-center justify-between gap-2 text-slate-300">
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      {vsJob.status === 'RUNNING'
+                        ? <RefreshCw size={12} className="animate-spin text-emerald-400 shrink-0" />
+                        : vsJob.status === 'FAILED'
+                          ? <X size={12} className="text-red-400 shrink-0" />
+                          : <CheckCircle2 size={12} className="text-emerald-400 shrink-0" />}
+                      <span className="truncate">
+                        {vsJob.status === 'RUNNING'
+                          ? (vsJob.phase === 'FETCH'
+                            ? 'Đang lấy cookie từ Viet Seeding…'
+                            : (vsJob.total
+                              ? `Đang nhập ${vsJob.processed}/${vsJob.total}${vsJob.current ? `: ${vsJob.current}` : ''}`
+                              : 'Đang lấy danh sách cookie từ Viet Seeding…'))
+                          : vsJob.status === 'FAILED'
+                            ? 'Đợt nhập thất bại'
+                            : (vsJob.note || `Hoàn tất: ${vsJob.imported} mới · ${vsJob.skipped || 0} đã có sẵn (bỏ qua) · ${vsJob.failed} lỗi`)}
+                      </span>
+                    </span>
+                    {vsJob.status !== 'RUNNING' && (
+                      <button type="button" onClick={() => setVsJob(null)} className="text-slate-500 hover:text-slate-300 shrink-0" aria-label="Ẩn tiến trình">
+                        <X size={12} />
+                      </button>
+                    )}
+                  </div>
+                  {vsJob.error && <div className="text-red-400">{vsJob.error}</div>}
+                  {vsJob.results?.length > 0 && (
+                    <div className="max-h-24 overflow-y-auto space-y-0.5 pr-1">
+                      {vsJob.results.map((r, i) => (
+                        <div key={`${r.identifier}-${i}`} className="flex items-center justify-between gap-2">
+                          <span className="truncate font-mono text-slate-500">{r.identifier}</span>
+                          <span className={`shrink-0 truncate max-w-[60%] ${
+                            r.status === 'IMPORTED' ? 'text-emerald-400' : r.status === 'EXISTS' ? 'text-sky-400' : 'text-red-400'
+                          }`}>
+                            {r.status === 'IMPORTED'
+                              ? `đã nhập${r.name ? ` · ${r.name}` : ''}`
+                              : r.status === 'EXISTS'
+                                ? 'đã có sẵn'
+                                : (r.error || 'lỗi')}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {vsError && (
+                <div className="text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+                  {vsError}
+                </div>
+              )}
             </div>
           )}
 

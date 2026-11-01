@@ -10,9 +10,22 @@ class MessageQueueRepository {
   static insert(messageData, database = getDefaultDb()) {
     if (messageData.idempotency_key) {
       const existing = database.prepare(
-        'SELECT id FROM message_queue WHERE idempotency_key = ?'
+        'SELECT id, status FROM message_queue WHERE idempotency_key = ?'
       ).get(messageData.idempotency_key);
-      if (existing) return existing.id;
+      if (existing) {
+        // Re-enqueue của lead FAILED phải sống lại row: worker chỉ nhặt
+        // 'pending', nên reuse nguyên trạng thái làm spinner "Đang gửi" quay
+        // vô hạn mà không có lần gửi nào (reproduce 2026-10-13 14:33).
+        // Chỉ hồi sinh từ 'failed' - không đụng sent/processing/pending/cancelled.
+        if (existing.status === 'failed') {
+          database.prepare(`
+            UPDATE message_queue
+            SET status = 'pending', error_reason = NULL, processed_at = NULL, content = ?
+            WHERE id = ?
+          `).run(messageData.content || '', existing.id);
+        }
+        return existing.id;
+      }
     }
     const id = crypto.randomUUID();
     try {
@@ -62,9 +75,18 @@ class MessageQueueRepository {
         /UNIQUE constraint failed: message_queue.idempotency_key/.test(error.message)
       ) {
         const existing = database.prepare(
-          'SELECT id FROM message_queue WHERE idempotency_key = ?'
+          'SELECT id, status FROM message_queue WHERE idempotency_key = ?'
         ).get(messageData.idempotency_key);
-        if (existing) return existing.id;
+        if (existing) {
+          if (existing.status === 'failed') {
+            database.prepare(`
+              UPDATE message_queue
+              SET status = 'pending', error_reason = NULL, processed_at = NULL, content = ?
+              WHERE id = ?
+            `).run(messageData.content || '', existing.id);
+          }
+          return existing.id;
+        }
       }
       throw error;
     }

@@ -12,7 +12,7 @@
  *    tab messenger ca nhan da registry role lam viec (history/chat/campaign/
  *    request_action), tab nguoi dung tu mo (khong khop pattern).
  *  - DONG: tab messenger/trang messages KHONG registry (leftover), tab
- *    discovery/requests da registry (be mat transient, flow tu tao lai),
+ *    discovery da registry (be mat transient, flow tu tao lai),
  *    tab BS trung lap cung page.
  *  - KHONG DONG: tab active cua bat ky window nao (chi dong sau khi keeper
  *    duoc activate - do background ap dung), tab khong khop pattern (cua
@@ -52,9 +52,12 @@
   }
 
   // Luật ổn định cho group messenger: các role làm việc thực sự.
-  var PERSONAL_KEEP_ROLES = new Set(['history', 'chat', 'campaign', 'request_action', 'send']);
+  // 2026-10-16: 'requests' về KEEP - tin nhắn chờ quét nền liên tục 30s nên
+  // tab requests phải sống thường trực; audit đóng nó sẽ làm quét tạo lại
+  // tab mỗi vòng (flap).
+  var PERSONAL_KEEP_ROLES = new Set(['history', 'chat', 'campaign', 'request_action', 'send', 'requests']);
   // Role tạm (bề mặt đắt, đóng khi rảnh - flow tự mở lại khi cần).
-  var PERSONAL_TRANSIENT_ROLES = new Set(['discovery', 'requests']);
+  var PERSONAL_TRANSIENT_ROLES = new Set(['discovery']);
 
   function classifyTabsForAudit(options) {
     const tabs = Array.isArray(options && options.tabs) ? options.tabs : [];

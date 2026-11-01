@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Search, Edit, Filter, Megaphone, RefreshCw, X }  from 'lucide-react';
+import { Search, Edit, Filter, Megaphone, RefreshCw, X, ScanSearch }  from 'lucide-react';
 import ConversationFilters from './ConversationFilters.jsx';
 import ConversationItem from './ConversationItem.jsx';
 import ConversationFilterPopover from './ConversationFilterPopover.jsx';
@@ -72,7 +72,7 @@ export default function ConversationSidebar({
   campaignSelectionMode = false,
   selectedCampaignThreadIds = [],
   onToggleCampaignThread,
-  onStartCampaignSelection, onCancelCampaignSelection, onCreateCampaign,
+  onStartCampaignSelection, onCancelCampaignSelection, onCreateCampaign, onOpenCommentLeads,
   onBulkHistorySync, onContinueFacebookSync, onCancelFacebookSync, bulkHistoryProgress,
   dateFilter = '', dateFilterIds = null, onDateFilterChange, onToggleUnread, onTogglePin
 }) {
@@ -178,6 +178,9 @@ export default function ConversationSidebar({
             </div>
             <button onClick={onOpenSearch} className="p-1.5 hover:bg-[var(--color-bg-hover)] rounded-full transition-colors cursor-pointer" title="Tìm kiếm nhanh" aria-label="Tìm kiếm nhanh">
               <Edit size={17} className="text-[var(--color-text-muted)]" strokeWidth={1.75} />
+            </button>
+            <button onClick={onOpenCommentLeads} className="p-1.5 hover:bg-[var(--color-bg-hover)] rounded-full transition-colors cursor-pointer" title="Khách bình luận bài viết" aria-label="Khách bình luận bài viết">
+              <ScanSearch size={17} className="text-[var(--color-text-muted)]" strokeWidth={1.75} />
             </button>
             <button onClick={onStartCampaignSelection} className={'p-1.5 rounded-full transition-colors cursor-pointer ' + (campaignSelectionMode ? 'bg-[var(--color-accent-subtle)] text-[var(--color-accent)]' : 'hover:bg-[var(--color-bg-hover)] text-[var(--color-text-muted)]')} title="Chọn người nhận campaign" aria-label="Chọn người nhận campaign">
               <Megaphone size={17} strokeWidth={1.75} />

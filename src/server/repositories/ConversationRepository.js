@@ -409,6 +409,31 @@ class ConversationRepository {
     database.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = CURRENT_TIMESTAMP WHERE id = ?').run(lastMessage, threadId);
   }
 
+  // last_activity bị mọi luồng sync/seen/mở hội thoại bump mà không có tin mới
+  // (đo DB sống 2026-10-11: Bi-aaaaaaa lệch 496 giờ, 12 thread bị bump trong
+  // cùng 11 giây). Sidebar phải xếp và hiển thị theo thời gian TIN NHẮN THẬT
+  // mới nhất; last_activity chỉ còn là fallback khi thread chưa có tin nào.
+  // Ghi đè lên row trả về (DB column giữ nguyên) nên mọi consumer REST/WS
+  // dùng chung một giá trị sạch.
+  static attachRealActivity(rows, database = getDefaultDb()) {
+    if (!Array.isArray(rows) || !rows.length) return rows;
+    const ids = [...new Set(rows.map((row) => String(row?.id || '')).filter(Boolean))];
+    if (!ids.length) return rows;
+    const maxByThread = new Map(database.prepare(`
+      SELECT thread_id, MAX(timestamp_ms) AS max_ts
+      FROM messages
+      WHERE timestamp_ms > 0 AND thread_id IN (${ids.map(() => '?').join(',')})
+      GROUP BY thread_id
+    `).all(...ids).map((r) => [String(r.thread_id), Number(r.max_ts)]));
+    for (const row of rows) {
+      const maxTs = maxByThread.get(String(row?.id || ''));
+      if (!maxTs) continue;
+      row.last_msg_ts = maxTs;
+      row.last_activity = new Date(maxTs).toISOString();
+    }
+    return rows;
+  }
+
   // History crawling must not make an old conversation look newly active.
   // Advance the sidebar only when the observed Facebook timestamp is newer
   // than the timestamp already stored for the thread.
@@ -466,9 +491,10 @@ class ConversationRepository {
   static saveMessagesTransaction(threadId, messages = [], database = getDefaultDb()) {
     if (isBlacklistedThreadId(threadId)) return { insertedIds: [], updatedIds: [], skippedCount: 0 };
     const insertMsg = database.prepare(`
-      INSERT INTO messages (thread_id, fb_message_id, sender_id, content, media_type, media_url, timestamp_ms, timestamp_source, is_outgoing, sender_role, sequence_order, direction_status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (thread_id, fb_message_id, sender_id, sender_name, content, media_type, media_url, timestamp_ms, timestamp_source, is_outgoing, sender_role, sequence_order, direction_status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(fb_message_id) DO UPDATE SET
+        sender_name = COALESCE(excluded.sender_name, messages.sender_name),
         content = CASE WHEN excluded.content IS NOT NULL AND excluded.content <> '' THEN excluded.content ELSE messages.content END,
         media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
         media_url = COALESCE(excluded.media_url, messages.media_url),
@@ -505,6 +531,11 @@ class ConversationRepository {
           ? 'pending'
           : 'confirmed';
         const senderId = msg.sender_id || msg.sender || (isOutgoing ? String(msg.account_id || 'SYSTEM') : 'CONTACT');
+        // Tên thành viên thật trong hội thoại NHÓM - extension chỉ điền
+        // member_name khi giải được từ aria-label tin (không bao giờ là tên nhóm).
+        const memberName = (!isOutgoing && msg.member_name)
+          ? String(msg.member_name).trim() || null
+          : null;
         const senderRole = isOutgoing ? 'operator' : 'customer';
         const observedSequence = Number.isFinite(Number(msg.sequence_order ?? msg.dom_order))
           ? Number(msg.sequence_order ?? msg.dom_order)
@@ -605,7 +636,7 @@ class ConversationRepository {
           result.skippedCount += 1;
           continue;
         }
-        let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+        let existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
         // Multi-account: mid này đã thuộc thread của acc khác -> dùng bản sao
         // mirror (mid::thread) thay vì UPSERT nhầm row của acc kia (mất tin
         // hội thoại bên acc này, reproduce 2026-10-08 18:09).
@@ -615,7 +646,7 @@ class ConversationRepository {
             : null;
           if (midOwnerRow && midOwnerRow.thread_id !== threadId) {
             stableId = `${stableId}::${threadId}`;
-            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
           }
         }
         let promotedSidebarPreview = false;
@@ -634,7 +665,7 @@ class ConversationRepository {
                 'UPDATE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\') WHERE thread_id = ? AND fb_message_id = ?'
               ).run(String(msg.fb_message_id), threadId, String(msg.client_message_id));
               stableId = String(msg.fb_message_id);
-              existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+              existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
             }
           } catch (_) { /* non-fatal: fall through to normal insert path */ }
         }
@@ -653,7 +684,7 @@ class ConversationRepository {
                 'UPDATE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\') WHERE id = ?'
               ).run(String(msg.fb_message_id), pendingCandidate.id);
               stableId = String(msg.fb_message_id);
-              existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+              existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
             }
           } catch (_) { /* non-fatal */ }
         }
@@ -664,7 +695,7 @@ class ConversationRepository {
           if (promoted) {
             stableId = promoted.fbMessageId;
             promotedSidebarPreview = true;
-            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
           }
         }
         if (!existing && msg.fb_message_id) {
@@ -674,7 +705,7 @@ class ConversationRepository {
           }, database);
           if (crossSource) {
             stableId = crossSource.fb_message_id;
-            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
           }
         }
         if (!existing && msg.fb_message_id) {
@@ -687,12 +718,12 @@ class ConversationRepository {
           }, database);
           if (equivalentBubble) {
             stableId = equivalentBubble.fb_message_id;
-            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE fb_message_id = ?').get(stableId);
+            existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
           }
         }
         if (!existing && msg.fb_message_id && String(msg.fb_message_id).endsWith('_media')) {
           const parentFbId = String(msg.fb_message_id).slice(0, -'_media'.length);
-          const parentRow = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status FROM messages WHERE thread_id = ? AND fb_message_id = ?').get(threadId, parentFbId);
+          const parentRow = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE thread_id = ? AND fb_message_id = ?').get(threadId, parentFbId);
           if (parentRow) {
             stableId = parentFbId;
             existing = parentRow;
@@ -706,7 +737,7 @@ class ConversationRepository {
         if (!existing && /^dom_.+_hash_.+_\d+$/.test(String(stableId)) && observedTimestampMs > 0) {
           const candidates = database.prepare(`
             SELECT fb_message_id, content, media_type, media_url, timestamp_ms, timestamp_source, created_at,
-                   is_outgoing, sender_role, sequence_order, direction_status
+                   is_outgoing, sender_role, sequence_order, direction_status, sender_name
             FROM messages
             WHERE thread_id = ? AND content = ? AND is_outgoing = ?
               AND timestamp_ms > 0 AND ABS(timestamp_ms - ?) <= 90000
@@ -747,18 +778,22 @@ class ConversationRepository {
           );
           const sequenceChanged = false;
           const roleChanged = existing.sender_role !== senderRole;
+          // Backfill tên thành viên cho row cũ: history quét lại giải được
+          // member_name (row cũ chưa từng có) phải tính là thay đổi, nếu không
+          // nhánh no-change nuốt luôn.
+          const senderNameChanged = Boolean(memberName) && existing.sender_name !== memberName;
           const mediaChanged = (mediaUrl && existing.media_url !== mediaUrl) || (mediaType !== 'text' && existing.media_type !== mediaType);
-          const changed = existing.content !== content || mediaChanged || timestampChanged || directionChanged || sequenceChanged || roleChanged;
+          const changed = existing.content !== content || mediaChanged || timestampChanged || directionChanged || sequenceChanged || roleChanged || senderNameChanged;
           if (!changed) {
             if (promotedSidebarPreview) result.updatedIds.push(stableId);
             else result.skippedCount += 1;
             continue;
           }
-          insertMsg.run(threadId, stableId, senderId, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
+          insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
           result.updatedIds.push(stableId);
           continue;
         }
-        insertMsg.run(threadId, stableId, senderId, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
+        insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
         result.insertedIds.push(stableId);
         // Batch có thể mang row ma lật chiều ĐỨNG TRƯỚC base (guard 513 cần
         // base đã tồn tại) - base vừa insert thì dọn sibling __bubble_N.

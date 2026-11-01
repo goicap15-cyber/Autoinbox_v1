@@ -1,0 +1,21 @@
+const Database = require('better-sqlite3');
+const fs = require('fs');
+const path = require('path');
+const dataDir = path.join(process.env.APPDATA, 'autochatbot-fb-crm', 'data');
+const snap = path.join(dataDir, 'tmp-reclaim-test.db');
+try { fs.unlinkSync(snap); } catch (_) {}
+const live = new Database(path.join(dataDir, 'database.db'), { readonly: true });
+live.exec("VACUUM INTO '" + snap.split(path.sep).join('/') + "'");
+live.close();
+const db = new Database(snap);
+const uid = '100016020906629';
+const before = db.prepare("SELECT id, owner_account_id FROM inbox_sources WHERE external_id = '664031873456106'").get();
+console.log('before:', JSON.stringify(before));
+db.prepare("UPDATE inbox_sources SET owner_account_id = ?, display_name = COALESCE(NULLIF('', ''), display_name), status = 'ACTIVE', avatar_url = COALESCE(avatar_url, 'https://graph.facebook.com/' || external_id || '/picture?type=normal') WHERE id = ?").run(uid, before.id);
+const mid = db.prepare("SELECT id, owner_account_id, status, display_name FROM inbox_sources WHERE external_id = '664031873456106'").get();
+console.log('after reclaim:', JSON.stringify(mid));
+const threads = db.prepare('SELECT COUNT(*) c FROM threads WHERE source_id = ? AND (account_id IS NULL OR account_id != ?)').get(before.id, uid);
+console.log('threads se duoc re-point:', threads.c);
+db.close();
+fs.unlinkSync(snap);
+console.log('TEST_OK');

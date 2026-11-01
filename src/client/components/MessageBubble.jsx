@@ -111,7 +111,16 @@ export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenBy
     && Number(msg.id) <= seenUpTo
     && status !== 'sending' && status !== 'pending' && status !== 'failed';
   const displayTime = getMessageDisplayTime(msg);
-  const avatarUrl = activeThread?.avatar_url || msg.sender_avatar_url || msg.sender_avatar || msg.avatar_url;
+  // Nhóm: tin đến kèm sender_name (tên thành viên) khác tên nhóm -> render
+  // tên + avatar riêng của người đó thay vì avatar tổng của thread. Avatar
+  // thành viên chưa kịp tải (sender_avatar_url rỗng) thì bỏ trống để không
+  // lỡ gán nhầm avatar nhóm cho thành viên.
+  const isGroupMemberMessage = !isOutgoing
+    && Boolean(String(msg.sender_name || '').trim())
+    && String(msg.sender_name).trim() !== String(activeThread?.contact_name || '').trim();
+  const avatarUrl = isGroupMemberMessage
+    ? (msg.sender_avatar_url || msg.sender_avatar || null)
+    : (activeThread?.avatar_url || msg.sender_avatar_url || msg.sender_avatar || msg.avatar_url);
   const avatarSeed = String(senderName || activeThread?.contact_name || '').trim();
   const avatarInitial = (Array.from(avatarSeed)[0] || 'K').toUpperCase();
   const avatarColor = pickAvatarColor(activeThread?.id || senderName);
@@ -157,6 +166,10 @@ export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenBy
   const isLikeText = (content?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(content?.trim() || '')) ||
                      (visibleContent?.trim() === '👍' || /^(?:thích|like|biểu tượng thích)$/i.test(visibleContent?.trim() || ''));
   const isQuickLike = !isCallMessage && !isUnsent && !hasMedia && isLikeText;
+  // Tin TRẢ LỜI: khối trích dẫn tin gốc lấy từ DOM Messenger (extension bóc
+  // "Tin nhắn gốc: ..." lưu reply_to_text). Render quote trong bubble như
+  // Messenger thay vì để text gốc chảy thành tin ảo trùng (2026-10-15).
+  const replyQuote = String(msg.reply_to_text || '').trim();
   const displayUrl = msg.local_media_path || mediaUrl || msg.attachment?.local_media_path || null;
   // Never render an empty placeholder bubble.
   // A valid bubble must carry visible content text, playable media (displayUrl), or a call payload.
@@ -179,6 +192,9 @@ export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenBy
       )}
 
       <div className={`flex flex-col max-w-[min(78%,560px)] ${isOutgoing ? 'items-end' : 'items-start'}`}>
+        {isGroupMemberMessage && (
+          <span className="text-[11px] font-medium text-[var(--color-text-muted)] mb-0.5 ml-1 select-text">{senderName}</span>
+        )}
         <div
           className={`message-bubble ${
             isQuickLike || (hasMedia && !visibleContent)
@@ -225,6 +241,25 @@ export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenBy
                 </div>
               ) : (
                 <>
+                  {replyQuote && (
+                    <div
+                      className={`rounded-lg px-2.5 py-1.5 mb-1.5 border-l-2 ${isOutgoing ? 'bg-white/15 border-white/70' : 'bg-black/5 dark:bg-white/10 border-[var(--color-accent)]'} ${msg.reply_to_id ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}`}
+                      title={msg.reply_to_id ? 'Bấm để xem tin nhắn gốc' : replyQuote}
+                      onClick={() => {
+                        if (!msg.reply_to_id) return;
+                        const el = document.querySelector(`[data-msg-key="${CSS.escape(String(msg.reply_to_id))}"]`);
+                        if (!el) return;
+                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        el.classList.add('reply-target-flash');
+                        window.setTimeout(() => el.classList.remove('reply-target-flash'), 1800);
+                      }}
+                    >
+                      <div className="text-[10px] font-semibold opacity-60 mb-0.5">
+                        {msg.reply_to_sender_name ? `Trả lời tin nhắn của ${msg.reply_to_sender_name}` : 'Trả lời tin nhắn'}
+                      </div>
+                      <div className="text-xs leading-snug opacity-90 line-clamp-2 select-text">{replyQuote}</div>
+                    </div>
+                  )}
                   {msg.link_preview && !hasMedia && (
                     <a
                       href={msg.link_preview.url}

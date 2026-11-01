@@ -1,0 +1,13 @@
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync('C:/Users/Admin/AppData/Roaming/autochatbot-fb-crm/data/database.db', { readOnly: true });
+const iso = (s) => s ? new Date(Number(s)+7*3600e3).toISOString().replace('T',' ').substring(0,23) : null;
+const rows = db.prepare(`SELECT id, fb_message_id, client_message_id, content, is_outgoing, delivery_status, timestamp_ms, created_at, sequence_order, direction_status, sender_id FROM messages WHERE thread_id='61586667541379' AND created_at >= '2026-10-09T05:50:00' AND created_at <= '2026-10-09T06:10:00' ORDER BY created_at`).all();
+console.log('=== rows thread 61586667541379 05:50-06:10 UTC ===');
+for (const r of rows) console.log(iso(null)||r.created_at, JSON.stringify({id:r.id, mid:String(r.fb_message_id).substring(0,45), cmid:String(r.client_message_id||'').substring(0,40), c:r.content, out:r.is_outgoing, st:r.delivery_status, ts:iso(r.timestamp_ms), seq:r.sequence_order, dir:r.direction_status}));
+const pend = db.prepare(`SELECT id, thread_id, content, client_message_id, fb_message_id, delivery_status, created_at, timestamp_ms FROM messages WHERE client_message_id LIKE 'client_1791525%' ORDER BY id`).all();
+console.log('=== pending-composer rows client_1791525* (all threads) ===');
+for (const r of pend) console.log(r.created_at, JSON.stringify({id:r.id, tid:r.thread_id, cmid:r.client_message_id, mid:String(r.fb_message_id).substring(0,45), c:r.content, st:r.delivery_status}));
+const att = db.prepare(`SELECT id, client_message_id, message_id, status, attempt_number, created_at FROM outbound_attempts WHERE created_at >= '2026-10-09T05:50:00' ORDER BY id`).all();
+console.log('=== outbound_attempts 05:50+ ===');
+for (const r of att) console.log(r.created_at, JSON.stringify(r));
+db.close();

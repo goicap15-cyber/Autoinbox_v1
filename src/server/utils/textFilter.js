@@ -111,6 +111,20 @@ const SYSTEM_PATTERNS = [
 
   /^Bạn đã phản hồi ghi chú của (?:họ|họ\.|họ\.?)$/i,
   /^Bạn đã trả lời tin của .+\.$/i,
+  // Header trích dẫn reply của Messenger: bubble quote render "Bạn đã trả
+  // lời {tên người được reply}" (EN "You replied to {name}") trong row tin
+  // reply - DOM nhặt thành tin outgoing riêng với mid thật (reproduce
+  // 2026-10-11: nhóm Bi-aaaaaaa dính "Bạn đã trả lời Tiến Quang"/"...Linh").
+  // Tin operator thật dạng "Bạn đã trả lời chưa?" / "Bạn đã trả lời em rồi"
+  // phải sống sót -> loại từ nối/câu hỏi ở đuôi trước khi nhận diện. Đồng bộ
+  // với src/extension/textFilter.js và heal (4c) trong server.js.
+  /^Bạn đã trả lời (?!(?:.*\s)?(?:chưa|rồi|xong|sao|đâu|gì|à|hả|nhỉ|nha|thôi|luôn|vậy|đấy|đó|nhé)\s*[?！?.!…]*$)[^?！?\n]{1,60}$/iu,
+  /^You replied to (?!(?:.*\s)?(?:yet|already|right|now|ok|okay)\s*[?！?.!…]*$)[^?！?\n]{1,60}$/iu,
+  // Chiều ngược: quote reply của KHÁCH render "{tên khách} đã trả lời bạn" /
+  // "{name} replied to you" - cùng lớp metadata, reproduce 2026-10-11
+  // (thread Li Min Tài ×3). Từ nối đuôi được giữ lại như phía trên.
+  /^(?!.+(?:chưa|rồi|xong|sao|đâu|gì|à|hả|nhỉ|nha|thôi|luôn|vậy|đấy|đó|nhé)\s*[?！?.!…]*$)[^?！?\n]{1,48} đã trả lời bạn\.?$/iu,
+  /^(?!.+(?:yet|already|right|now|ok|okay)\s*[?！?.!…]*$)[^?！?\n]{1,48} replied to you\.?$/iu,
 
   // Hội thoại hệ thống Messenger tự sinh (connection/friend/call/sticker
   // notice). FB tự treo chấm xanh unread trên các row này; bộ dò chấm xanh
@@ -297,6 +311,24 @@ function isSidebarActivitySummary(text) {
     || /^(?:Cuộc gọi nhỡ|Missed call)\.?$/iu.test(value);
 }
 
+// Thông báo HOẠT ĐỘNG trên sidebar (cuộc gọi nhỡ, thêm/rời nhóm, chrome UI)
+// — FB treo chấm xanh thật cho các row này nhưng không bao giờ là tin của
+// khách. Khác isSystemConversationNotice: loẠI NÀY gỡ unread KỂ CẢ khi thread
+// đã có tin khách thật, vì tin nhắn thật đến bằng đường riêng sẽ tự đánh
+// unread lại (reproduce 2026-10-16: badge "1" ảo dính mãi ở Lê Văn Khang
+// "đã bỏ lỡ cuộc gọi", Fc An Thanh "đã thêm ... vào nhóm", Kjgvkj "Trả lời?").
+function isSidebarActivityNotification(text) {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!value) return false;
+  return /^(?:.{1,60}\s+)?đã bỏ lỡ (?:một\s+)?cuộc gọi(?:\s+(?:của bạn|với bạn|với .{1,60}))?\.?$/iu.test(value)
+    || /^(?:bạn đã bỏ lỡ(?:\s+một)?\s+cuộc gọi(?:\s+với .{1,60})?|missed (?:a\s+)?call(?:\s+with .{1,60})?|.{1,60} missed (?:a\s+)?call)\.?$/iu.test(value)
+    || /^.{1,80}\s+đã thêm .{1,80}\s+vào nhóm\.?$/iu.test(value)
+    || /^.{1,80}\s+added .{1,80}\s+to the group\.?$/iu.test(value)
+    || /^.{1,80}\s+(?:đã rời khỏi nhóm|left the group)\.?$/iu.test(value)
+    || /^.{1,80}\s+(?:đã đặt tên nhóm|changed the group(?:\s+name)?|named the group)/iu.test(value)
+    || /^(?:trả\s*lời\s*\??|đang gõ(?: tin nhắn)?|đã xem(?: tin nhắn)?|đã nhìn(?: tin nhắn)?|xem tin nhắn|tin nhắn mới|gửi tin nhắn|hủy bỏ|đang gọi\W*)$/iu.test(value);
+}
+
 const INVALID_CONTACT_NAME_PATTERNS = [
   /^(?:Tất cả tin nhắn|Tất cả|All messages|All)$/i,
   /(?:Tất cả tin nhắn\s*){2,}/i,
@@ -391,6 +423,7 @@ module.exports = {
   isSystemConversationNotice,
   cleanMessageText,
   isSidebarActivitySummary,
+  isSidebarActivityNotification,
   isInvalidContactName,
   cleanContactName,
   stripBizSentByAttribution,

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import AppSidebar from './components/AppSidebar.jsx';
 import ConversationSidebar from './components/ConversationSidebar.jsx';
 import ChatHeader from './components/ChatHeader.jsx';
@@ -11,6 +11,7 @@ import SearchOverlay from './components/SearchOverlay.jsx';
 import AccountManagerModal from './components/AccountManagerModal.jsx';
 import AutoReplyModal from './components/AutoReplyModal.jsx';
 import CampaignCreateModal from './components/CampaignCreateModal.jsx';
+import CommentLeadsModal from './components/CommentLeadsModal.jsx';
 import CampaignDetail from './components/CampaignDetail.jsx';
 import AiConfigModal from './components/AiConfigModal.jsx';
 import PhoneAutomationSettingsModal from './components/PhoneAutomationSettingsModal.jsx';
@@ -379,6 +380,8 @@ export default function App() {
   });
   const [leadPanelCollapsed, setLeadPanelCollapsed] = useState(false);
   const [showLeadDrawer, setShowLeadDrawer] = useState(false);
+  // Mention nhóm: TOÀN BỘ thành viên quét từ panel "Thành viên trong đoạn chat".
+  const [threadMembers, setThreadMembers] = useState({ threadId: null, list: [] });
 
   // Responsive detection
   const [isNarrow, setIsNarrow] = useState(typeof window !== 'undefined' && window.innerWidth < 1200);
@@ -651,7 +654,7 @@ export default function App() {
     const threadId = String(thread?.id || '');
     if (!threadId) return;
     setThreads((prev) => sortThreadsByActivity(prev.map((t) => (String(t.id) === threadId
-      ? { ...t, pinned: nextPinned ? 1 : 0 }
+      ? { ...t, pinned: nextPinned ? 1 : 0, pinned_at: nextPinned ? new Date().toISOString() : null }
       : t))));
     try {
       const res = await fetch('/api/threads/' + encodeURIComponent(threadId) + '/pin', {
@@ -920,6 +923,11 @@ export default function App() {
         if (!matches) return;
       }
       refreshThreadListThrottled();
+    });
+    socket.on('THREAD_MEMBERS', (payload) => {
+      const tid = String(payload?.thread_id || '');
+      if (!tid || tid !== String(activeThreadIdRef.current || '')) return;
+      setThreadMembers({ threadId: tid, list: Array.isArray(payload.members) ? payload.members : [] });
     });
     socket.on('NEW_MESSAGE', (newMsg) => {
       const t_ui = Date.now();
@@ -1520,8 +1528,9 @@ export default function App() {
       const tid = String(payload?.thread_id || '');
       const next = Number(payload?.pinned) === 1;
       if (!tid) return;
+      const pinnedAt = typeof payload?.pinned_at === 'string' ? payload.pinned_at : null;
       setThreads((prev) => prev.map((t) => (String(t.id) === tid
-        ? { ...t, pinned: next ? 1 : 0 }
+        ? { ...t, pinned: next ? 1 : 0, pinned_at: next ? (pinnedAt || t.pinned_at) : null }
         : t)));
     });
     socket.on('THREAD_UNREAD_CHANGED', (payload) => {
@@ -1706,7 +1715,8 @@ export default function App() {
           content: payloadOrText?.content || '',
           client_message_id: payloadOrText?.client_message_id,
           attachment_id: payloadOrText?.attachment_id || null,
-          attachment: payloadOrText?.attachment || null
+          attachment: payloadOrText?.attachment || null,
+          mentions: Array.isArray(payloadOrText?.mentions) ? payloadOrText.mentions : []
         };
     if (!payload.client_message_id) throw new Error('Thiếu mã tin nhắn phía CRM.');
     const hasAttachment = Boolean(payload.attachment_id || payload.attachment?.media_type || payload.attachment?.preview_url);
@@ -1767,7 +1777,8 @@ export default function App() {
         thread_id: threadIdStr,
         client_message_id: payload.client_message_id,
         content: outboundContent,
-        attachment_id: payload.attachment_id
+        attachment_id: payload.attachment_id,
+        ...(payload.mentions?.length ? { mentions: payload.mentions } : {})
       });
       return;
     }
@@ -1994,6 +2005,26 @@ export default function App() {
     ...(contacts[String(activeThreadId)] || {})
   } : null;
 
+  // Vào hội thoại: tải list thành viên nhóm đã lưu + nhờ extension quét panel
+  // "Thành viên trong đoạn chat" nếu tab Messenger đang mở đúng thread đó
+  // (kết quả về qua socket THREAD_MEMBERS).
+  useEffect(() => {
+    const tid = String(activeThreadId || '');
+    if (!tid) { setThreadMembers({ threadId: null, list: [] }); return; }
+    let cancelled = false;
+    setThreadMembers({ threadId: tid, list: [] });
+    fetch('/api/threads/' + encodeURIComponent(tid) + '/members')
+      .then(async (res) => (res.ok ? res.json().catch(() => null) : null))
+      .then((data) => {
+        if (!cancelled && data?.success && tid === String(activeThreadIdRef.current || '')) {
+          setThreadMembers({ threadId: tid, list: Array.isArray(data.members) ? data.members : [] });
+        }
+      })
+      .catch(() => {});
+    fetch('/api/threads/' + encodeURIComponent(tid) + '/sync-members', { method: 'POST' }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeThreadId]);
+
   const isCurrentExtensionDisconnected = currentAccount ? currentAccount.is_extension_connected === false : false;
   // Thread PAGE gửi qua Graph API (page token) — KHÔNG phụ thuộc extension:
   // lỗi thật (hết token, quá hạn 24h...) sẽ trả về từ Send API và hiện bong
@@ -2113,6 +2144,7 @@ export default function App() {
         onStartCampaignSelection={startCampaignSelection}
         onCancelCampaignSelection={cancelCampaignSelection}
         onCreateCampaign={openCampaignModal}
+        onOpenCommentLeads={() => setActiveModal('commentLeads')}
         onBulkHistorySync={handleBulkHistorySync}
         onToggleUnread={handleToggleThreadUnread}
         onTogglePin={handleToggleThreadPinned}
@@ -2177,6 +2209,7 @@ export default function App() {
                 onDiscardAttachment={handleDiscardAttachment}
                 capabilities={richCapabilities}
                 senderIdentity={currentSenderIdentity}
+                groupMembers={threadMembers.threadId === String(activeThreadId) ? threadMembers.list : []}
                 disabled={!!isCurrentSendDisabled || richCapabilities?.text?.enabled === false}
                 disabledReason={currentSendDisabledReason}
               />
@@ -2214,6 +2247,14 @@ export default function App() {
         setAccountSyncing({ accountId: String(accountId), tabCount: null });
       }} />}
       {activeModal === 'autoReply' && <AutoReplyModal onClose={() => setActiveModal(null)} />}
+      {activeModal === 'commentLeads' && (
+        <CommentLeadsModal
+          socket={socket}
+          accounts={accounts}
+          onClose={() => setActiveModal(null)}
+          onSelectThread={(tid) => { setActiveThreadId(tid); setActiveModal(null); }}
+        />
+      )}
       {activeModal === 'campaigns' && (
         <CampaignCreateModal
           selectedThreads={selectedCampaignThreads}
