@@ -1292,13 +1292,41 @@ async function setupMessenger(job, page, appId) {
   setStatus(job, 'adding_messenger', 'Đang mở dashboard và thêm sản phẩm Messenger…');
   await page.goto(`https://developers.facebook.com/apps/${appId}/dashboard/`, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
 
-  // Bấm "Thiết lập" của Messenger nếu chưa thêm (href chứa product_route=messenger)
-  const link = await page.waitForSelector('a[href*="product_route=messenger"]', { timeout: 45000 }).catch(() => null);
+  // Bấm "Thiết lập" của Messenger nếu chưa thêm. Dashboard mới render card
+  // "Available products" với NÚT "Set up" (không còn <a href product_route=
+  // messenger> — reproduce 2026-10-08 12:0x: automation đứng ở bước này, nút
+  // Set up không được bấm). Phân biệt card Messenger với Instagram/WhatsApp
+  // bằng phạm vi tổ tiên chứa "Messenger" mà không chứa "Instagram/WhatsApp".
+  const link = await page.waitForSelector('a[href*="product_route=messenger"]', { timeout: 8000 }).catch(() => null);
   if (link) {
     await Promise.all([
       page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {}),
       link.click().catch(() => page.evaluate((el) => el.click(), link)),
     ]);
+  } else {
+    const clickedSetUp = await page
+      .evaluate(() => {
+        const vis = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
+        const btns = [...document.querySelectorAll('[role="button"], button, a')]
+          .filter((b) => vis(b) && /^(set up|thiết lập)$/i.test((b.innerText || '').trim()));
+        for (const b of btns) {
+          let anc = b;
+          for (let up = 0; up < 10 && anc && anc !== document.body; up++) {
+            anc = anc.parentElement;
+            if (!anc) break;
+            const text = anc.innerText || '';
+            if (/instagram|whatsapp/i.test(text)) break; // đi quá phạm vi card
+            if (/messenger/i.test(text)) { b.click(); return true; }
+          }
+        }
+        return false;
+      })
+      .catch(() => false);
+    if (clickedSetUp) {
+      setStatus(job, 'adding_messenger', 'Đã bấm Set up Messenger — đợi Meta thêm sản phẩm…');
+      await sleep(6000);
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+    }
   }
 
   // Đảm bảo đang ở trang cấu hình Messenger (URL thật: messenger_api_settings)
