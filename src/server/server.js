@@ -73,12 +73,8 @@ LinkPreviewService.onImageNeeded = (urlHash, url) => {
     }
   }
 };
-<<<<<<< Updated upstream
 const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
 const { normalizePreviewText, shouldFlipUnreadFromPreview, shouldBumpUnreadFromSidebar, HintUnreadTracker } = require('./utils/unreadGuard');
-=======
-const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isSidebarActivityNotification, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
->>>>>>> Stashed changes
 const { sidebarShouldSkipSweep, isStaleThreadLastActivity } = require('./utils/sidebarCompare');
 const { isKnownPageSystemNotice } = require('./utils/pageSystemNotice');
 const { parsePageIdFromInput } = require('./utils/pageIdParser');
@@ -4454,7 +4450,6 @@ wss.on('connection', (ws, req) => {
                 // Stable per thread+content: repeated sidebar scans cannot
                 // manufacture duplicate provisional bubbles from old previews.
                 const previewId = 'sidebar_preview_' + previewHash;
-<<<<<<< Updated upstream
                 // Sidebar re-reports OLD bubbles as fresh customer activity
                 // when the preview text drifts slightly between scans (đổi
                 // khoảng trắng, tiền tố "Bạn: ", biến thể emoji - sau mỗi lần
@@ -4474,36 +4469,6 @@ wss.on('connection', (ws, req) => {
                   ? recentRealMessages.some((m) => normalizePreviewText(m.content) === normalizedPreview)
                   : false;
                 if (!normalizedDupe) {
-=======
-                // Sau mỗi lần CRM gửi tin (text/video), last_message của thread
-                // đổi sang tin outgoing nên preview cũ của khách (đã được bắt
-                // bằng fb_message_id thật) lại nhìn "thay đổi" với bộ dò sidebar
-                // và sinh bong bóng provisional trùng nội dung (reproduced
-                // 2026-09-17: gửi video xong, tin cũ của khách hiện lại lần
-                // nữa). Nếu thread đã có tin thật (không phải provisional) cùng
-                // nội dung trong 24h thì bỏ qua - history sync vẫn chạy phía
-                // dưới và sẽ confirm/promote row sẵn có thay vì tạo mới.
-                const alreadyRealIncoming = db.prepare(`
-                  SELECT 1 FROM messages
-                  WHERE thread_id = ? AND is_outgoing = 0 AND (content = ? OR (? IS NOT NULL AND content = ?))
-                    AND fb_message_id NOT LIKE 'sidebar_preview_%'
-                    AND timestamp_ms >= ?
-                  LIMIT 1
-                `).get(canonicalThreadId, previewContent, previewContentNoGroupPrefix, previewContentNoGroupPrefix, previewTimestamp - 24 * 60 * 60 * 1000);
-                // The sidebar scanner re-reports an OLD operator bubble as
-                // fresh customer activity whenever the thread preview flips
-                // back to it after a CRM send (reproduced 2026-09-30:
-                // 'sldsldsldl' sent 2026-09-22 reappeared the same day as a
-                // left-side bubble stamped now). Content that already exists
-                // in this thread in ANY direction is never a new message.
-                const contentAlreadyInThread = db.prepare(`
-                  SELECT 1 FROM messages
-                  WHERE thread_id = ? AND (content = ? OR (? IS NOT NULL AND content = ?))
-                    AND fb_message_id NOT LIKE 'sidebar_preview_%'
-                  LIMIT 1
-                `).get(canonicalThreadId, previewContent, previewContentNoGroupPrefix, previewContentNoGroupPrefix);
-                if (!alreadyRealIncoming && !contentAlreadyInThread) {
->>>>>>> Stashed changes
                 const previewPersistence = ConversationRepository.saveMessagesTransaction(canonicalThreadId, [{
                   fb_message_id: previewId,
                   content: previewContent,

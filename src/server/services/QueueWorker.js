@@ -326,7 +326,6 @@ class QueueWorker {
         return null;
       }
     })();
-<<<<<<< Updated upstream
 
     const resolvedCustomerUid = message.customer_uid || (() => {
       try {
@@ -354,14 +353,12 @@ class QueueWorker {
       }
     })();
 
-=======
     // Cold outreach (khách cmt bài viết): gửi lần đầu qua trang profile —
     // /messages/t/<uid> không mở được composer cho hội thoại chưa tồn tại.
     const isColdOutreach = String(message.idempotency_key || '').startsWith('comment_lead_');
     const coldProfileUid = isColdOutreach
       ? String(message.recipient_thread_id || message.thread_id || '').split(':').pop()
       : null;
->>>>>>> Stashed changes
     const envelope = {
       type: 'SEND_QUEUED_MESSAGE',
       data: {

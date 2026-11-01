@@ -16,15 +16,12 @@ const InboxSourceService = require('./InboxSourceService');
 const ConversationRepository = require('../repositories/ConversationRepository');
 const PhoneCaptureService = require('./PhoneCaptureService');
 const { extractLeadInfo } = require('../utils/leadExtractor');
-<<<<<<< Updated upstream
 const { saveAvatarFromBase64OrUrl } = require('../utils/avatarManager');
-=======
 const GlobalPhoneAutomationService = require('./GlobalPhoneAutomationService');
 const CampaignPhoneCaptureService = require('./CampaignPhoneCaptureService');
 const CampaignResponseStatsService = require('./CampaignResponseStatsService');
 const CampaignEventService = require('./CampaignEventService');
 const CampaignRepository = require('../repositories/CampaignRepository');
->>>>>>> Stashed changes
 
 const GRAPH_VERSION = 'v21.0';
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
@@ -581,7 +578,6 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
   }
 }
 
-<<<<<<< Updated upstream
 // Quét SĐT/email từ nội dung tin khách Page rồi điền cột thông tin khách
 // hàng (contacts) — chỉ điền chỗ TRỐNG (COALESCE), không ghi đè giá trị đã có
 // kể cả nhập tay. Dùng chung cho webhook/watcher/backfill và quét bù lịch sử.
@@ -638,7 +634,7 @@ function captureContactLeads({ threadId, accountId, messageId, content, timestam
     io.emit('CONTACT_UPDATED', { thread_id: threadId });
   }
   return results;
-=======
+}
 // Bắt sdt/email từ tin khách đến Page — cùng hành vi pipeline Messenger cá
 // nhân (server.js chạy PhoneCaptureService + extractLeadInfo cho từng tin
 // incoming): lấp phone/email TRỐNG của contact, không ghi đè giá trị đã có,
@@ -742,7 +738,6 @@ function captureLeadInfoFromGraph(threadId, source, messageId, text, tsMs, datab
       console.error('[PageApi] Campaign policy sau khi bắt sdt lỗi:', err.message);
     });
   }
->>>>>>> Stashed changes
 }
 
 // Chèn 1 tin nhắn dạng Graph API (webhook hoặc backfill) — chống trùng theo message id

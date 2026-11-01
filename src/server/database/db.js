@@ -1325,7 +1325,6 @@ const migrations = [
     }
   },
   {
-<<<<<<< Updated upstream
     // 2026-10-12: Auto Reply đa từ khóa. schema.sql (chạy trước migration) đã
     // tạo auto_reply_keywords/auto_reply_fired trên mọi DB — migration chỉ
     // chuyển trigger_keyword cũ của từng quy tắc hiện có sang bảng con.
@@ -1387,7 +1386,9 @@ const migrations = [
         }
       }
       console.log(`[DB] Migration v20261019001: Purged ${purged} fabricated page profile_url(s).`);
-=======
+    }
+  },
+  {
     version: 20261011001,
     name: 'add_messages_sender_name_and_member_avatars',
     up: (db) => {
@@ -1692,7 +1693,6 @@ const migrations = [
         );
       `);
       console.log('[DB] Migration v20261015004: thêm bảng group_members.');
->>>>>>> Stashed changes
     }
   }
 ];
