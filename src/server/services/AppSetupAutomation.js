@@ -414,14 +414,17 @@ async function run(job, uid, appName, email) {
       await askPassword(job, page);
       continue; // sau khi gửi mật khẩu, tiếp tục chờ chuyển trang
     }
-    // Facebook từ chối: đạt trần 30 app chưa kèm tài khoản kinh doanh đã xác minh
-    // (báo lỗi 2026-10-06: dialog "Không tạo được ứng dụng này") — báo ngay, đừng re-click
+    // Facebook từ chối: giới hạn số app — dialog cũ "Không tạo được ứng dụng
+    // này" (30 app) VÀ dialog mới "Unable to create this app" (15 app khi
+    // chưa gắn Business Account xác minh — reproduce 2026-10-08: text mới
+    // không khớp regex cũ nên automation không báo, job đứng chờ). Báo ngay,
+    // đừng re-click.
     const refused = await page
-      .evaluate(() => /không tạo được ứng dụng này|lên tới 30 ứng dụng|up to 30 apps/i.test(document.body.innerText || ''))
+      .evaluate(() => /không tạo được ứng dụng này|lên tới 30 ứng dụng|up to 30 apps|unable to create this app|up to 15 apps|verified business account/i.test(document.body.innerText || ''))
       .catch(() => false);
     if (refused) {
       await errorShot(page, 'sync-error.png');
-      throw new Error('Facebook từ chối tạo app: tài khoản đã đạt giới hạn 30 ứng dụng (chưa có Tài khoản Kinh doanh xác minh). Hãy xóa bớt app cũ trên developers.facebook.com (Ứng dụng của tôi → menu ⋯ → Gỡ ứng dụng) rồi chạy lại — hoặc bấm "Lấy token" để dùng app đã có.');
+      throw new Error('Facebook từ chối tạo app: tài khoản đã đạt giới hạn số ứng dụng (tối đa 15 app nếu chưa gắn Tài khoản Kinh doanh xác minh — 30 app nếu có). Hãy xóa bớt app cũ trên developers.facebook.com (Ứng dụng của tôi → chọn app → ⋯ → Gỡ ứng dụng) rồi chạy lại — hoặc bấm "Lấy token" để dùng app đã có.');
     }
     if (Date.now() - lastReclick > 8000) {
       if (await clickMatching(page, CREATE_RE, '[role="button"], button')) lastReclick = Date.now();
