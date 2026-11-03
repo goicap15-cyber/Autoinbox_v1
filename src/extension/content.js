@@ -1257,7 +1257,13 @@
       is_outgoing = true;
       sender_name = 'Bạn';
     } else {
-      const nameMatch = effectiveLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i) || effectiveLabel.match(/Message sent by ([^]+?) at/i);
+      // Nhãn EN mới của Messenger: "Message sent 12:10 PM by <Tên>: <nội dung>"
+      // (thời gian TRƯỚC "by" — regex cũ "Message sent by X at" không khớp ->
+      // tin khách rơi xuống đoán hình học và bị lật thành outgoing khi cửa sổ
+      // ẩn, reproduce 2026-11-03 12:10).
+      const nameMatch = effectiveLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i)
+        || effectiveLabel.match(/Message sent by ([^]+?) at/i)
+        || effectiveLabel.match(/Message sent [^]*? by ([^:]+?):/i);
       if (nameMatch) {
         const rawSender = nameMatch[1].trim();
         if (/^(?:Bạn|You)$/i.test(rawSender)) {

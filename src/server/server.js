@@ -3245,6 +3245,68 @@ wss.on('connection', (ws, req) => {
 
           // Lưu tin nhắn vào bảng messages
           let stableMessageId = m.fb_message_id || m.client_message_id || ConversationRepository.fingerprint(m.thread_id, m);
+          // Heal chiều bị bóp sai bởi history crawler: hydrate sớm (nhãn
+          // lỗi thời "do Bạn gửi" + geometry degenerate + default-to-us) lưu
+          // tin KHÁCH thành is_outgoing=1 (reproduce 2026-11-03). Quan sát
+          // realtime sau này đọc đúng hướng vào theo avatar/vị trí - lật row
+          // cùng họ id/cùng text trong cửa sổ 3 phút về phía khách.
+          // member_name (tên giải từ nhãn) là bằng chứng mạnh nhất nhưng
+          // thread 1-1 cá nhân KHÔNG có tên trong nhãn nên luôn rỗng
+          // (reproduce 04:46:49: observed out:0 bị gate member_name khước
+          // từ rồi guard phantom nuốt) -> chấp nhận quan sát không tên, CHỈ
+          // cho row không mang dấu vết tin gửi từ CRM (client_message_id
+          // null, không sent_by_agent, không pending): tin đi thật luôn nằm
+          // bên phải nên không bao giờ được đọc là vào. Phải đứng TRƯỚC guard
+          // phantom family vì guard đó nuốt đúng quan sát out:0 mà heal cần.
+          const healIsIncoming = m.is_outgoing === 0 || m.is_outgoing === false;
+          const healSource = String(m.source || '');
+          if (healIsIncoming
+            && (!m.media_type || m.media_type === 'text') && !m.media_url
+            && /^(?:dom_observer|dom_history_sync|page_dom_observer)$/.test(healSource)) {
+            const healThread = db.prepare('SELECT contact_name, external_thread_id, account_id FROM threads WHERE id = ?').get(m.thread_id);
+            if (healThread && String(healThread.external_thread_id || '') !== String(healThread.account_id || '')) {
+              const healContactClean = String(healThread.contact_name || '').replace(/\s·\s[^·]*$/, '').trim();
+              const healContact = healContactClean.toLowerCase();
+              const healSenderName = String(m.member_name || '').trim();
+              const healLabel = healSenderName.toLowerCase();
+              const healNameMatches = healSenderName.length > 0 && healContact.length >= 3 && healLabel.length >= 3
+                && (healContact.includes(healLabel) || healLabel.includes(healContact));
+              // Không tên: chỉ heal khi thread 1-1 (2 phía, không tự nhắn mình)
+              // và row đích không phải tin CRM gửi.
+              if (healNameMatches || (healContact.length >= 3 && !healSenderName)) {
+                const healFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+                const healLikeEscaped = healFamilyId.replace(/[_%\\]/g, (c) => `\\${c}`);
+                const healRow = db.prepare(`
+                  SELECT id, fb_message_id FROM messages
+                  WHERE thread_id = ? AND is_outgoing = 1 AND client_message_id IS NULL
+                    AND COALESCE(sent_by_agent, 0) = 0
+                    AND (delivery_status IS NULL OR delivery_status NOT IN ('pending', 'sending'))
+                    AND COALESCE(media_type, 'text') = 'text'
+                    AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+                    AND TRIM(COALESCE(content, '')) = TRIM(?)
+                    AND (? <= 0 OR ABS(timestamp_ms - ?) <= 180000)
+                  ORDER BY id DESC LIMIT 1
+                `).get(m.thread_id, healFamilyId, `${healLikeEscaped}__bubble_%`, String(m.content || ''), Number(tsMs) || 0, Number(tsMs) || 0);
+                if (healRow) {
+                  db.prepare(`UPDATE messages SET is_outgoing = 0, sender_role = 'customer', direction_status = 'confirmed', sender_id = 'CONTACT', sender_name = ? WHERE id = ?`).run(healSenderName || healContactClean || null, healRow.id);
+                  syncDebug('WS_HEAL_MISLABELED_INCOMING', {
+                    thread: String(m.thread_id),
+                    fb_message_id: String(healRow.fb_message_id || '').slice(0, 70),
+                    sender_label: (healSenderName || healContactClean || '').slice(0, 40),
+                    evidence: healNameMatches ? 'member_name' : 'position_avatar'
+                  });
+                  const healedRows = db.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY COALESCE(sequence_order, id) ASC, id ASC').all(m.thread_id);
+                  io.emit('THREAD_MESSAGES_UPDATED', {
+                    thread_id: m.thread_id,
+                    account_id: healThread.account_id || m.account_id || ws.accountId || null,
+                    messages: prepareMessagesForClient(healedRows),
+                    authoritative: true
+                  });
+                  break;
+                }
+              }
+            }
+          }
           // Phantom family __bubble_N: id tổng hợp mid.X__bubble_N nhưng row
           // base mid.X cùng thread tồn tại với nội dung giống nhau. Like-group
           // thật ở cùng article nên cùng người gửi (không bao giờ lật hướng),
@@ -3562,6 +3624,7 @@ wss.on('connection', (ws, req) => {
                 isOutgoing: directionStatus === 'pending' ? null : isOutgoing,
                 direction_status: directionStatus,
                 direction_confidence: m.direction_confidence,
+                senderName: m.sender_name || null,
                 tsMs,
                 tsSource,
                 createdAt
@@ -4930,6 +4993,19 @@ wss.on('connection', (ws, req) => {
               await Promise.all([...memberAvatarJobs].map(([historyMemberName, historyMemberAvatar]) =>
                 upsertMemberAvatar(thread_id, historyMemberName, historyMemberAvatar)));
             }
+            // Nhìn được payload history crawler thực sự trả về - chẩn đoán
+            // chiều tin bị lưu sai (2026-11-03).
+            syncDebug('HISTORY_BATCH', {
+              thread: String(thread_id),
+              mode,
+              count: validMessages.length,
+              sample: validMessages.slice(0, 14).map((mm) => ({
+                id: String(mm.fb_message_id || '').slice(0, 44),
+                out: mm.is_outgoing ? 1 : 0,
+                name: String(mm.member_name || '').slice(0, 24),
+                text: String(mm.content || '').slice(0, 24)
+              }))
+            });
             const persistence = ConversationRepository.saveMessagesTransaction(thread_id, sequencedMessages);
             // History may arrive after realtime already confirmed the local
             // attachment row. Collapse the late Facebook base/_media echo in
@@ -9418,9 +9494,14 @@ function startServer() {
   // tránh nhiều Chrome khởi động tranh nhau cùng lúc.
   const autoReconnectTimer = setTimeout(() => {
     (async () => {
-      // Chỉ tự kết nối lại account ACTIVE — bỏ qua account DISCONNECTED
-      // (account cũ đã ngắt/test trái lại sẽ không bật Chrome lúc mở app).
-      const accounts = db.prepare("SELECT id FROM accounts WHERE status IS NULL OR status != 'DISCONNECTED'").all();
+      // Tự kết nối lại MỌI account có profile, kể cả DISCONNECTED: trạng thái
+      // DISCONNECTED chỉ nghĩa là extension WS từng rớt (Chrome bị đóng bất
+      // thường/restart app) — không phải ý người dùng ngắt hẳn. Bỏ qua
+      // DISCONNECTED như cũ khiến account vừa thêm bị "chết vĩnh viễn" sau
+      // lần Chrome bị kill, không bao giờ tự sync lại (reproduce 2026-11-03:
+      // account mới thêm sáng nay DISCONNECTED, mở app mãi không kéo hội thoại).
+      // Account đã xóa hẳn khỏi CRM không còn row ở bảng này; CHECKPOINT bỏ qua.
+      const accounts = db.prepare("SELECT id FROM accounts WHERE (status IS NULL OR status != 'CHECKPOINT') AND profile_dir IS NOT NULL").all();
       for (const acc of accounts) {
         const accountId = String(acc.id);
         const requestedAt = Date.now();

@@ -753,6 +753,22 @@ class ConversationRepository {
         let timestampSource = observedTimestampSource;
         let createdAt = observedCreatedAt;
         if (existing) {
+          // History quét lại với nhãn hydrate lỗi thời ("do Bạn gửi") không
+          // được lật ngược row INCOMING đã có tên người gửi thật (hoặc đã
+          // được heal gán sender_id='CONTACT') thành OUTGOING qua UPSERT -
+          // chiều ngược của guard hasMatchingOutgoingText phía trên
+          // (reproduce 2026-11-03: heal xong bị crawler đọc sớm lật lại).
+          const guardRow = database.prepare('SELECT sender_id, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+          const namedIncomingFlipBlocked = isHistoryObservation
+            && isOutgoing === 1
+            && Number(existing.is_outgoing) === 0
+            && (
+              (guardRow && guardRow.sender_name && !/^(?:bạn|you)$/i.test(String(guardRow.sender_name).trim()))
+              || String((guardRow && guardRow.sender_id) || '') === 'CONTACT'
+            );
+          const upsertIsOutgoing = namedIncomingFlipBlocked ? 0 : isOutgoing;
+          const upsertSenderRole = namedIncomingFlipBlocked ? 'customer' : senderRole;
+          const upsertDirectionStatus = namedIncomingFlipBlocked ? 'confirmed' : directionStatus;
           const oldRank = ConversationRepository.getTimestampRank(existing.timestamp_source);
           const newRank = ConversationRepository.getTimestampRank(observedTimestampSource);
           // History sync adds a deterministic millisecond DOM offset to
@@ -771,13 +787,13 @@ class ConversationRepository {
             timestampSource = existing.timestamp_source || 'unknown';
             createdAt = existing.created_at;
           }
-          const directionChanged = directionStatus === 'confirmed'
-            && (existing.direction_status !== 'confirmed' || existing.is_outgoing !== isOutgoing);
+          const directionChanged = upsertDirectionStatus === 'confirmed'
+            && (existing.direction_status !== 'confirmed' || existing.is_outgoing !== upsertIsOutgoing);
           const timestampChanged = shouldUpgradeTimestamp && (
             timestampMs !== (existing.timestamp_ms || 0) || timestampSource !== existing.timestamp_source
           );
           const sequenceChanged = false;
-          const roleChanged = existing.sender_role !== senderRole;
+          const roleChanged = existing.sender_role !== upsertSenderRole;
           // Backfill tên thành viên cho row cũ: history quét lại giải được
           // member_name (row cũ chưa từng có) phải tính là thay đổi, nếu không
           // nhánh no-change nuốt luôn.
@@ -789,7 +805,7 @@ class ConversationRepository {
             else result.skippedCount += 1;
             continue;
           }
-          insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
+          insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, upsertIsOutgoing, upsertSenderRole, observedSequence, upsertDirectionStatus, createdAt);
           result.updatedIds.push(stableId);
           continue;
         }
@@ -924,8 +940,8 @@ class ConversationRepository {
   // is_outgoing when it disagrees with what's stored - but only once that
   // disagreement is confirmed twice (see shouldCommitDirectionFlip). Never
   // inserts a second row and never throws on repeated identical re-scans.
-  static reconcileExistingMessage(stableMessageId, { source, isOutgoing, directionStatus, direction_status, directionConfidence, direction_confidence, tsMs, tsSource, createdAt, content = null } = {}, database = getDefaultDb()) {
-    const existingMsg = database.prepare('SELECT timestamp_ms, timestamp_source, is_outgoing, direction_status FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+  static reconcileExistingMessage(stableMessageId, { source, isOutgoing, directionStatus, direction_status, directionConfidence, direction_confidence, tsMs, tsSource, createdAt, content = null, senderName = null } = {}, database = getDefaultDb()) {
+    const existingMsg = database.prepare('SELECT timestamp_ms, timestamp_source, is_outgoing, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableMessageId);
     if (!existingMsg) return { updated: false, reason: 'not_found' };
 
     const shouldUpdateTimestamp = Boolean(
@@ -982,6 +998,19 @@ class ConversationRepository {
       && normalizedOutgoing === 0
       && existingMsg.direction_status === 'confirmed';
     if (crawlTriesToFlipOutgoing) {
+      // NGOẠI LỆ đối xứng với guard "named incoming" bên dưới: observation
+      // mang TÊN người gửi giải được từ nhãn Messenger ("Message sent 12:10
+      // PM by <Tên>:") là bằng chứng hướng đáng tin — được lật row outgoing
+      // đã ghi sai do đoán hình học (reproduce 2026-11-03 12:10: tin khách
+      // lật thành outgoing vì regex label EN không khớp, geometry cửa sổ ẩn
+      // đoán sai, mọi reading đúng sau đó bị guard này chặn vĩnh viễn).
+      const hasNamedSenderEvidence = Boolean(senderName)
+        && !/^(?:bạn|you|khách hàng|customer)$/i.test(String(senderName).trim());
+      if (hasNamedSenderEvidence) {
+        database.prepare("UPDATE messages SET is_outgoing = 0, sender_name = ?, sender_role = 'customer' WHERE fb_message_id = ?").run(String(senderName).trim(), stableMessageId);
+        console.log(`[ConversationRepo] 🔁 Lật chiều theo nhãn có tên: ${stableMessageId} -> incoming (${senderName})`);
+        return { updated: true, reason: 'label_evidence_flip' };
+      }
       // Record as a candidate but do NOT commit under any circumstance.
       // This prevents a consistently-wrong geometry reading on a wide video
       // from ever flipping our own sent media to incoming.
@@ -990,7 +1019,22 @@ class ConversationRepository {
       if (!shouldUpdateTimestamp) return { updated: false, reason: 'crawl_blocked_outgoing_flip' };
     }
 
-    const shouldUpdateDirection = !crawlTriesToFlipOutgoing && isCrawlObservation && (
+    // Chiều ngược: quét lại với nhãn hydrate lỗi thời ("do Bạn gửi") không
+    // được lật row INCOMING đã có tên người gửi thật thành OUTGOING. Tên này
+    // chỉ được điền khi giải được từ nhãn Messenger nên là bằng chứng hướng
+    // đáng tin (reproduce 2026-11-03: heal xong bị lật lại bằng 2-strike).
+    const crawlFlipsNamedIncoming = isCrawlObservation
+      && Number(existingMsg.is_outgoing) === 0
+      && normalizedOutgoing === 1
+      && existingMsg.sender_name
+      && !/^(?:bạn|you)$/i.test(String(existingMsg.sender_name).trim());
+    if (crawlFlipsNamedIncoming) {
+      console.log(`[ConversationRepo] 🛡️ Blocked crawl flip of named incoming row: ${stableMessageId} (source=${source})`);
+      directionFlipCandidates.delete(stableMessageId);
+      if (!shouldUpdateTimestamp) return { updated: false, reason: 'crawl_blocked_named_incoming_flip' };
+    }
+
+    const shouldUpdateDirection = !crawlTriesToFlipOutgoing && !crawlFlipsNamedIncoming && isCrawlObservation && (
       shouldPromotePending
       || shouldCommitDirectionFlip(stableMessageId, existingMsg.is_outgoing, normalizedOutgoing)
     );
