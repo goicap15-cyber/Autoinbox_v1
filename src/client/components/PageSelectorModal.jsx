@@ -28,6 +28,8 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
   // Trạng thái job tự động hóa
   const [job, setJob] = useState(null); // {sync_id, status, message, error, kind}
   const [busy, setBusy] = useState(false);
+  // Chrome tự động hóa ẩn chạy ngầm (server tự ẩn sau khi mở); job mới = ẩn lại
+  const [chromeHidden, setChromeHidden] = useState(true);
 
   // Popup mật khẩu (Facebook re-auth) + popup đăng ký developer
   const [pwd, setPwd] = useState('');
@@ -167,6 +169,27 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
     return () => clearInterval(t);
   }, [job?.sync_id, job?.status]);
 
+  // Job mới = Chrome automation quay lại trạng thái ẩn (server tự ẩn sau khi mở)
+  useEffect(() => {
+    if (job?.sync_id) setChromeHidden(true);
+  }, [job?.sync_id]);
+
+  const toggleAutomationChrome = async () => {
+    const nextVisible = chromeHidden;
+    try {
+      const res = await fetch('/api/page-api/chrome-visibility', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ visible: nextVisible })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Không đổi được trạng thái Chrome');
+      setChromeHidden(!nextVisible);
+    } catch (err) {
+      setErrorMsg(err.message);
+    }
+  };
+
   // Thông báo thành công tự tắt sau 8s (yêu cầu 2026-10-08: hiện xong đừng
   // đứng mãi trong modal) — muốn tắt sớm thì bấm dấu X trên banner.
   useEffect(() => {
@@ -196,7 +219,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Không thể bắt đầu tạo app');
       setShowCreateForm(false);
-      setJob({ sync_id: data.sync_id, status: 'starting', message: 'Đang mở cửa sổ Chrome tự động hóa…' });
+      setJob({ sync_id: data.sync_id, status: 'starting', message: 'Đang mở Chrome tự động hóa (chạy ngầm)…' });
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -225,7 +248,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Không thể bắt đầu đồng bộ page');
       setShowAppPicker(false);
-      setJob({ sync_id: data.sync_id, kind: 'sync-pages', status: 'starting', message: 'Đang mở Chrome quét danh sách page…' });
+      setJob({ sync_id: data.sync_id, kind: 'sync-pages', status: 'starting', message: 'Đang mở Chrome quét danh sách page (chạy ngầm)…' });
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -246,7 +269,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       });
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Không thể bắt đầu đồng bộ app');
-      setJob({ sync_id: data.sync_id, kind: 'sync-apps', status: 'starting', message: 'Đang mở Chrome quét danh sách app…' });
+      setJob({ sync_id: data.sync_id, kind: 'sync-apps', status: 'starting', message: 'Đang mở Chrome quét danh sách app (chạy ngầm)…' });
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -266,7 +289,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       });
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Không thể bắt đầu lấy token');
-      setJob({ sync_id: data.sync_id, status: 'starting', message: 'Đang mở Chrome tự động hóa…' });
+      setJob({ sync_id: data.sync_id, status: 'starting', message: 'Đang mở Chrome tự động hóa (chạy ngầm)…' });
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -305,7 +328,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Không thể bắt đầu xóa app');
       setAppToDelete(null);
-      setJob({ sync_id: data.sync_id, status: 'starting', message: 'Đang mở Chrome để gỡ ứng dụng…' });
+      setJob({ sync_id: data.sync_id, status: 'starting', message: 'Đang mở Chrome để gỡ ứng dụng (chạy ngầm)…' });
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -529,6 +552,11 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
               <strong className="text-[var(--color-text-primary,#f8fafc)]">Đang chạy:</strong>{' '}
               {job.message || job.status}
             </span>
+            <button onClick={toggleAutomationChrome}
+              className="text-[10px] px-2 py-1 rounded-lg bg-[var(--color-bg-surface,#132235)] text-[var(--color-text-secondary,#cbd5e1)] border border-[var(--color-border,#284057)] hover:bg-[var(--color-bg-elevated,#172b42)] transition-colors shrink-0"
+              title={chromeHidden ? 'Chrome đang ẩn chạy ngầm — bấm để xem' : 'Ẩn Chrome lại — job vẫn chạy bình thường khi ẩn'}>
+              {chromeHidden ? 'Hiện Chrome' : 'Ẩn Chrome'}
+            </button>
             <button onClick={cancelJob} className="text-[10px] px-2 py-1 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors shrink-0">
               Hủy
             </button>

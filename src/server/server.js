@@ -6855,6 +6855,14 @@ app.post('/api/page-api/sync-cancel', (req, res) => {
   res.json({ success: ok });
 });
 
+// Hiện/ẩn cửa sổ Chrome tự động hóa (chạy ngầm) — bấm từ modal Fanpage khi job đang chạy
+app.post('/api/page-api/chrome-visibility', (req, res) => {
+  const visible = !!(req.body || {}).visible;
+  const r = setupAutomation.setAutomationChromeVisible(visible);
+  if (r.error) return res.status(400).json({ success: false, error: r.error });
+  res.json({ success: true });
+});
+
 // User nhập mật khẩu khi Facebook hỏi lại (re-auth) — KHÔNG lưu lại
 app.post('/api/page-api/submit-password', (req, res) => {
   const { sync_id, password } = req.body || {};
