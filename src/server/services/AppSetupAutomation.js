@@ -9,6 +9,7 @@
 // Mọi nút bấm bắt theo text đa ngôn ngữ + role, không dùng class tự sinh của FB.
 const crypto = require('crypto');
 const path = require('path');
+const { execFile } = require('child_process');
 const { resolveChromePath } = require('../../../chrome-bundling/resolveChromePath');
 const { resolveBinRoot } = require('../utils/appResourceRoot');
 // Bộ quét Fanpage (UMD — chạy được cả trong Node): bóc JSON Comet từ HTML facebook.com/pages
@@ -64,7 +65,24 @@ function configurePageSetupAutomation(deps = {}) {
 // Chrome thật (headful) cho tự động hóa: ưu tiên Chrome bundled của dự án,
 // fallback Chrome cài sẵn trên máy — giống đúng cách ProcessManager chạy Chrome.
 async function launchAutomationChrome() {
-  const args = ['--no-sandbox', '--lang=vi-VN', '--window-size=1200,860'];
+  // Chạy ngầm (SW_HIDE) cần bộ args chống-throttle y như ProcessManager dùng
+  // cho Chrome CRM ẩn: thiếu chúng thì Chrome đánh dấu cửa sổ occluded,
+  // renderer bị throttle, FB render lười (IntersectionObserver) không vẽ ra
+  // DOM option Use cases → automation "không bắt được" phần tử (reproduce
+  // 03-11: quét 90s không thấy "Khác/Other"). CalculateNativeWinOcclusion tắt
+  // luôn việc đo occlusion để trang coi cửa sổ ẩn như đang hiển thị.
+  const args = [
+    '--no-sandbox',
+    '--lang=vi-VN',
+    '--window-size=1200,860',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion',
+    '--hide-crash-restore-bubble',
+    '--no-first-run',
+    '--no-default-browser-check',
+  ];
   const base = { headless: false, args, defaultViewport: null };
   let exe = null;
   try {
@@ -79,9 +97,117 @@ async function launchAutomationChrome() {
   const puppeteer = await getPuppeteer();
   let lastErr = null;
   for (const opt of candidates) {
-    try { return await puppeteer.launch(opt); } catch (e) { lastErr = e; }
+    try {
+      const browser = await puppeteer.launch(opt);
+      scheduleAutomationChromeHide(browser);
+      return browser;
+    } catch (e) { lastErr = e; }
   }
   throw lastErr || new Error('Không khởi động được Chrome để tự động hóa.');
+}
+
+// Chrome automation "chạy ngầm": ẩn cửa sổ bằng SW_HIDE ngay sau khi launch —
+// process + CDP vẫn sống nên click/đọc DOM hoạt động bình thường (cùng cơ chế
+// toggle OFF Chrome CRM của ProcessManager). Cửa sổ Chrome được tạo vài trăm
+// ms sau process nên bấm hide 2 lượt; nếu user đã bấm "Hiện Chrome" trong
+// modal thì bỏ qua các lượt còn lại.
+const userShownAutomationPids = new Set();
+
+function hideAutomationWindows(pid) {
+  if (process.platform !== 'win32' || !pid) return;
+  const psScript = `
+Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public class AutoHideWin {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int n);
+}' -ErrorAction SilentlyContinue
+$targetPids = @(${pid || 0})
+$cb = [AutoHideWin+EnumProc]{
+  param($h, $l)
+  $procId = [uint32]0
+  [void][AutoHideWin]::GetWindowThreadProcessId($h, [ref]$procId)
+  if ($targetPids -contains $procId) {
+    $sbC = New-Object System.Text.StringBuilder 128
+    [void][AutoHideWin]::GetClassName($h, $sbC, 128)
+    if ($sbC.ToString().StartsWith('Chrome_WidgetWin')) {
+      [void][AutoHideWin]::ShowWindowAsync($h, 0)
+    }
+  }
+  return $true
+}
+[void][AutoHideWin]::EnumWindows($cb, [IntPtr]::Zero)`;
+  const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => {});
+}
+
+function showAutomationWindows(pid) {
+  if (process.platform !== 'win32' || !pid) return;
+  const psScript = `
+Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public class AutoShowWin {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int m);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+}' -ErrorAction SilentlyContinue
+$targetPids = @(${pid || 0})
+$cb = [AutoShowWin+EnumProc]{
+  param($h, $l)
+  $procId = [uint32]0
+  [void][AutoShowWin]::GetWindowThreadProcessId($h, [ref]$procId)
+  if ($targetPids -contains $procId) {
+    $sbC = New-Object System.Text.StringBuilder 128
+    [void][AutoShowWin]::GetClassName($h, $sbC, 128)
+    if ($sbC.ToString().StartsWith('Chrome_WidgetWin')) {
+      [void][AutoShowWin]::ShowWindow($h, 9)
+      [void][AutoShowWin]::SetForegroundWindow($h)
+    }
+  }
+  return $true
+}
+[void][AutoShowWin]::EnumWindows($cb, [IntPtr]::Zero)`;
+  const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => {});
+}
+
+function scheduleAutomationChromeHide(browser) {
+  const proc = browser.process ? browser.process() : null;
+  const pid = proc ? proc.pid : 0;
+  if (!pid) return;
+  for (const delayMs of [600, 1800]) {
+    setTimeout(() => {
+      if (userShownAutomationPids.has(pid)) return;
+      try {
+        const live = browser.process && browser.process();
+        if (live && !live.killed) hideAutomationWindows(pid);
+      } catch (_) { /* browser đã đóng */ }
+    }, delayMs);
+  }
+}
+
+// Nút Hiện/Ẩn Chrome trong modal Fanpage — đụng mọi browser automation còn sống.
+function setAutomationChromeVisible(visible) {
+  const pids = [];
+  for (const job of jobs.values()) {
+    try {
+      const proc = job.browser && job.browser.process ? job.browser.process() : null;
+      if (proc && proc.pid) pids.push(proc.pid);
+    } catch (_) { /* browser đã đóng */ }
+  }
+  if (pids.length === 0) return { error: 'Chrome tự động hóa không còn chạy.' };
+  for (const pid of pids) {
+    if (visible) {
+      userShownAutomationPids.add(pid);
+      showAutomationWindows(pid);
+    } else {
+      userShownAutomationPids.delete(pid);
+      hideAutomationWindows(pid);
+    }
+  }
+  return { pids };
 }
 
 const jobs = new Map();
@@ -243,12 +369,38 @@ function closeBrowser(job) {
   if (job.browser) {
     const b = job.browser;
     job.browser = null;
+    try {
+      const proc = b.process ? b.process() : null;
+      if (proc && proc.pid) userShownAutomationPids.delete(proc.pid);
+    } catch (_) { /* đã đóng */ }
     b.close().catch(() => {});
   }
 }
 
 function errorShot(page, name) {
-  return page.screenshot({ path: path.join(DATA_DIR, name) }).catch(() => {});
+  // Cửa sổ ẩn (chạy ngầm) có thể không render được khung hình → PNG best-effort.
+  // Luôn kèm dump text (URL + dialog + body) để chẩn đoán kể cả khi chụp trượt.
+  const txtPath = path.join(DATA_DIR, String(name).replace(/\.png$/i, '') + '.txt');
+  return (async () => {
+    const info = await page.evaluate(() => {
+      const clean = (s) => String(s || '').replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+      const dlgs = [...document.querySelectorAll('[role="dialog"], div[aria-modal="true"]')]
+        .map((d) => clean(d.innerText).slice(0, 400)).filter(Boolean);
+      return {
+        url: location.href,
+        body: clean(document.body && document.body.innerText).slice(0, 1500),
+        dialogs: dlgs,
+      };
+    }).catch(() => ({}));
+    const dump = [
+      `at: ${new Date().toISOString()}`,
+      `url: ${info.url || '?'}`,
+      ...((info.dialogs || []).map((d) => `dialog: ${d}`)),
+      `body: ${info.body || ''}`,
+    ].join('\n');
+    try { require('fs').writeFileSync(txtPath, dump); } catch (_) {}
+    await page.screenshot({ path: path.join(DATA_DIR, name) }).catch(() => {});
+  })().catch(() => {});
 }
 
 // Điền email liên hệ vào form tạo ứng dụng (cùng cơ chế setVal như pollAndFill)
@@ -1037,18 +1189,24 @@ async function dismissPopups(page) {
       const vis = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
       const dlgs = [...document.querySelectorAll('[role="dialog"], div[aria-modal="true"]')].filter(vis);
       for (const d of dlgs) {
-        const t = (d.innerText || '').toLowerCase();
+        // FB chèn zero-width space vào text nút ("Close ​") — phải bóc trước
+        // khi khớp regex, không thì popup "new way to create apps" không bao
+        // giờ được gỡ và đè wizard cả phút quét Use cases (reproduce 03-11).
+        const t = String(d.innerText || '').replace(/[\u200b\ufeff]/g, '').toLowerCase();
         const btns = [...d.querySelectorAll('[role="button"], button')];
         // Popup "new way to create apps" → bấm Create app để tiếp tục
-        const createBtn = btns.find((b) => /^(?:create app|tạo ứng dụng)$/i.test((b.innerText || '').trim()));
+        const createBtn = btns.find((b) => /^(?:create app|tạo ứng dụng)$/i.test(String(b.innerText || '').replace(/[\u200b\ufeff]/g, '').trim()));
         if (createBtn && /new way|cách mới|new system/.test(t)) {
           createBtn.scrollIntoView({ block: 'center' });
           createBtn.click();
           return 'create-app';
         }
-        // Popup thông báo chung → bấm Got it / OK / X để đóng
-        const dismiss = btns.find((b) => /^(?:got it|đã hiểu|ok|x)$/i.test((b.innerText || '').trim())
-          || (b.getAttribute('aria-label') || '').toLowerCase() === 'close');
+        // Popup thông báo chung → bấm Got it / OK / Close / X để đóng
+        const dismiss = btns.find((b) => {
+          const label = String(b.innerText || '').replace(/[\u200b\ufeff]/g, '').trim();
+          return /^(?:got it|đã hiểu|ok|x|close|đóng)$/i.test(label)
+            || (b.getAttribute('aria-label') || '').toLowerCase() === 'close';
+        });
         if (dismiss && !/gỡ ứng dụng|remove app/i.test(t)) {
           dismiss.click();
           return 'dismissed';
@@ -1102,6 +1260,9 @@ async function pickOtherOption(job, page) {
   let filterDone = false;
   let cardDone = false;
   while (Date.now() < deadline && !cardDone) {
+    // Popup FB (vd quảng cáo "new way to create apps") đè lên Use cases làm
+    // quét không thấy option — gỡ mỗi vòng như clickWhenAvailable đã làm.
+    await dismissPopups(page);
     const res = await page
       .evaluate((filterDone) => {
         const vis = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
@@ -2990,4 +3151,4 @@ async function runAppsScan(job, uid) {
   closeBrowser(job);
 }
 
-module.exports = { configurePageSetupAutomation, startPageSync, startAppCreation, startDeleteApp, startPageSetup, startAppsScan, getJob, getActive, cancelSync, submitPassword, resumeSync, resolveRegisterInput, resendRegisterSms };
+module.exports = { configurePageSetupAutomation, startPageSync, startAppCreation, startDeleteApp, startPageSetup, startAppsScan, getJob, getActive, cancelSync, submitPassword, resumeSync, resolveRegisterInput, resendRegisterSms, setAutomationChromeVisible };
