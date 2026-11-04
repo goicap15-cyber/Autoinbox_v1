@@ -41,10 +41,19 @@
     const newLabelMatch = effectiveLabel.match(NEW_LABEL_PATTERN);
     if (newLabelMatch) {
       const rawSender = newLabelMatch[1].trim();
-      if (contactName && rawSender.toLowerCase() === String(contactName).trim().toLowerCase()) {
-        return { matched: true, isOutgoing: false, senderName: rawSender };
-      }
       if (contactName) {
+        // Nhãn "Lúc ..., <Tên>:" ghi tên người gửi. Khớp fuzzy (nickname
+        // "Khang" ⊂ contact "Lê Văn KhangRryuutrtuu"; đuôi " · 2 phút" của
+        // sidebar phải cắt trước) = tin khách. Exact thuần hụt nickname rồi
+        // rơi nhánh "must be us" -> bóp tin khách thành tin đi (reproduce
+        // 2026-11-03). Đồng bộ closure trong background.js.
+        const cleanContact = String(contactName).replace(/\s·\s[^·]*$/, '').trim().toLowerCase();
+        const labelName = rawSender.toLowerCase();
+        const fuzzyContact = cleanContact.length >= 3 && labelName.length >= 3
+          && (cleanContact.includes(labelName) || labelName.includes(cleanContact));
+        if (fuzzyContact) {
+          return { matched: true, isOutgoing: false, senderName: rawSender };
+        }
         // Thread 1-1 only has two sides - a name that isn't the contact must be us.
         return { matched: true, isOutgoing: true, senderName: 'Bạn' };
       }

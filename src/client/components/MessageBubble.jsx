@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+﻿import React, { useEffect, useState } from 'react';
 import { AlertTriangle, Check, CheckCheck, RefreshCw, Loader2, Phone, Video, PhoneMissed, PhoneCall, PhoneIncoming } from 'lucide-react';
 import MediaViewer from './MediaViewer.jsx';
 import { getMessageDisplayTime, isConfirmedOutgoing } from '../utils/messageTimestampPresentation.js';
@@ -94,7 +94,15 @@ function renderRichContent(text) {
 export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenByCustomer = false }) {
   const [isTimePinned, setIsTimePinned] = useState(false);
   const isPendingDirection = msg.direction_status === 'pending';
-  const isBoolOutgoing = (msg.is_outgoing === true || msg.is_outgoing === 1 || String(msg.is_outgoing || '').toLowerCase() === 'true' || String(msg.is_outgoing || '') === '1') || msg.from === 'me' || msg.sender_type === 'staff' || msg.sender_type === 'ai';
+  // is_outgoing flag la nguon chan ly chinh. sender_type 'staff'/'ai' chi la go y phu
+  // - KHONG duoc dung standalone vi khach hang cung co the bi gan sender_type sai boi extension.
+  const hasExplicitOutgoing = msg.is_outgoing === true || msg.is_outgoing === 1
+    || String(msg.is_outgoing || '').toLowerCase() === 'true'
+    || String(msg.is_outgoing || '') === '1';
+  const isBoolOutgoing = hasExplicitOutgoing
+    || msg.from === 'me'
+    || (!hasExplicitOutgoing && msg.is_outgoing !== false && msg.is_outgoing !== 0
+        && (msg.sender_type === 'staff' || msg.sender_type === 'ai'));
   const isOutgoing = isConfirmedOutgoing(msg) || (!isPendingDirection && Boolean(isBoolOutgoing));
   const isUnsent = Boolean(msg.is_unsent || msg.unsent);
   const content = msg.content || msg.text_content || msg.text || msg.message || '';

@@ -180,6 +180,12 @@ const SYSTEM_PATTERNS = [
   // Short day-of-week / relative-day separator, same family (spec 047).
   /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i,
 
+  // Pill ngày EN giữa nhóm tin ("Oct 16, 2026, 10:49 AM") + mảnh pill bị
+  // DOM cắt ("58 AM by Khang") nhặt thành tin rác (reproduce 2026-11-03).
+  // Đồng bộ src/extension/textFilter.js và closure background.js.
+  /^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}(?:,?\s+\d{1,2}:\d{2}\s*(?:AM|PM)?)?$/i,
+  /^\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s+by\s+[A-ZÀ-ỸĐ][\p{L}\p{M}\s.]{0,40}$/u,
+
   // Meta Business Suite navigation / menu actions
   /^(?:Meta Business Suite|Liên kết|Chỉnh sửa|Trợ giúp|Tùy chọn khác|Cài đặt|Settings|Help|Edit)$/i,
   /^(?:Thông báo|Notifications)$/i,

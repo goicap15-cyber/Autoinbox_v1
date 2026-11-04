@@ -4762,7 +4762,7 @@ async function stagePersonalMessengerAttachment(tabId, attachmentOrManifest) {
 // Không tìm thấy dropdown/li thì giữ "@Tên" như text thường (fallback an toàn).
 const MENTION_EVERYONE_ID = '2211776809571916';
 const MENTION_DROPDOWN_TIMEOUT_MS = 3000;
-const EXT_BUILD = 'app21';
+const EXT_BUILD = 'app22';
 
 // Tách content thành segments text/mention theo các "@Tên" đã chọn trong CRM.
 // mentions: [{ name, user_id }] — chỉ occurrence CÓ TRONG content mới được đổi.
@@ -9569,7 +9569,11 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           /^(?:T[2-7]|CN)$/i,
           /^\d{1,2}:\d{2}\s+\d{1,2}\s+Tháng\s+\d{1,2},?\s+\d{4}$/i,
           /^\d{1,2}\s+Tháng\s+\d{1,2}(?:,?\s*\d{4})?$/i,
-          /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i
+          /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i,
+          // Pill ngày EN ("Oct 16, 2026, 10:49 AM") + mảnh pill cắt DOM
+          // ("58 AM by Khang") - DOM history nhặt thành tin rác (2026-11-03).
+          /^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}(?:,?\s+\d{1,2}:\d{2}\s*(?:AM|PM)?)?$/i,
+          /^\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s+by\s+[A-ZÀ-ỸĐ][\p{L}\p{M}\s.]{0,40}$/u
         ];
 
         function isSystemText(txt) {
@@ -9881,6 +9885,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           if (mediaUrl || isVideoMessage) {
             // Priority 1: aria-label text is the most reliable direction signal.
             let mediaOutgoing;
+            let mediaDirectionEvidence = 'label';
             const labelSaysOutgoing = /do B\u1ea1n g\u1eedi|Tin nh\u1eafn do B\u1ea1n g\u1eedi l\u00fac|B\u1ea1n \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(effectiveLabel);
             const labelSaysIncoming = !labelSaysOutgoing && /Tin nh\u1eafn do .+ g\u1eedi l\u00fac|Message sent by/i.test(effectiveLabel);
             if (labelSaysOutgoing) {
@@ -9891,6 +9896,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               // Geometry fallback: use actual media element rect, not the full-row wrapper.
               // The row wrapper (div[role="article"]) is always 100% wide so its center
               // is ~50% — wrongly reads as incoming when threshold is >= 0.55.
+              mediaDirectionEvidence = 'geometry';
               const mediaRect = (mediaElement || mediaAnchor || semanticVideoElement || row).getBoundingClientRect();
               const directionRect = historyDirectionContainer.getBoundingClientRect();
               if (directionRect.width > 0 && mediaRect.width > 0) {
@@ -9942,6 +9948,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               media_type: mediaType,
               media_url: mediaUrl,
               is_outgoing: mediaOutgoing ? 1 : 0,
+              direction_evidence: mediaDirectionEvidence,
               sender_role: mediaOutgoing ? 'operator' : 'customer',
               source: 'dom_history_sync',
               timestamp_ms: tsMs + dom_order,
@@ -9998,13 +10005,24 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                     isOutgoing = true;
                     senderName = 'Bạn';
                     directionMatched = true;
-                  } else if (contactName && rawSender.toLowerCase() === String(contactName).trim().toLowerCase()) {
-                    isOutgoing = false;
-                    senderName = rawSender;
-                    directionMatched = true;
                   } else if (contactName) {
-                    isOutgoing = true;
-                    senderName = 'Bạn';
+                    // Nhãn "Lúc ..., <Tên>:" của Messenger ghi tên NGƯỜI GỬI.
+                    // Khớp fuzzy (nickname "Khang" ⊂ contact "Lê Văn
+                    // KhangRryuutrtuu"; đuôi " · 2 phút" của sidebar phải cắt)
+                    // = tin khách. Exact thuần hụt nickname rồi rơi nhánh
+                    // "không khớp = tin mình" bóp tin khách thành tin đi
+                    // (reproduce 2026-11-03). Đồng bộ historyRowSupport.js.
+                    const cleanContact = String(contactName).replace(/\s·\s[^·]*$/, '').trim().toLowerCase();
+                    const labelName = rawSender.toLowerCase();
+                    if (cleanContact.length >= 3 && labelName.length >= 3
+                      && (cleanContact.includes(labelName) || labelName.includes(cleanContact))) {
+                      isOutgoing = false;
+                      senderName = rawSender;
+                      labelSenderName = rawSender;
+                    } else {
+                      isOutgoing = true;
+                      senderName = 'Bạn';
+                    }
                     directionMatched = true;
                   }
                 }
@@ -10047,6 +10065,9 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // Messenger's visual alignment is the final authority. Labels can
             // be inherited from a surrounding accessibility wrapper and refer
             // to a neighbouring bubble, especially in grouped call/messages.
+            // Gắn evidence để server chỉ nhận heal/sửa chiều từ geometry
+            // quyết đoán — nhãn tên bị 2 acc trùng tên làm mơ hồ.
+            let historyDirectionEvidence = directionMatched ? 'label' : 'guess';
             const directionRect = historyDirectionContainer.getBoundingClientRect();
             const bubbleRect = leafBubble.getBoundingClientRect();
             if (directionRect.width > 0 && bubbleRect.width > 0) {
@@ -10055,6 +10076,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                 isOutgoing = relativeCenter >= 0.55;
                 senderName = isOutgoing ? 'Bạn' : (contactName || 'Khách hàng');
                 directionMatched = true;
+                historyDirectionEvidence = 'geometry';
               }
             }
             // NHÓM (Messenger mới): label của TỪNG article là
@@ -10152,6 +10174,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                 member_avatar: (!isOutgoing && labelSenderName) ? extractHistoryMemberAvatar(row, labelSenderName) : null,
                 content: cleaned,
                 is_outgoing: isOutgoing ? 1 : 0,
+                direction_evidence: historyDirectionEvidence,
                 sender_role: isOutgoing ? 'operator' : 'customer',
                 source: 'dom_history_sync',
                 timestamp_ms: finalTsMs,

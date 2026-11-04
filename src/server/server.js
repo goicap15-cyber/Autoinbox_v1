@@ -1,4 +1,4 @@
-const path = require('path');
+﻿const path = require('path');
 const fs = require('fs');
 const { parseEnv } = require('util');
 // Neither the plain `node src/server/index.js` entrypoint nor Electron's
@@ -2765,7 +2765,6 @@ wss.on('connection', (ws, req) => {
           } else if (m.sender_id && threadAccountId && String(m.sender_id) === String(threadAccountId)) {
             finalIsOutgoing = 1;
           }
-
           // 2. Bổ sung log backend
           console.log(`[WS] 🔍 Debug Outgoing | Thread: ${threadId} | Source: ${m.source} | account_id: ${targetAccountId} | thread_account_id: ${threadAccountId} | sender_id: ${m.sender_id} | sender_name: ${m.sender_name} | raw is_outgoing: ${m.is_outgoing} | final is_outgoing: ${finalIsOutgoing}`);
 
@@ -3269,11 +3268,33 @@ wss.on('connection', (ws, req) => {
               const healContact = healContactClean.toLowerCase();
               const healSenderName = String(m.member_name || '').trim();
               const healLabel = healSenderName.toLowerCase();
-              const healNameMatches = healSenderName.length > 0 && healContact.length >= 3 && healLabel.length >= 3
+              let healNameMatches = healSenderName.length > 0 && healContact.length >= 3 && healLabel.length >= 3
                 && (healContact.includes(healLabel) || healLabel.includes(healContact));
+              // Hai acc TRÙNG TÊN (1-1): nhãn "Tin nhắn do X gửi lúc" với X
+              // khớp CẢ tên contact LẪN tên account đăng nhập là mơ hồ tuyệt
+              // đối — heal theo tên đã lật tin vừa gõ thành tin khách ngay
+              // trước mắt user (reproduce 2026-11-04 10:47: "ccxxcxc" heal
+              // lật IN rồi geometry đọc phải lật ngược, UI nhấp nháy 2 đầu).
+              // Thread trùng tên chỉ tin geometry quyết đoán.
+              if (healNameMatches) {
+                const healAccountRow = db.prepare('SELECT name FROM accounts WHERE id = ?').get(healThread.account_id);
+                const healAccountName = String(healAccountRow?.name || '').trim().toLowerCase();
+                if (healAccountName.length >= 3
+                  && (healLabel.includes(healAccountName) || healAccountName.includes(healLabel))) {
+                  syncDebug('WS_HEAL_SKIP_SAME_NAME', {
+                    thread: String(m.thread_id),
+                    fb_message_id: String(stableMessageId).substring(0, 70),
+                    sender_label: healSenderName.slice(0, 40)
+                  });
+                  healNameMatches = false;
+                }
+              }
               // Không tên: chỉ heal khi thread 1-1 (2 phía, không tự nhắn mình)
-              // và row đích không phải tin CRM gửi.
-              if (healNameMatches || (healContact.length >= 3 && !healSenderName)) {
+              // và row đích không phải tin CRM gửi. ĐÒI geometry quyết đoán:
+              // nhãn "Tin nhắn do X gửi lúc" với X trùng tên account là mơ hồ
+              // — heal theo nhãn đã lật sai tin operator gõ tay trong Messenger
+              // thành tin khách (reproduce 2026-11-03 12:09: Dkkskkss/alo).
+              if (healNameMatches || (healContact.length >= 3 && !healSenderName && m.direction_evidence === 'geometry')) {
                 const healFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
                 const healLikeEscaped = healFamilyId.replace(/[_%\\]/g, (c) => `\\${c}`);
                 const healRow = db.prepare(`
@@ -3288,12 +3309,14 @@ wss.on('connection', (ws, req) => {
                   ORDER BY id DESC LIMIT 1
                 `).get(m.thread_id, healFamilyId, `${healLikeEscaped}__bubble_%`, String(m.content || ''), Number(tsMs) || 0, Number(tsMs) || 0);
                 if (healRow) {
-                  db.prepare(`UPDATE messages SET is_outgoing = 0, sender_role = 'customer', direction_status = 'confirmed', sender_id = 'CONTACT', sender_name = ? WHERE id = ?`).run(healSenderName || healContactClean || null, healRow.id);
+                  // Không đổ contact_name bẩn (dính nội dung tin từ sidebar)
+                  // vào sender_name — để rỗng, UI hiện tên thread.
+                  db.prepare(`UPDATE messages SET is_outgoing = 0, sender_role = 'customer', direction_status = 'confirmed', sender_id = 'CONTACT', sender_name = ? WHERE id = ?`).run(healSenderName || null, healRow.id);
                   syncDebug('WS_HEAL_MISLABELED_INCOMING', {
                     thread: String(m.thread_id),
                     fb_message_id: String(healRow.fb_message_id || '').slice(0, 70),
                     sender_label: (healSenderName || healContactClean || '').slice(0, 40),
-                    evidence: healNameMatches ? 'member_name' : 'position_avatar'
+                    evidence: healNameMatches ? 'member_name' : 'geometry'
                   });
                   const healedRows = db.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY COALESCE(sequence_order, id) ASC, id ASC').all(m.thread_id);
                   io.emit('THREAD_MESSAGES_UPDATED', {
@@ -3323,11 +3346,42 @@ wss.on('connection', (ws, req) => {
             const bubbleFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
             const bubbleBaseRow = bubbleFamilyId.length >= 12
               ? db.prepare(`
-                  SELECT content, is_outgoing, timestamp_ms FROM messages
+                  SELECT id, content, is_outgoing, timestamp_ms, client_message_id, sent_by_agent, delivery_status FROM messages
                   WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
                   ORDER BY id DESC LIMIT 1
                 `).get(m.thread_id, bubbleFamilyId, bubbleFamilyId)
               : null;
+            if (bubbleBaseRow
+              && String(bubbleBaseRow.content || '').trim() === String(m.content || '').trim()
+              && Number(bubbleBaseRow.is_outgoing) !== (isOutgoing ? 1 : 0)
+              && m.direction_evidence === 'geometry'
+              && /^mid\./.test(bubbleFamilyId)
+              && (bubbleBaseRow.client_message_id === null || bubbleBaseRow.client_message_id === '')
+              && Number(bubbleBaseRow.sent_by_agent || 0) === 0
+              && (bubbleBaseRow.delivery_status === null || !['pending', 'sending'].includes(String(bubbleBaseRow.delivery_status)))) {
+              // Quan sát geometry quyết đoán (bong bóng rõ một bên) sửa chiều
+              // row gốc không dấu vết CRM — cả hai hướng. Không có lối này,
+              // lần heal/đọc sai trước bị "khóa" vĩnh viễn: mọi reading đúng
+              // sau đó bị guard này nuốt (reproduce 2026-11-03 12:09: heal lật
+              // sai Dkkskkss/alo rồi reading out=1 đúng bị SKIP như phantom).
+              db.prepare(`
+                UPDATE messages SET is_outgoing = ?, sender_role = ?,
+                  direction_status = 'confirmed', sender_id = ?
+                WHERE id = ?
+              `).run(isOutgoing ? 1 : 0, isOutgoing ? 'operator' : 'customer',
+                isOutgoing ? safeSenderId : 'CONTACT', bubbleBaseRow.id);
+              syncDebug('WS_GEOMETRY_DIRECTION_FIX', {
+                thread: m.thread_id,
+                fb_message_id: String(stableMessageId).substring(0, 70),
+                base_outgoing: Number(bubbleBaseRow.is_outgoing),
+                observed_outgoing: isOutgoing ? 1 : 0
+              });
+              io.emit('THREAD_MESSAGES_UPDATED', {
+                thread_id: m.thread_id,
+                account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null
+              });
+              break;
+            }
             if (bubbleBaseRow
               && String(bubbleBaseRow.content || '').trim() === String(m.content || '').trim()
               && (Number(bubbleBaseRow.is_outgoing) !== (isOutgoing ? 1 : 0)
@@ -3624,6 +3678,7 @@ wss.on('connection', (ws, req) => {
                 isOutgoing: directionStatus === 'pending' ? null : isOutgoing,
                 direction_status: directionStatus,
                 direction_confidence: m.direction_confidence,
+                directionEvidence: m.direction_evidence || null,
                 senderName: m.sender_name || null,
                 tsMs,
                 tsSource,
@@ -3643,6 +3698,14 @@ wss.on('connection', (ws, req) => {
             }
             if (reconcile.directionUpdated) {
               directionWasUpdated = true;
+              syncDebug('WS_DIRECTION_UPDATED', {
+                thread: String(m.thread_id),
+                fb_message_id: String(m.fb_message_id || '').substring(0, 70),
+                from: reconcile.previousIsOutgoing ? 1 : 0,
+                to: isOutgoing ? 1 : 0,
+                evidence: m.direction_evidence || null,
+                source: m.source || null
+              });
               console.log('[WS] Direction updated for message ' + m.fb_message_id + ': ' + (reconcile.previousIsOutgoing ? 1 : 0) + ' -> ' + (isOutgoing ? 1 : 0));
             }
             // Direction promotion is emitted so an already-open CRM thread can

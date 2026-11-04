@@ -1244,6 +1244,10 @@
     let sender_name = '';
     let labelSenderName = '';
     let is_outgoing = false;
+    // Nguồn bằng chứng chiều: server chỉ chấp nhận heal/sửa chiều row cũ
+    // khi quan sát đến từ geometry quyết đoán (bong bóng rõ trái/phải), không
+    // nhận nhãn tên — 2 acc trùng tên làm nhãn "do Lê Văn Khang gửi" mơ hồ.
+    let direction_evidence = '';
 
     const contactNameEl = document.querySelector('header h1, header h2, [role="main"] h1, [role="main"] h2, span[aria-level="1"]');
     const contactNameStr = contactNameEl ? contactNameEl.textContent.trim() : '';
@@ -1253,9 +1257,11 @@
     if (isMissedCallContent) {
       is_outgoing = false;
       sender_name = contactNameStr || 'Khách hàng';
+      direction_evidence = 'call_label';
     } else if (/do Bạn gửi|Tin nhắn do Bạn gửi lúc|Bạn đã gửi|sent by you|You sent|Message sent by you/i.test(effectiveLabel)) {
       is_outgoing = true;
       sender_name = 'Bạn';
+      direction_evidence = 'label_you';
     } else {
       // Nhãn EN mới của Messenger: "Message sent 12:10 PM by <Tên>: <nội dung>"
       // (thời gian TRƯỚC "by" — regex cũ "Message sent by X at" không khớp ->
@@ -1269,9 +1275,11 @@
         if (/^(?:Bạn|You)$/i.test(rawSender)) {
           is_outgoing = true;
           sender_name = 'Bạn';
+          direction_evidence = 'label_you';
         } else {
           is_outgoing = false;
           sender_name = rawSender;
+          direction_evidence = 'label_name';
           // Tên giải từ aria-label của tin NHÓM - nhánh realtime bên dưới ghi
           // đè sender_name thành tên nhóm, nhưng bubble nhãn tên trần cạnh
           // bubble thật vẫn cần tên này để nhận diện (reproduce 2026-10-11:
@@ -1289,6 +1297,7 @@
         if (hasContactAvatar) {
           is_outgoing = false;
           sender_name = contactNameStr;
+          direction_evidence = 'avatar';
         } else {
           const mainEl = document.querySelector('div[role="main"]');
           // For media messages, measure the actual media element (video/img) instead of
@@ -1312,6 +1321,7 @@
             const mainRect = mainEl.getBoundingClientRect();
             const nodeRect = targetNode.getBoundingClientRect();
             if (mainRect.width > 0 && nodeRect.width > 0) {
+              direction_evidence = 'geometry';
               // For wide media (> 40% of container), use right edge proximity rather than
               // center — outgoing media aligns to the right margin of the chat column.
               const isWideMedia = (isVideoMessage || isPhotoMessage) && nodeRect.width / mainRect.width > 0.40;
@@ -1335,26 +1345,52 @@
     }
 
     // Facebook can hydrate an incorrect/stale accessibility sender label for
-    // a freshly mounted bubble. In realtime, a clearly left/right visual
-    // bubble is the strongest direction evidence and prevents customer text
-    // from being discarded as our own message until history runs later.
-    if (isRealtime && finalBubbles.length > 0) {
+    // a freshly mounted bubble. A clearly left/right visual bubble is the
+    // strongest direction evidence and prevents customer text from being
+    // discarded as our own message until history runs later.
+    // Đo MỌI lá bong bóng thay vì chỉ lá lớn nhất — nhưng LOẠI lá text ẩn
+    // aria-label ("You sent … Enter, Message sent by … at 12:10 PM" / "Tin
+    // nhắn do … gửi lúc"): lá này tràn full-width (center ~0.56-0.64) nên
+    // vẫn decisive-right ở mọi row, và khi bubble thật chưa laid out (tab
+    // history/ẩn, hydrate sớm) nó TỤI MỘT MÌNH tạo "quyết đoán phải" ảo ->
+    // tin khách bị đá qua phải kèm direction_evidence='geometry' rồi reconcile
+    // lật row (reproduce 2026-11-04: TEST-KHACH-777/áaksasasasas,
+    // WS_DIRECTION_UPDATED 0->1 evidence geometry 04:34:16).
+    // Quyết đoán khi CÓ lá ở một bên rõ (<=0.45 / >=0.55) và KHÔNG có lá nào
+    // ở bên đối nghịch — tránh dính pill reaction/mảnh trang trí bên kia.
+    if (finalBubbles.length > 0) {
       const mainEl = document.querySelector('div[role="main"]');
-      const visualBubble = finalBubbles.reduce((best, candidate) => {
-        const rect = candidate.getBoundingClientRect();
-        const bestRect = best?.getBoundingClientRect?.();
-        return !bestRect || rect.width * rect.height > bestRect.width * bestRect.height ? candidate : best;
-      }, null);
       const mainRect = mainEl?.getBoundingClientRect?.();
-      const bubbleRect = visualBubble?.getBoundingClientRect?.();
-      if (mainRect?.width > 0 && bubbleRect?.width > 0) {
-        const relativeCenter = (bubbleRect.left + bubbleRect.width / 2 - mainRect.left) / mainRect.width;
-        if (relativeCenter <= 0.45) {
+      if (mainRect?.width > 0) {
+        let sawDecisiveLeft = false;
+        let sawDecisiveRight = false;
+        const decisiveCenters = [];
+        for (const candidate of finalBubbles) {
+          const rect = candidate.getBoundingClientRect?.();
+          if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+          const leafText = String(candidate.textContent || '').trim();
+          // Hai hình thái lá aria ẩn: "You sent <text>. Enter, Message sent
+          // by You at 12:10 PM" (tiền tố You sent) và "<text>Enter, Message
+          // sent by You at ..." (nội dung tin đứng TRƯỚC, reproduce
+          // 04:44:13 centers 0.59,0.64 content "xlcxcxlclxcxcEnter, M...").
+          // Chỉ match đầu chuỗi sẽ sót hình thái 2.
+          const ariaChrome = /Enter,\s*(?:Message sent by|Tin nhắn do)/i.test(leafText)
+            || /^(?:You sent|Message sent|Tin nhắn do|Enter,)/i.test(leafText);
+          if (ariaChrome) continue;
+          const relativeCenter = (rect.left + rect.width / 2 - mainRect.left) / mainRect.width;
+          if (relativeCenter <= 0.45) { sawDecisiveLeft = true; decisiveCenters.push(Math.round(relativeCenter * 100) / 100); }
+          else if (relativeCenter >= 0.55) { sawDecisiveRight = true; decisiveCenters.push(Math.round(relativeCenter * 100) / 100); }
+        }
+        if (sawDecisiveLeft && !sawDecisiveRight) {
           is_outgoing = false;
           sender_name = contactNameStr || 'Khách hàng';
-        } else if (relativeCenter >= 0.55) {
+          direction_evidence = 'geometry';
+          obsDebug({ stage: 'GEOMETRY_DECISIVE', thread: String(extractThreadIdFromUrl() || ''), side: 'left', centers: decisiveCenters.join(','), rt: isRealtime ? 1 : 0, content: String(rawText || '').substring(0, 30) });
+        } else if (sawDecisiveRight && !sawDecisiveLeft) {
           is_outgoing = true;
           sender_name = 'Bạn';
+          direction_evidence = 'geometry';
+          obsDebug({ stage: 'GEOMETRY_DECISIVE', thread: String(extractThreadIdFromUrl() || ''), side: 'right', centers: decisiveCenters.join(','), rt: isRealtime ? 1 : 0, content: String(rawText || '').substring(0, 30) });
         }
       }
     }
@@ -1430,6 +1466,7 @@
         member_avatar: memberAvatarUrl || null,
         content: emoji,
         is_outgoing,
+        direction_evidence,
         native_id: rowNativeId,
         effective_label: effectiveLabel,
         is_valid: true,
@@ -1477,6 +1514,7 @@
         member_avatar: memberAvatarUrl || null,
         content: caption || '',
         is_outgoing,
+        direction_evidence,
         native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
         effective_label: effectiveLabel,
         is_valid: true,
@@ -1557,6 +1595,7 @@
         member_avatar: memberAvatarUrl || null,
         content: cleanText,
         is_outgoing,
+        direction_evidence,
         native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
         effective_label: effectiveLabel,
         is_valid: true,
@@ -1993,6 +2032,7 @@
             member_avatar: parsed.member_avatar || null,
             content: parsed.content,
             is_outgoing: parsed.is_outgoing,
+            direction_evidence: parsed.direction_evidence || null,
             sender_role: parsed.is_outgoing ? 'operator' : 'customer',
             fb_message_id: fbMessageId,
             media_type: parsed.media_type || 'text',
@@ -2121,6 +2161,24 @@
           }
         }
         if (lastObservedMessages.get(fbMessageId) === observationSignature && !needsQuoteForward) return;
+        // Tin outgoing text: bubble CHƯA có native id thì nhường cho composer/
+        // network confirmation (dom_hash trôi khi hydrate sẽ thành ghost nếu
+        // forward sớm). Đã có native id thì forward - server tự khớp theo mid:
+        // ghép vào row pending của composer hoặc nhận diện trùng mid rồi bỏ.
+        // Nhắn tay ngay trong Messenger không có đường confirmation nào khác,
+        // gate cũ nuốt sạch tin này (reproduce 2026-10-09: 5 tin "alo" nhắn tay
+        // chỉ còn 1 vào CRM).
+        // Gate phải đứng TRƯỚC lastObservedMessages.set/markSeen: mark trước
+        // làm lần đọc lại sau khi mid thật hydrate bị nuốt theo chữ ký cũ —
+        // tin của chính mình mất khỏi CRM (reproduce 2026-11-03: tin B không
+        // có row đối ứng ở thread B).
+        const isPlainOutgoingDomText = parsed.is_outgoing
+          && !parsed.media_url
+          && (!parsed.media_type || parsed.media_type === 'text');
+        if (isPlainOutgoingDomText && !parsed.native_id) {
+          markObservedOutgoing(thread_id, parsed.content);
+          return;
+        }
         lastObservedMessages.set(fbMessageId, observationSignature);
         bubbleFamilyTracker.markSeen(verdict.key);
         if (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
@@ -2139,34 +2197,22 @@
             } else if (ampm === 'AM' || ampm === 'SA') {
               if (hours === 12) hours = 0;
             }
-            
+
             const now = new Date();
             // Assuming current day. If label has specific day, it gets complex.
             now.setHours(hours, minutes, 0, 0);
-            
+
             // If the parsed time is slightly in the future (e.g. timezone mismatch), subtract 1 day
             if (now.getTime() > Date.now() + 60000) {
               now.setDate(now.getDate() - 1);
             }
-            
+
             tsMs = now.getTime();
             tsSource = 'facebook_label';
           }
         }
 
         if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
-
-        // Tin outgoing text: bubble CHƯA có native id thì nhường cho composer/
-        // network confirmation (dom_hash trôi khi hydrate sẽ thành ghost nếu
-        // forward sớm). Đã có native id thì forward - server tự khớp theo mid:
-        // ghép vào row pending của composer hoặc nhận diện trùng mid rồi bỏ.
-        // Nhắn tay ngay trong Messenger không có đường confirmation nào khác,
-        // gate cũ nuốt sạch tin này (reproduce 2026-10-09: 5 tin "alo" nhắn tay
-        // chỉ còn 1 vào CRM).
-        const isPlainOutgoingDomText = parsed.is_outgoing
-          && !parsed.media_url
-          && (!parsed.media_type || parsed.media_type === 'text');
-        if (isPlainOutgoingDomText && !parsed.native_id) return;
 
         // Row CHƯA có native id (React hydrate trễ): đợi ~1.5s rồi đọc lại đúng
         // node đó - nếu mid thật đã gắn thì forward bằng mid (server tự khớp,
@@ -2294,6 +2340,7 @@
               member_avatar: parsed.member_avatar || null,
               content: parsed.content,
               is_outgoing: parsed.is_outgoing,
+              direction_evidence: parsed.direction_evidence || null,
               sender_role: parsed.is_outgoing ? 'operator' : 'customer',
               fb_message_id: fbMessageId,
               media_type: parsed.media_type || 'text',

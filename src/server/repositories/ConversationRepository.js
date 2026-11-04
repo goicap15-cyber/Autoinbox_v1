@@ -1,4 +1,4 @@
-const crypto = require('crypto');
+﻿const crypto = require('crypto');
 const { isInvalidContactName, cleanContactName, cleanMessageText, isSystemOrMetadataText, stripBizSentByAttribution, isBizSentByAttributionOnly, isBizFeedbackOnly } = require('../utils/textFilter');
 const { isKnownPageSystemNotice } = require('../utils/pageSystemNotice');
 const { isBlacklistedThreadId } = require('../utils/threadGuard');
@@ -46,6 +46,33 @@ function shouldCommitDirectionFlip(stableMessageId, existingIsOutgoing, proposed
   }
   directionFlipCandidates.set(stableMessageId, proposed); // first disagreement (or a different one) - wait for confirmation
   return false;
+}
+
+// Geometry-decisive flips commit ngay (không 2-strike) — nhưng bubble đang
+// hydrate có thể sinh HAI phép đo quyết đoán NGƯỢC nhau cách nhau vài giây
+// (lá nhãn a11y đo một mình -> trái, rồi bubble text mount -> phải). Phép
+// flip quyết đoán ĐẦU TIÊN mới là sự thật; phép ngược chiều trong cửa sổ
+// cooldown là artifact hydrate, không được thắng (reproduce 2026-11-04 10:47:
+// tin khách "ccxxcxc" đo trái đúng -> lật IN, vài giây sau đọc phải sai lật
+// ngược OUT ngay trước mắt user). Sau cooldown, sửa chữa thật vẫn lọt được.
+const GEOMETRY_FLIP_COOLDOWN_MS = 120 * 1000;
+let geometryFlipLedger = new Map(); // fb_message_id -> { direction: 0|1, at: epochMs }
+function geometryFlipAllowed(stableMessageId, proposedOutgoing) {
+  const record = geometryFlipLedger.get(stableMessageId);
+  if (!record) return true;
+  if (Number(record.direction) === Number(proposedOutgoing)) return true;
+  if (Date.now() - record.at > GEOMETRY_FLIP_COOLDOWN_MS) {
+    geometryFlipLedger.delete(stableMessageId);
+    return true;
+  }
+  return false;
+}
+function rememberGeometryFlip(stableMessageId, committedOutgoing) {
+  const existing = geometryFlipLedger.get(stableMessageId);
+  if (existing && Number(existing.direction) === Number(committedOutgoing)) return; // giữ anchor ĐẦU của chiều này, re-commit không dời mốc
+  geometryFlipLedger.set(stableMessageId, { direction: committedOutgoing ? 1 : 0, at: Date.now() });
+  directionFlipCandidates.delete(stableMessageId);
+  if (geometryFlipLedger.size > 500) geometryFlipLedger.delete(geometryFlipLedger.keys().next().value);
 }
 
 class ConversationRepository {
@@ -931,6 +958,7 @@ class ConversationRepository {
   // one test's pending candidate can't leak into another's assertions.
   static _resetDirectionFlipTracking() {
     directionFlipCandidates = new Map();
+    geometryFlipLedger = new Map();
   }
 
   // Reconciles an already-existing message row with a freshly re-scanned
@@ -940,8 +968,8 @@ class ConversationRepository {
   // is_outgoing when it disagrees with what's stored - but only once that
   // disagreement is confirmed twice (see shouldCommitDirectionFlip). Never
   // inserts a second row and never throws on repeated identical re-scans.
-  static reconcileExistingMessage(stableMessageId, { source, isOutgoing, directionStatus, direction_status, directionConfidence, direction_confidence, tsMs, tsSource, createdAt, content = null, senderName = null } = {}, database = getDefaultDb()) {
-    const existingMsg = database.prepare('SELECT timestamp_ms, timestamp_source, is_outgoing, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+  static reconcileExistingMessage(stableMessageId, { source, isOutgoing, directionStatus, direction_status, directionConfidence, direction_confidence, directionEvidence = null, tsMs, tsSource, createdAt, content = null, senderName = null } = {}, database = getDefaultDb()) {
+    const existingMsg = database.prepare('SELECT timestamp_ms, timestamp_source, is_outgoing, direction_status, sender_name, sender_id, client_message_id, sent_by_agent, delivery_status FROM messages WHERE fb_message_id = ?').get(stableMessageId);
     if (!existingMsg) return { updated: false, reason: 'not_found' };
 
     const shouldUpdateTimestamp = Boolean(
@@ -989,11 +1017,26 @@ class ConversationRepository {
     const existingIsPending = existingMsg.direction_status === 'pending';
     const shouldPromotePending = isPageObservation && existingIsPending;
 
+    // Row không dấu vết tin gửi từ CRM (không client_message_id, không
+    // sent_by_agent, không pending): quan sát geometry quyết đoán (bong bóng
+    // rõ một bên, direction_evidence='geometry') được sửa chiều NGAY, cả hai
+    // hướng. Nhãn tên bị 2 acc trùng tên làm mơ hồ — geometry là bằng chứng
+    // duy nhất tin được; không có lối này lần đọc sai trước bị khóa vĩnh viễn
+    // vì mọi reading đúng bị guard dưới chặn (reproduce 2026-11-03 12:09).
+    const existingRowHasNoCrmTrace = (existingMsg.client_message_id === null || existingMsg.client_message_id === '')
+      && Number(existingMsg.sent_by_agent || 0) === 0
+      && (existingMsg.delivery_status === null
+        || !['pending', 'sending'].includes(String(existingMsg.delivery_status)));
+    const isDecisiveGeometryObservation = isCrawlObservation
+      && directionEvidence === 'geometry'
+      && existingRowHasNoCrmTrace;
+
     // Hard guard: if the stored row is already confirmed outgoing (is_outgoing=1),
     // a crawl/history source alone must never flip it to incoming. Only an
     // explicit, authoritative source (e.g. facebook_payload, network confirmation)
     // may override a confirmed outgoing row.
     const crawlTriesToFlipOutgoing = isCrawlObservation
+      && !isDecisiveGeometryObservation
       && Number(existingMsg.is_outgoing) === 1
       && normalizedOutgoing === 0
       && existingMsg.direction_status === 'confirmed';
@@ -1023,19 +1066,34 @@ class ConversationRepository {
     // được lật row INCOMING đã có tên người gửi thật thành OUTGOING. Tên này
     // chỉ được điền khi giải được từ nhãn Messenger nên là bằng chứng hướng
     // đáng tin (reproduce 2026-11-03: heal xong bị lật lại bằng 2-strike).
+    // Ngoại lệ geometry: row không dấu vết CRM + quan sát quyết đoán được sửa
+    // chiều ngược lại (chữa heal lật sai tin operator gõ tay).
     const crawlFlipsNamedIncoming = isCrawlObservation
+      && !isDecisiveGeometryObservation
       && Number(existingMsg.is_outgoing) === 0
       && normalizedOutgoing === 1
-      && existingMsg.sender_name
-      && !/^(?:bạn|you)$/i.test(String(existingMsg.sender_name).trim());
+      && (existingMsg.sender_id === 'CONTACT' || (existingMsg.sender_name
+        && !/^(?:bạn|you)$/i.test(String(existingMsg.sender_name).trim())));
     if (crawlFlipsNamedIncoming) {
       console.log(`[ConversationRepo] 🛡️ Blocked crawl flip of named incoming row: ${stableMessageId} (source=${source})`);
       directionFlipCandidates.delete(stableMessageId);
       if (!shouldUpdateTimestamp) return { updated: false, reason: 'crawl_blocked_named_incoming_flip' };
     }
 
-    const shouldUpdateDirection = !crawlTriesToFlipOutgoing && !crawlFlipsNamedIncoming && isCrawlObservation && (
-      shouldPromotePending
+    // Lật geometry ngược chiều trong cooldown = artifact hydrate, chặn SẠCH
+    // (không rơi xuống 2-strike crawl — phép đo xấu sẽ gom đủ 2 strike sau
+    // cooldown nếu nó là thật; trong cửa sổ thì không được thắng).
+    const geometryFlipBlockedByCooldown = isDecisiveGeometryObservation
+      && Number(existingMsg.is_outgoing) !== normalizedOutgoing
+      && !geometryFlipAllowed(stableMessageId, normalizedOutgoing);
+    if (geometryFlipBlockedByCooldown) {
+      console.log(`[ConversationRepo] ⏳ Chặn lật geometry ngược chiều trong cooldown: ${stableMessageId} -> ${normalizedOutgoing === 1 ? 'outgoing' : 'incoming'}`);
+    }
+
+    const shouldUpdateDirection = isCrawlObservation && !geometryFlipBlockedByCooldown
+      && !crawlTriesToFlipOutgoing && !crawlFlipsNamedIncoming && (
+      isDecisiveGeometryObservation
+      || shouldPromotePending
       || shouldCommitDirectionFlip(stableMessageId, existingMsg.is_outgoing, normalizedOutgoing)
     );
 
@@ -1061,6 +1119,22 @@ class ConversationRepository {
       content, content, content,
       stableMessageId
     );
+
+    if (shouldUpdateDirection && isDecisiveGeometryObservation) {
+      rememberGeometryFlip(stableMessageId, normalizedOutgoing);
+      // Lật chiều kèm vai người gửi: tin khách cần sender CONTACT, tin đi
+      // cần sender account — không cập nhật kèm thì UI lệ vai dù is_outgoing đúng.
+      database.prepare(`
+        UPDATE messages
+        SET sender_role = ?,
+            sender_id = CASE WHEN ? = 0 THEN 'CONTACT'
+                        ELSE COALESCE((SELECT account_id FROM threads
+                          WHERE threads.id = messages.thread_id), sender_id) END,
+            sender_name = CASE WHEN ? = 0 THEN NULL ELSE sender_name END
+        WHERE fb_message_id = ?
+      `).run(normalizedOutgoing === 1 ? 'operator' : 'customer', normalizedOutgoing, normalizedOutgoing, stableMessageId);
+      console.log(`[ConversationRepo] 🔁 Sửa chiều theo geometry quyết đoán: ${stableMessageId} -> ${normalizedOutgoing === 1 ? 'outgoing' : 'incoming'}`);
+    }
 
     return {
       updated: true,
