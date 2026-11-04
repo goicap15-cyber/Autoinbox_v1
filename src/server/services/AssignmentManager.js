@@ -40,7 +40,7 @@ class AssignmentManager {
   // Lấy danh sách hội thoại theo tab/filter
   getThreadsByFilter(userId, role, tab = 'ALL', sourceFilter = 'all', companyId = userId, companyRole = 'EMPLOYEE', username = '') {
     let query = `
-      SELECT t.*, c.nickname, c.phone, c.email, c.address, c.tags, c.lead_captured, c.avatar_url,
+      SELECT t.*, c.nickname, c.phone, c.email, c.address, c.tags, c.lead_captured, c.avatar_url, c.profile_url,
         s.source_type, s.display_name AS source_name, s.status AS source_status, s.external_id AS source_external_id,
         c.status_id, ls.name AS status_name, ls.color AS status_color, r.due_at AS reminder_due_at, r.note AS reminder_note, r.status AS reminder_status, t.unread_manual
       FROM threads t
@@ -75,6 +75,12 @@ class AssignmentManager {
       } else if (tab === 'UNPROCESSED') {
         where.push('t.status = ?');
         params.push('UNPROCESSED');
+        // "Chưa xử lý" chỉ hội thoại có tin từ 00:00 giờ máy hôm nay; julianday
+        // chuẩn hóa cả 2 định dạng UTC trong last_activity (như ORDER BY dưới).
+        const midnight = new Date();
+        midnight.setHours(0, 0, 0, 0);
+        where.push('julianday(t.last_activity) >= julianday(?)');
+        params.push(midnight.toISOString());
       } else if (tab === 'COMPLETED') {
         where.push('t.status = ?');
         params.push('COMPLETED');

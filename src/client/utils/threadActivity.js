@@ -19,6 +19,18 @@ export function threadActivityTime(thread) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+// "Mới trong ngày": last_activity từ 00:00 giờ máy hôm nay — quy tắc
+// hiển thị chip/tab "Chưa xử lý" (backfill lịch sử không làm ngập hội thoại cũ).
+export function isThreadActiveToday(thread) {
+  const t = threadActivityTime(thread);
+  if (!t) return false;
+  const d = new Date(t);
+  const now = new Date();
+  return d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth()
+    && d.getDate() === now.getDate();
+}
+
 // Hội thoại được ghim luôn đứng trên cùng.
 function isThreadPinned(thread) {
   return Number(thread?.pinned) === 1;
@@ -28,8 +40,11 @@ function isThreadPinned(thread) {
 // thoại đã đọc; riêng nhóm chưa đọc xếp theo hoạt động gần nhất
 // (reproduce 2026-10-07: khách nhắn vào hội thoại cũ bị chìm dưới đống
 // hội thoại đang hoạt động vì chỉ sort theo last_activity).
+// Gate "hôm nay": cờ is_unread là ảnh chấm xanh FB — không tự tắt khi CRM
+// trả lời bằng API nên hội thoại cũ vẫn bị sync hâm cờ; chỉ coi là chưa đọc
+// khi hội thoại thực sự hoạt động hôm nay (2026-10-21).
 function isThreadUnread(thread) {
-  return Number(thread?.is_unread) === 1;
+  return Number(thread?.is_unread) === 1 && isThreadActiveToday(thread);
 }
 
 // Thứ tự: ghim -> chưa đọc -> hoạt động gần nhất. Mở hội thoại (seen) gỡ

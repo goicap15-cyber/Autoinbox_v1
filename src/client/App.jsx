@@ -432,9 +432,10 @@ export default function App() {
   const [activeModal, setActiveModal] = useState(null);
   const [richCapabilities, setRichCapabilities] = useState(null);
   const [bulkHistoryProgress, setBulkHistoryProgress] = useState(null);
-  // Bộ lọc chi tiết ngày: dateFilter='YYYY-MM-DD', dateFilterIds = tập thread id
-  // có tin nhắn trong ngày đó (từ /api/threads/active-on - nguồn messages).
-  const [dateFilter, setDateFilter] = useState('');
+  // Bộ lọc khoảng ngày: dateRange = {from, to} 'YYYY-MM-DD' (một trong hai
+  // có thể trống), dateFilterIds = tập thread id có tin nhắn trong khoảng đó
+  // (từ /api/threads/active-on - nguồn messages).
+  const [dateRange, setDateRange] = useState({ from: '', to: '' });
   const [dateFilterIds, setDateFilterIds] = useState(null);
   const [accountSyncing, setAccountSyncing] = useState(null);
   const [historySyncingThreadId, setHistorySyncingThreadId] = useState(null);
@@ -1415,11 +1416,12 @@ export default function App() {
     });
 
     socket.on('CONTACT_UPDATED', (contactUpdate = {}) => {
-      const { thread_id, avatar_url, name, nickname, phone, email, status_id, status_name, status_color, phone_source, phone_captured_at } = contactUpdate;
+      const { thread_id, avatar_url, name, nickname, phone, email, status_id, status_name, status_color, phone_source, phone_captured_at, profile_url } = contactUpdate;
       if (thread_id == null) return;
       const tidStr = String(thread_id);
       const contactPatch = {
         ...(avatar_url ? { avatar_url } : {}),
+        ...(profile_url ? { profile_url } : {}),
         ...(name ? { name } : {}),
         ...(nickname !== undefined ? { nickname } : {}),
         ...(phone ? { phone } : {}),
@@ -1431,6 +1433,7 @@ export default function App() {
       setThreads(prev => prev.map(t => String(t.id) === tidStr ? {
         ...t,
         ...(avatar_url ? { avatar_url } : {}),
+        ...(profile_url ? { profile_url } : {}),
         ...(name ? { contact_name: name } : {}),
         ...(nickname !== undefined ? { nickname } : {}),
         ...(status_id !== undefined ? { status_id, status_name: status_name || null, status_color: status_color || null } : {})
@@ -2024,13 +2027,17 @@ export default function App() {
     });
   }, [activeThreadId, selectedThread, socket, isConnected]);
 
-  // Lấy danh sách hội thoại có tin nhắn trong ngày đang lọc
+  // Lấy danh sách hội thoại có tin nhắn trong khoảng ngày đang lọc
   useEffect(() => {
-    if (!dateFilter || !socket || !isConnected) { setDateFilterIds(null); return; }
+    const hasRange = Boolean(dateRange.from || dateRange.to);
+    if (!hasRange || !socket || !isConnected) { setDateFilterIds(null); return; }
     let cancelled = false;
+    const params = new URLSearchParams();
+    if (dateRange.from) params.set('from', dateRange.from);
+    if (dateRange.to) params.set('to', dateRange.to);
     const load = async () => {
       try {
-        const res = await fetch('/api/threads/active-on?date=' + encodeURIComponent(dateFilter));
+        const res = await fetch('/api/threads/active-on?' + params.toString());
         const data = await res.json();
         if (!cancelled && data?.success) setDateFilterIds(new Set((data.thread_ids || []).map(String)));
       } catch (_) {}
@@ -2038,10 +2045,10 @@ export default function App() {
     load();
     const timer = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [dateFilter, socket, isConnected, accounts]);
+  }, [dateRange, socket, isConnected, accounts]);
 
-  const handleDateFilterChange = useCallback((value) => {
-    setDateFilter(value || '');
+  const handleDateRangeChange = useCallback((range) => {
+    setDateRange({ from: range?.from || '', to: range?.to || '' });
     setDateFilterIds(null);
   }, []);
 
@@ -2092,9 +2099,9 @@ export default function App() {
 
       {/* Column 2: Conversation List */}
       <ConversationSidebar
-        dateFilter={dateFilter}
+        dateRange={dateRange}
         dateFilterIds={dateFilterIds}
-        onDateFilterChange={handleDateFilterChange}
+        onDateRangeChange={handleDateRangeChange}
         threads={threads} activeThreadId={activeThreadId}
         onSelectThread={handleSelectThread}
         activeTab={activeTab} onTabChange={handleConversationTabChange}
@@ -2146,7 +2153,7 @@ export default function App() {
               // request locked and the next clicked user cannot mirror scroll.
               key={String(activeThreadId)}
               messages={activeMessages}
-              jumpToDate={dateFilter || null}
+              jumpToRange={(dateRange.from || dateRange.to) ? dateRange : null}
               activeThread={selectedThread}
               // Keep automatic first-open sync as the primary path, and expose
               // the existing manual retry control when Facebook confirms an

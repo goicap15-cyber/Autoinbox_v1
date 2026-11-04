@@ -289,9 +289,16 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
   };
 
   const handleDisconnectSource = async (sourceId) => {
-    await fetch(`/api/inbox-sources/${sourceId}`, { method: 'DELETE' });
-    await loadInboxSources();
-    onSourcesChanged?.();
+    if (!window.confirm('Ngắt nguồn này? CRM sẽ ngừng nhận tin nhắn mới từ Fanpage (tin cũ vẫn giữ).')) return;
+    try {
+      const res = await fetch(`/api/inbox-sources/${sourceId}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Không ngắt được nguồn');
+      await loadInboxSources();
+      onSourcesChanged?.();
+    } catch (err) {
+      window.alert('Ngắt nguồn thất bại: ' + err.message);
+    }
   };
 
   return (
@@ -383,10 +390,12 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
                       </span>
                       <div className="min-w-0">
                         <div className="text-xs font-semibold text-slate-100 truncate">{source.display_name && !genericPageName.test(source.display_name) ? source.display_name : 'Page · ' + (source.display_name || source.external_id)}</div>
-                        <div className="text-[10px] text-slate-500 font-mono truncate">ID: {source.external_id} · {source.status === 'ACTIVE' ? '🟢 Hoạt động' : source.status}</div>
+                        <div className="text-[10px] text-slate-500 font-mono truncate">ID: {source.external_id} · {source.status === 'ACTIVE' ? '🟢 Hoạt động' : source.status === 'DISCONNECTED' ? '🔴 Đã ngắt' : source.status}</div>
                       </div>
                     </div>
-                    <button type="button" onClick={() => handleDisconnectSource(source.id)} className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 border border-slate-700/60 transition-colors">Ngắt</button>
+                    {source.status === 'ACTIVE' && (
+                      <button type="button" onClick={() => handleDisconnectSource(source.id)} className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 border border-slate-700/60 transition-colors">Ngắt</button>
+                    )}
                   </div>
                 ))
               )}
