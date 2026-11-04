@@ -74,6 +74,7 @@ LinkPreviewService.onImageNeeded = (urlHash, url) => {
   }
 };
 const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
+const { resolveActiveOnWindow } = require('./utils/activeOnWindow');
 const { normalizePreviewText, shouldFlipUnreadFromPreview, shouldBumpUnreadFromSidebar, HintUnreadTracker } = require('./utils/unreadGuard');
 const { sidebarShouldSkipSweep, isStaleThreadLastActivity } = require('./utils/sidebarCompare');
 const { isKnownPageSystemNotice } = require('./utils/pageSystemNotice');
@@ -235,7 +236,7 @@ app.get('/google-auth-external', (req, res) => {
     </head>
     <body>
       <div class="card">
-        <h2>MISSPRICE CRM</h2>
+        <h2>AdsupCRM</h2>
         <p>Vui lòng chọn tài khoản Google để tiếp tục sử dụng ứng dụng Desktop.</p>
         <div class="btn-container">
           <div id="googleBtn"></div>
@@ -2578,6 +2579,18 @@ wss.on('connection', (ws, req) => {
             : 'confirmed';
           if (directionStatus === 'pending') finalIsOutgoing = 0;
 
+          // Outgoing "yếu chứng" từ dom_observer realtime: không phải tin CRM
+          // tự gửi (không có client_message_id) và chưa có giờ tin cậy (label
+          // chưa hydrate / realtime_fallback). FB đổi format nhãn (2026-11-03)
+          // khiến claim outgoing này có thể là tin KHÁCH. Giữ finalIsOutgoing=1
+          // (UX như cũ) nhưng đánh dấu pending để reconcile 2-strike tự sửa
+          // khi scan sau đọc đúng nhãn, thay vì khoá chiều confirmed vĩnh viễn.
+          const weakOutgoingDomClaim = finalIsOutgoing === 1
+            && m.source === 'dom_observer'
+            && !m.client_message_id
+            && (!(Number(m.timestamp_ms) > 0) || String(m.timestamp_source || '') === 'realtime_fallback');
+          if (weakOutgoingDomClaim) directionStatus = 'pending';
+
           // Outbound media echo correlation guard:
           // During video/image upload/transcode, Facebook renders the media before
           // attaching the "Bạn đã gửi" label, causing DOM observers to report it as incoming.
@@ -2860,9 +2873,28 @@ wss.on('connection', (ws, req) => {
               // still already present, it is now a true duplicate and must
               // not fall through to another insert.
               if (m.fb_message_id) {
-                const existingFbId = db.prepare('SELECT id, is_outgoing, delivery_status FROM messages WHERE fb_message_id = ?').get(m.fb_message_id);
+                const existingFbId = db.prepare('SELECT id, is_outgoing, delivery_status, direction_status FROM messages WHERE fb_message_id = ?').get(m.fb_message_id);
                 if (existingFbId && existingFbId.is_outgoing === 1 && existingFbId.delivery_status === 'sent') {
-                  console.log(`[WS] Known confirmed fb_message_id (${m.fb_message_id}); pending recovery found no candidate.`);
+                  if (existingFbId.direction_status === 'pending') {
+                    // Fix B đánh pending cho outgoing yếu chứng, nhưng mọi echo
+                    // sau đều bị chặn tại đây nên reconcile 2-strike không bao
+                    // giờ chạy -> pending kẹt vĩnh viễn, tin mình render như
+                    // tin khách (reproduce 2026-11-03). Observation trusted này
+                    // là lượt xác nhận thứ hai: confirm chiều + đẩy row mới.
+                    db.prepare("UPDATE messages SET direction_status = 'confirmed' WHERE id = ? AND direction_status = 'pending'").run(existingFbId.id);
+                    const confirmedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(existingFbId.id);
+                    io.emit('NEW_MESSAGE', withAttachmentAccessUrl({
+                      ...confirmedRow,
+                      thread_id: canonicalThreadId,
+                      account_id: targetAccountId,
+                      is_outgoing: true,
+                      direction_status: 'confirmed',
+                      status: confirmedRow.delivery_status || 'sent'
+                    }));
+                    console.log(`[WS] ✅ Confirm chiều outgoing cho row pending ${existingFbId.id} (fb_message_id ${m.fb_message_id}).`);
+                  } else {
+                    console.log(`[WS] Known confirmed fb_message_id (${m.fb_message_id}); pending recovery found no candidate.`);
+                  }
                   break;
                 }
               }
@@ -2979,7 +3011,7 @@ wss.on('connection', (ws, req) => {
 
             if (isMedia) {
               outgoingMatch = db.prepare(`
-                SELECT id, delivery_status, client_message_id, thread_id FROM messages
+                SELECT id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
                 WHERE thread_id = ? AND is_outgoing = 1
                   AND (attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))
                   AND datetime(created_at) >= datetime('now', '-300 seconds')
@@ -2999,12 +3031,12 @@ wss.on('connection', (ws, req) => {
                 && !/__bubble_\d+$/.test(obsEchoMid);
               outgoingMatch = obsEchoHasRealMid
                 ? db.prepare(`
-                    SELECT id, delivery_status, client_message_id, thread_id FROM messages
+                    SELECT id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
                     WHERE thread_id = ? AND is_outgoing = 1 AND fb_message_id = ?
                     ORDER BY id DESC LIMIT 1
                   `).get(canonicalThreadId, obsEchoMid)
                 : db.prepare(`
-                    SELECT id, delivery_status, client_message_id, thread_id FROM messages
+                    SELECT id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
                     WHERE thread_id = ? AND content = ? AND is_outgoing = 1
                       AND datetime(created_at) >= datetime('now', '-300 seconds')
                     ORDER BY id DESC LIMIT 1
@@ -3021,6 +3053,22 @@ wss.on('connection', (ws, req) => {
                   rawMessage: { ...m, created_at: createdAt }
                 });
               }
+              // Echo bị chặn vẫn là bằng chứng chiều: row đích đang pending
+              // (Fix B) mà cứ discard thì pending kẹt vĩnh viễn vì không còn
+              // observation nào tới được reconcile - confirm luôn tại đây.
+              if (outgoingMatch.is_outgoing === 1 && outgoingMatch.direction_status === 'pending') {
+                db.prepare("UPDATE messages SET direction_status = 'confirmed' WHERE id = ? AND direction_status = 'pending'").run(outgoingMatch.id);
+                const confirmedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(outgoingMatch.id);
+                io.emit('NEW_MESSAGE', withAttachmentAccessUrl({
+                  ...confirmedRow,
+                  thread_id: canonicalThreadId,
+                  account_id: targetAccountId,
+                  is_outgoing: true,
+                  direction_status: 'confirmed',
+                  status: confirmedRow.delivery_status || 'sent'
+                }));
+                console.log(`[WS] ✅ Confirm chiều outgoing cho row pending ${outgoingMatch.id} qua anti-ghost echo.`);
+              }
               break;
             }
           }
@@ -3031,13 +3079,21 @@ wss.on('connection', (ws, req) => {
           // Phantom family __bubble_N: id tổng hợp mid.X__bubble_N nhưng row
           // base mid.X cùng thread tồn tại với nội dung giống nhau. Like-group
           // thật ở cùng article nên cùng người gửi (không bao giờ lật hướng),
-          // còn pending thật luôn được xác nhận bằng mid riêng vài giây sau:
+          // còn pending thật luôn được xác nhận bằng mid riêng vài giây sau.
+          // Base tồn tại + cùng nội dung = CÙNG một lá vật lý -> bỏ qua mọi
+          // biến thể quan sát:
           //  - quan sát ĐẾN nhưng base là tin ĐI (hoặc ngược lại) -> phantom
           //    lật chiều (reproduce 2026-10-08: "nhắn gì đó"/"allo"/"alo" của
           //    operator hiện thêm bản sao bên trái khách);
           //  - cùng hướng nhưng base cũ hơn 60s -> pending bị gán nhầm anchor
           //    cũ (reproduce 18:33: alo tái dùng mid 10/06) - bản thật sẽ tự
-          //    vào DB bằng mid riêng.
+          //    vào DB bằng mid riêng;
+          //  - K1 (2026-11-04): cùng hướng + ts sát nhau cũng phải bỏ qua -
+          //    trước đây nhánh này lọt xuống INSERT OR IGNORE với id __bubble_N
+          //    và sinh row nhân đôi khi sweep lại hội thoại cũ (reproduce
+          //    2026-11-04 01:59: 9 row mid.$X__bubble_1 nhân bản block tin
+          //    thread 100004449999465; anti-ghost không chặn được vì base đã
+          //    cũ 16h, quá cửa sổ khớp echo).
           if (/__bubble_\d+$/.test(String(stableMessageId))
             && (!m.media_type || m.media_type === 'text') && !m.media_url
             && !/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(String(m.content || ''))) {
@@ -3050,14 +3106,13 @@ wss.on('connection', (ws, req) => {
                 `).get(m.thread_id, bubbleFamilyId, bubbleFamilyId)
               : null;
             if (bubbleBaseRow
-              && String(bubbleBaseRow.content || '').trim() === String(m.content || '').trim()
-              && (Number(bubbleBaseRow.is_outgoing) !== (isOutgoing ? 1 : 0)
-                || Math.abs(Number(tsMs || 0) - Number(bubbleBaseRow.timestamp_ms || 0)) > 60000)) {
+              && String(bubbleBaseRow.content || '').trim() === String(m.content || '').trim()) {
               syncDebug('WS_SKIP_BUBBLE_FAMILY_PHANTOM', {
                 thread: m.thread_id,
                 fb_message_id: String(stableMessageId).substring(0, 70),
                 base_outgoing: Number(bubbleBaseRow.is_outgoing),
-                observed_outgoing: isOutgoing ? 1 : 0
+                observed_outgoing: isOutgoing ? 1 : 0,
+                ts_delta_ms: Math.abs(Number(tsMs || 0) - Number(bubbleBaseRow.timestamp_ms || 0))
               });
               break;
             }
@@ -3735,6 +3790,13 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
+        case 'PAGE_PROFILE_SCRAPE_RESULT': {
+          pageApiService.handlePageProfileScrapeResult(msg.data || {}, io, db).catch((err) => {
+            console.warn('[WS] PAGE_PROFILE_SCRAPE_RESULT lỗi:', err.message);
+          });
+          break;
+        }
+
         case 'SYNC_THREADS_RESULT': {
           let { account_id, threads, partial, sync_status, checkpoint } = msg.data;
           if (!account_id && msg.data?.page_id) {
@@ -3792,6 +3854,7 @@ wss.on('connection', (ws, req) => {
             // for conversations which are not currently open in the history
             // tab (Facebook does not mount their message DOM).
             const changedUnreadThreads = [];
+            const startOfTodayMs = new Date().setHours(0, 0, 0, 0);
             const txn = db.transaction((account_id, threads) => {
               for (const t of threads) {
                 const threadId = t.thread_id || t.id;
@@ -3893,6 +3956,25 @@ wss.on('connection', (ws, req) => {
                 //  1  = user đánh chưa đọc -> FB báo đã đọc cũng giữ chưa đọc
                 // -1  = user đánh đã đọc   -> FB vẫn treo chấm xanh cũng giữ đã đọc
                 let syncUnread = t.is_unread;
+                // Chấm xanh FB không tự tắt khi CRM trả lời bằng API (chỉ tắt
+                // khi người thật mở tin trong Messenger), nên báo cáo sidebar
+                // vẫn "chưa đọc" trên hội thoại ĐÃ TRẢ LỜI hoặc có tin cuối từ
+                // trước hôm nay — không được hâm cờ mỗi lần sync
+                // (2026-10-21: hội thoại 14/10 sync xong vẫn hiện chưa đọc).
+                // Cờ manual do user đánh tay ở dưới vẫn ưu tiên sau cùng.
+                let newestRealMessage = null;
+                if (Number(syncUnread) === 1) {
+                  newestRealMessage = db.prepare(`
+                    SELECT is_outgoing, timestamp_ms FROM messages
+                    WHERE thread_id = ?
+                      AND (fb_message_id IS NULL OR fb_message_id NOT LIKE 'sidebar_preview_%')
+                    ORDER BY timestamp_ms DESC, id DESC LIMIT 1
+                  `).get(existingInternalThreadId);
+                  if (newestRealMessage) {
+                    const newestIsToday = Number(newestRealMessage.timestamp_ms) >= startOfTodayMs;
+                    if (newestRealMessage.is_outgoing === 1 || !newestIsToday) syncUnread = 0;
+                  }
+                }
                 if (previousThread) {
                   const manualRow = db.prepare('SELECT unread_manual FROM threads WHERE id = ?').get(existingInternalThreadId);
                   const manual = Number(manualRow?.unread_manual || 0);
@@ -3944,9 +4026,13 @@ wss.on('connection', (ws, req) => {
                 // biết phải bump thread cả khi bong bóng provisional bị chặn.
                 // Dùng hint thật vì DB bị operator bấm đọc làm 1->0 -> "flip"
                 // giả ngay scan sau, badge hồi sinh (reproduce 2026-10-12).
+                const hasTodayRealIncoming = Boolean(newestRealMessage)
+                  && Number(newestRealMessage.timestamp_ms) >= startOfTodayMs
+                  && Number(newestRealMessage.is_outgoing) !== 1;
                 const unreadFlippedToIncoming = hintUnreadTracker.flip(
                   account_id + ':' + threadId,
-                  t.is_unread
+                  t.is_unread,
+                  hasTodayRealIncoming
                 );
                 if (incomingPreviewChanged) {
                   changedUnreadThreads.push({
@@ -5714,6 +5800,19 @@ io.on('connection', (socket) => {
     // B1: thread Page thiếu tên thật -> làm giàu qua Messenger Profile API
     if (thread.source_type === 'page_messenger' && thread.source_id && thread.external_thread_id) {
       pageApiService.enrichPageContactProfile(thread.id, thread.source_id, thread.external_thread_id, io).catch(() => {});
+      // A3: thread Page chưa có link profile -> nhờ extension đang mở Biz Suite
+      // cào right rail (chốt: có link rồi thì thôi, chưa có thì mỗi lần mở cào lại)
+      const scrapePayload = pageApiService.beginPageProfileScrape(thread, db);
+      if (scrapePayload) {
+        const scrapeExt = extensionConnections.get(String(thread.account_id));
+        if (scrapeExt?.readyState === WebSocket.OPEN) {
+          scrapeExt.send(JSON.stringify({ type: 'REQUEST_PAGE_PROFILE_SCRAPE', data: scrapePayload }));
+          console.log('[WS] 🔗 yêu cầu cào profile thread=' + scrapePayload.thread_id + ' conv=' + scrapePayload.conv_id);
+        } else {
+          pageApiService.releasePageProfileScrape(scrapePayload.thread_id);
+          console.log('[WS] ⚠️ bỏ qua cào profile thread=' + scrapePayload.thread_id + ' — extension chưa kết nối (account ' + thread.account_id + '). Mở lại hội thoại sau khi extension đã nối.');
+        }
+      }
     }
 
     if ((direction === 'older' || (direction === 'viewport' && Number(scroll_delta) < 0)) && Number(thread.history_completed) === 1) {
@@ -6416,6 +6515,14 @@ app.post('/api/page-api/sync-cancel', (req, res) => {
   const id = String((req.body || {}).sync_id || '');
   const ok = setupAutomation.cancelSync(id);
   res.json({ success: ok });
+});
+
+// Hiện/ẩn cửa sổ Chrome tự động hóa (chạy ngầm) — bấm từ modal Fanpage khi job đang chạy
+app.post('/api/page-api/chrome-visibility', (req, res) => {
+  const visible = !!(req.body || {}).visible;
+  const r = setupAutomation.setAutomationChromeVisible(visible);
+  if (r.error) return res.status(400).json({ success: false, error: r.error });
+  res.json({ success: true });
 });
 
 // User nhập mật khẩu khi Facebook hỏi lại (re-auth) — KHÔNG lưu lại
@@ -7359,19 +7466,22 @@ app.put('/api/contacts/:thread_id', (req, res) => {
 });
 
 // Inbox Sources — Personal and Page connected sources
-// Bộ lọc chi tiết ngày (2026-09-18): trả về các hội thoại có tin nhắn trong
-// ngày được chọn (theo timestamp_ms của messages - nguồn ngày chuẩn khớp
+// Bộ lọc khoảng ngày (2026-10-23, nâng cấp từ lọc 1 ngày 2026-09-18): trả về
+// các hội thoại có tin nhắn trong khoảng [from, to] - mốc "to" được tính trọn
+// cả ngày đó - theo timestamp_ms của messages (nguồn ngày chuẩn khớp
 // Messenger; last_activity bị trộn múi giờ nên không dùng).
 app.get('/api/threads/active-on', (req, res) => {
   try {
-    const dateStr = String(req.query.date || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-      return res.status(400).json({ success: false, error: 'Thiếu/sai định dạng ngày (YYYY-MM-DD).' });
+    const range = resolveActiveOnWindow(req.query);
+    if (range.error === 'MISSING_RANGE') {
+      return res.status(400).json({ success: false, error: 'Thiếu khoảng ngày (from/to, YYYY-MM-DD).' });
     }
-    const start = new Date(dateStr + 'T00:00:00');
-    if (isNaN(start.getTime())) return res.status(400).json({ success: false, error: 'Ngày không hợp lệ.' });
-    const startMs = start.getTime();
-    const endMs = startMs + 24 * 60 * 60 * 1000;
+    if (range.error === 'BAD_FORMAT') {
+      return res.status(400).json({ success: false, error: 'Sai định dạng ngày (YYYY-MM-DD).' });
+    }
+    if (range.error) {
+      return res.status(400).json({ success: false, error: 'Ngày không hợp lệ.' });
+    }
     // Scope bằng CÙNG logic với danh sách hội thoại đang hiển thị
     // (assignmentManager.getThreadsByFilter) - không dùng listAccounts vì
     // company_id của account có thể khác company của user (reproduced
@@ -7380,11 +7490,15 @@ app.get('/api/threads/active-on', (req, res) => {
       req.user.id, req.user.role, 'ALL', 'all', req.user.company_id, req.user.company_role, req.user.username
     );
     const visibleIds = new Set(visible.map((t) => String(t.id)));
+    const conditions = [];
+    const params = [];
+    if (range.startMs != null) { conditions.push('timestamp_ms >= ?'); params.push(range.startMs); }
+    if (range.endMs != null) { conditions.push('timestamp_ms < ?'); params.push(range.endMs); }
     const rows = db.prepare(
-      'SELECT DISTINCT thread_id AS id FROM messages WHERE timestamp_ms >= ? AND timestamp_ms < ?'
-    ).all(startMs, endMs);
+      `SELECT DISTINCT thread_id AS id FROM messages WHERE ${conditions.join(' AND ')}`
+    ).all(...params);
     const threadIds = rows.map((r) => String(r.id)).filter((id) => visibleIds.has(id));
-    res.json({ success: true, date: dateStr, thread_ids: threadIds });
+    res.json({ success: true, from: range.from, to: range.to, thread_ids: threadIds });
   } catch (error) {
     console.error('[API] active-on lỗi:', error.message);
     res.status(500).json({ success: false, error: 'Không thể lọc theo ngày.' });
@@ -7430,6 +7544,13 @@ app.post('/api/inbox-sources/page', (req, res) => {
 
     if (!ownerAccountId) return res.status(403).json({ error: 'Tài khoản Facebook sở hữu Page không hợp lệ hoặc bạn không có quyền truy cập.' });
     const source = InboxSourceService.ensurePageSource({ pageId, accountId: ownerAccountId, pageName: null }, db);
+    if (source && source.status !== 'ACTIVE') {
+      // Bấm "Kết nối Page" là ý định rõ ràng của user — page từng bị ngắt
+      // (DISCONNECTED/TOKEN_EXPIRED) phải sống lại, không ensurePageSource nào
+      // tự làm điều đó cho row đã tồn tại.
+      InboxSourceService.updateSourceStatus(source.id, 'ACTIVE');
+      source.status = 'ACTIVE';
+    }
     // Mở trực tiếp tab Hộp thư Meta Business Suite trên profile Chrome đã đăng nhập
     // của tài khoản sở hữu Page để extension đồng bộ tin nhắn ngay lập tức.
     processManager.openPageInboxInAccountChrome(ownerAccountId, pageId).catch((launchError) => {
@@ -7440,6 +7561,26 @@ app.post('/api/inbox-sources/page', (req, res) => {
   } catch (error) {
     console.error('[InboxSource] Kết nối Page thủ công thất bại:', error);
     res.status(500).json({ error: error.message || 'Không thể kết nối Page' });
+  }
+});
+
+// Nút "Ngắt" (Quản lý → Fanpage Messenger Đang Kết Nối): ngắt mềm — row + tin
+// cũ giữ nguyên, watcher/webhook/backfill bỏ qua nguồn DISCONNECTED. Trước đây
+// client gọi DELETE nhưng server không có route nào cả (404 im lặng, nút chết).
+// Kết nối lại: "Kết nối Page" thủ công (route trên có kích hoạt lại) hoặc chạy
+// Lấy token cho page (savePages lưu token mới sẽ bật lại ACTIVE).
+app.delete('/api/inbox-sources/:id', requireCompanyAdmin, (req, res) => {
+  try {
+    const source = db.prepare('SELECT id, owner_account_id FROM inbox_sources WHERE id = ?').get(String(req.params.id));
+    if (!source) return res.status(404).json({ success: false, error: 'Không tìm thấy nguồn hội thoại.' });
+    if (source.owner_account_id && !enterpriseAccess.canAccessAccount(req.user, source.owner_account_id)) {
+      return res.status(403).json({ success: false, error: 'Bạn không có quyền ngắt nguồn này.' });
+    }
+    InboxSourceService.removeSource(source.id);
+    res.json({ success: true, id: source.id, status: 'DISCONNECTED' });
+  } catch (error) {
+    console.error('[InboxSource] Ngắt nguồn thất bại:', error);
+    res.status(500).json({ error: error.message || 'Không thể ngắt nguồn' });
   }
 });
 
@@ -8077,6 +8218,51 @@ function startServer() {
     server.listen(PORT, '0.0.0.0');
   });
 
+  // Heal dữ liệu sai do build trước (2026-10-21): bump CURRENT_TIMESTAMP +
+  // flip ma sau restart biến hội thoại cũ (14/10) thành "hoạt động hôm nay"
+  // và treo cờ chưa đọc. Kéo last_activity về tin thật mới nhất (cho phép
+  // lệch dưới 5 phút như alignThreadActivity), gỡ cờ chưa đọc của hội thoại
+  // có tin cuối là TỪ MÁY GỬI hoặc từ TRƯỚC hôm nay. Idempotent — lần khởi
+  // động sau gần như rỗng. Chạy TRƯỚC khi bật poller/watcher/sync.
+  try {
+    const healStartOfTodayMs = new Date().setHours(0, 0, 0, 0);
+    const REAL_MSG_FILTER = "(m.fb_message_id IS NULL OR m.fb_message_id NOT LIKE 'sidebar_preview_%')";
+    const clamped = db.prepare(`
+      UPDATE threads
+      SET last_activity = (
+        SELECT strftime('%Y-%m-%d %H:%M:%S', MAX(COALESCE(m.timestamp_ms, 0)) / 1000.0, 'unixepoch')
+        FROM messages m
+        WHERE m.thread_id = threads.id AND ${REAL_MSG_FILTER}
+      )
+      WHERE EXISTS (
+        SELECT COUNT(*) FROM messages m
+        WHERE m.thread_id = threads.id AND ${REAL_MSG_FILTER}
+        HAVING julianday(threads.last_activity) - 2440587.5 - MAX(COALESCE(m.timestamp_ms, 0)) / 86400000.0 > 5.0 / 1440.0
+      )
+    `).run().changes;
+    const cleared = db.prepare(`
+      UPDATE threads
+      SET is_unread = 0, unread_manual = 0
+      WHERE (COALESCE(is_unread, 0) = 1 OR COALESCE(unread_manual, 0) = 1)
+        AND (
+          SELECT CASE
+            WHEN m.is_outgoing = 1 THEN 1
+            WHEN COALESCE(m.timestamp_ms, 0) < ? THEN 1
+            ELSE 0
+          END
+          FROM messages m
+          WHERE m.thread_id = threads.id AND ${REAL_MSG_FILTER}
+          ORDER BY m.timestamp_ms DESC, m.id DESC
+          LIMIT 1
+        ) = 1
+    `).run(healStartOfTodayMs).changes;
+    if (clamped || cleared) {
+      console.log(`[UnreadHeal] Đã kéo ${clamped} last_activity lệch về mốc tin thật, gỡ cờ chưa đọc sai ${cleared} hội thoại`);
+    }
+  } catch (healErr) {
+    console.warn('[UnreadHeal] Lỗi:', healErr.message);
+  }
+
   // Bật poller đọc sự kiện webhook từ cầu nối hosting (webhook.php) cho Page API
   // 2.5s thay vì 5s — tin khách realtime về CRM trong ~3s sau khi webhook live
   pageApiService.startBridgePolling(io, db, 2500);
@@ -8200,6 +8386,30 @@ function startServer() {
 
     // (1) Notice E2EE bị bắt nhầm thành tin nhắn của khách.
     healTouchedThreads(noticeThreadIds);
+
+    // (3) Thông báo handover AI agent của Meta (VI từ 2026-09-29 + EN 2026-10-22):
+    // webhook echo đẩy về như tin Page gửi (outgoing) — guard WS server.js:2491
+    // chỉ chặn đường extension, đường webhook/Graph lưu thẳng thành tin thật
+    // (reproduce 2026-10-21 "You took over this chat from your AI agent." hiện
+    // như bubble xanh trong CRM). Xóa row, dựng lại preview + last_activity
+    // từ tin còn lại; notice là outgoing nên không cần gỡ cờ chưa đọc.
+    const pageNoticeCandidates = db.prepare(`
+      SELECT id, thread_id, content FROM messages
+      WHERE content LIKE 'Tác nhân AI đã chuyển đoạn chat này cho bạn%'
+         OR content LIKE 'You took over this chat from your AI agent%'
+    `).all();
+    const pageNoticeThreadIds = new Set();
+    let deletedPageNoticeCount = 0;
+    for (const row of pageNoticeCandidates) {
+      if (!isKnownPageSystemNotice(row.content)) continue;
+      deleteNotice.run(row.id);
+      pageNoticeThreadIds.add(row.thread_id);
+      deletedPageNoticeCount++;
+    }
+    healTouchedThreads(pageNoticeThreadIds);
+    if (deletedPageNoticeCount > 0) {
+      console.log(`[NoticeHeal] Đã xóa ${deletedPageNoticeCount} thông báo hệ thống Meta (AI agent handover) trong ${pageNoticeThreadIds.size} hội thoại`);
+    }
 
     // (2) Bubble nhân đôi từ đợt hydrate khi mở thread: row dom_ (mất native
     // id) trùng nội dung với một row mid thật trong cùng thread là bản render

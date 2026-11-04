@@ -1709,6 +1709,10 @@ function connectWebSocket() {
             await closeSidebarSyncTabs(syncAccountKey);
           }
           break;
+        case 'REQUEST_PAGE_PROFILE_SCRAPE':
+          console.log('[FB Engine] 🔗 REQUEST_PAGE_PROFILE_SCRAPE:', JSON.stringify(message.data || {}).substring(0, 200));
+          handlePageProfileScrape(message.data || {}).catch((e) => console.warn('[FB Engine] PROFILE_SCRAPE lỗi:', e.message));
+          break;
         case 'SYNC_THREAD_MESSAGES':
           console.log("[FB Engine] 🔄 Đang sync lịch sử tin nhắn thread:", message.data);
           {
@@ -2484,6 +2488,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       account_id: user_id || msgData.account_id,
       source_type: 'page_messenger'
     });
+  }
+
+  if (message.type === 'PAGE_PROFILE_EXTRACTED') {
+    const msgData = message.data || {};
+    const pending = pendingProfileScrapes.get(String(msgData.thread_id || ''));
+    console.log('[FB Engine] 🔗 PAGE_PROFILE_EXTRACTED:', JSON.stringify(msgData).substring(0, 220));
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingProfileScrapes.delete(String(msgData.thread_id || ''));
+      pending.resolve(msgData);
+    } else {
+      // MV3 worker từng ngủ + hồi sinh giữa chờ → Map mất. Kết quả vẫn hợp lệ,
+      // đưa thẳng backend (upsert phía server idempotent, trùng không sao).
+      sendToBackend('PAGE_PROFILE_SCRAPE_RESULT', {
+        ...msgData,
+        account_id: user_id || msgData.account_id || null
+      });
+    }
   }
 
   if (message.type === 'INCOMING_CALL_RINGING' || message.type === 'INCOMING_CALL_ENDED') {
@@ -4961,8 +4983,17 @@ async function probeBizSidebarRow(tabId, ids, contactName) {
         });
         if (nameLeaf) headingName = (nameLeaf.textContent || '').replace(/\s+/g, ' ').trim();
       }
+      // 2026-10-23: header CÓ THỂ hiện đúng tên khách trên cả màn lỗi ống kính
+      // "Something went wrong" — đã lừa luồng cào profile kết luận "chat mở sẵn"
+      // rồi bỏ click (reproduce thread 29588818700719007). Nhận diện màn lỗi:
+      // leaf trùng khít câu lỗi; không dính lỗi mới được tính already_open.
+      const fb_error_state = Array.from(document.querySelectorAll('span, div, h1, h2, h3, h4, p')).some((el) => {
+        const t = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase().replace(/\.+$/, '');
+        if (t !== 'something went wrong' && t !== 'đã xảy ra lỗi') return false;
+        return el.children.length === 0 || el.querySelectorAll('*').length <= 2;
+      });
       if (cleanName && headingName && normalize(headingName).includes(cleanName)) {
-        return { found: false, alreadyOpen: true, headingName };
+        return { found: false, alreadyOpen: true, headingName, fb_error_state };
       }
 
       // 2. Màn hình Landing "Hộp thư - Trả lời tin nhắn..." -> lấy tọa độ tab Messenger để thoát
@@ -5027,11 +5058,19 @@ async function probeBizSidebarRow(tabId, ids, contactName) {
           });
           if (nameCandidates.length >= 8) break;
         }
-        const exactNode = nodes.find((el) => {
+        // Nhiều row trùng tên (twin "Lê Văn Khang", 2026-10-23): ưu tiên node có
+        // row tổ tiên mang selected_item_id đúng đích, tránh click nhầm twin.
+        const exactNodes = nodes.filter((el) => {
           if (el.children.length !== 0) return false;
           const rect = el.getBoundingClientRect();
           return rect.width > 0 && normalize(el.textContent) === cleanName;
         });
+        const matchesTargetId = (el) => {
+          const holder = el.closest('a[href], [role="row"], [role="listitem"], div[tabindex]');
+          const href = holder?.getAttribute?.('href') || '';
+          return ids.some((id) => id && href.includes(`selected_item_id=${id}`));
+        };
+        const exactNode = exactNodes.find(matchesTargetId) || exactNodes[0] || null;
         if (exactNode) {
           nameNode = exactNode;
           link = exactNode.closest('a[href]') || exactNode.closest('[role="row"]') || exactNode.closest('[role="listitem"]') || exactNode.closest('div[tabindex]') || exactNode;
@@ -5067,6 +5106,7 @@ async function probeBizSidebarRow(tabId, ids, contactName) {
           linkCandidates,
           nameCandidates,
           reason: idMatchedLinks.length ? 'ONLY_NAV_OR_OUTSIDE_LINKS' : (nameCandidates.length ? 'NAME_FOUND_BUT_NO_CLICKABLE' : null),
+          fb_error_state,
           isLanding,
           mTab: null,
           alreadyOpen: false
@@ -5082,12 +5122,13 @@ async function probeBizSidebarRow(tabId, ids, contactName) {
         const nameRect = nameNode.getBoundingClientRect();
         if (nameRect.width > 0 && nameRect.height > 0) rect = nameRect;
       }
-      if (rect.width <= 0 || rect.height <= 0) return { found: false, reason: 'ZERO_RECT', isLanding, mTab: null, alreadyOpen: false };
+      if (rect.width <= 0 || rect.height <= 0) return { found: false, reason: 'ZERO_RECT', fb_error_state, isLanding, mTab: null, alreadyOpen: false };
 
       const mTabRect = mTab ? mTab.getBoundingClientRect() : null;
       return {
         found: true,
         alreadyOpen: false,
+        fb_error_state,
         x: Math.round(rect.left + rect.width / 2),
         y: Math.round(rect.top + rect.height / 2),
         href: link.href || null,
@@ -5191,7 +5232,7 @@ async function clickBizSidebarRowViaCdp(tabId, ids, contactName) {
     logBsDom('CDP_PROBE_FAIL', 'probeBizSidebarRow trả về null (executeScript lỗi)', { tabId, ids, contactName });
     return { opened: false, via: null, probe };
   }
-  if (probe.alreadyOpen) return { opened: true, via: 'already_open', probe };
+  if (probe.alreadyOpen && !probe.fb_error_state) return { opened: true, via: 'already_open', probe };
   if (probe.isLanding && Number.isFinite(probe.mTabX) && Number.isFinite(probe.mTabY)) {
     const landingClick = await dispatchTrustedPointerClick(tabId, { x: probe.mTabX, y: probe.mTabY });
     logBsDom('LANDING_EXIT', 'CDP click thoát Landing (tab Messenger)', {
@@ -5240,6 +5281,186 @@ async function clickBizSidebarRowViaCdp(tabId, ids, contactName) {
   });
   await syntheticClickBizSidebarRow(tabId, ids, contactName);
   return { opened: true, via: 'synthetic', probe, trustedError: trusted.error || trusted.error_code };
+}
+
+// ── A2: Scrape link profile khách Page (on-demand, Hướng A 2026-10-20) ──
+// Server yêu cầu khi user mở thread page chưa có link. Mượn tab Biz có sẵn,
+// không có thì mở rồi ĐÓNG SAU khi xong (chính sách chốt: chỉ đóng khi có
+// link / hết 2 lần thử / timeout — tab của queue gửi tin thì mượn, không đóng).
+const pendingProfileScrapes = new Map(); // thread_id -> { resolve, timer }
+const activeProfileScrapes = new Set(); // thread_id đang chạy — bấm liên tiếp gộp 1 phiên
+
+// Mở đoạn chat Business Suite đúng nghệ luồng gửi tin DOM: 2026-10-18 BS
+// KHÔNG render khung chat khi nạp thẳng URL có selected_item_id (màn ống kính
+// "Đã xảy ra lỗi") và BỎ QUA click giả dispatchEvent — thread chỉ mở bằng
+// click THẬT CDP vào row sidebar. Xác nhận mở = header khớp tên khách; không
+// có tên thì coi URL ghi selected_item_id=<convId> là bằng chứng.
+async function openBizThreadForScrape(tab, convId, pageId, contactName) {
+  const ids = [String(convId)].filter(Boolean);
+  const name = (contactName && String(contactName).trim()) || null;
+  try { await chrome.tabs.update(tab.id, { active: true }); } catch (_) {}
+  await delay(300);
+
+  const urlMatches = async () => {
+    try {
+      const fresh = await chrome.tabs.get(tab.id);
+      return String(fresh?.url || '').includes(`selected_item_id=${convId}`);
+    } catch (_) { return false; }
+  };
+  const chatConfirmed = async () => {
+    const probe = await probeBizSidebarRow(tab.id, ids, name).catch(() => null);
+    if (probe?.fb_error_state) return false; // màn ống kính "Something went wrong"
+    if (name) return Boolean(probe?.alreadyOpen);
+    return urlMatches();
+  };
+
+  for (let round = 0; round < 2; round += 1) {
+    if (await chatConfirmed()) return true;
+    const clickRes = await clickBizSidebarRowViaCdp(tab.id, ids, name).catch(() => null);
+    logBsDom('SCRAPE_OPEN_CLICK', 'Click mở hội thoại cho luồng cào profile', {
+      round,
+      convId,
+      pageId,
+      contactName: name,
+      via: clickRes?.via || null,
+      opened: Boolean(clickRes?.opened),
+      probe_found: clickRes?.probe?.found ?? null,
+      probe_reason: clickRes?.probe?.reason || null,
+      probe_fb_error: clickRes?.probe?.fb_error_state ?? null
+    });
+    if (clickRes?.opened && clickRes.via === 'already_open') return true;
+    if (clickRes?.opened) {
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline) {
+        if (await chatConfirmed()) return true;
+        await delay(500);
+      }
+    }
+    if (round === 0) {
+      // Hội thoại cũ có thể chưa nằm trong phần sidebar đã render — nạp lại
+      // mailbox kèm selected_item_id để BS chọn hội thoại trong list rồi click
+      // lại (URL vẫn không tự mở khung chat, chỉ giúp row xuất hiện).
+      const targetUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(pageId)}&mailbox_id=${encodeURIComponent(pageId)}&selected_item_id=${encodeURIComponent(convId)}&thread_type=FB_MESSAGE`;
+      try {
+        logBsDom('SCRAPE_OPEN_URL_FALLBACK', 'Row chưa thấy trong sidebar — nạp lại mailbox kèm selected_item_id rồi click lại', { convId, pageId });
+        const loadPromise = waitForTabComplete(tab.id, 10000);
+        await chrome.tabs.update(tab.id, { url: targetUrl });
+        await Promise.race([loadPromise, delay(5000)]);
+        await delay(1500);
+      } catch (_) {}
+    }
+  }
+  return await chatConfirmed();
+}
+
+async function handlePageProfileScrape(data) {
+  const threadId = String(data?.thread_id || '');
+  const pageId = String(data?.page_id || '');
+  const convId = String(data?.conv_id || extractBareThreadId(threadId) || '');
+  const accountId = data?.account_id || user_id || null;
+  if (!threadId || !pageId || !convId) {
+    if (threadId) sendToBackend('PAGE_PROFILE_SCRAPE_RESULT', { account_id: accountId, thread_id: threadId, page_id: pageId || null, conv_id: convId || null, profile_url: null, reason: !convId ? 'no_conv_id' : 'bad_request' });
+    return;
+  }
+  if (activeProfileScrapes.has(threadId)) {
+    console.log(`[FB Engine] 🔗 [PROFILE_SCRAPE] Gộp — thread ${threadId.substring(0, 24)} đang có phiên cào.`);
+    return;
+  }
+  activeProfileScrapes.add(threadId);
+  const startedAt = Date.now();
+  const ownerKey = convId || threadId;
+  let openedHere = false;
+  let tab = null;
+  const report = (profileUrl, reason, attempts) => sendToBackend('PAGE_PROFILE_SCRAPE_RESULT', {
+    account_id: accountId, thread_id: threadId, page_id: pageId, conv_id: convId,
+    profile_url: profileUrl || null, reason: reason || null, attempts: attempts || null,
+    took_ms: Date.now() - startedAt
+  });
+  try {
+    // Page đang bị user/queue khóa sang thread khác (cửa sổ 30-45s) — nhường,
+    // lần mở sau user bấm lại sẽ cào tiếp.
+    const lockedUntil = pageNavigationLockUntil.get(pageId) || 0;
+    const lockedThread = pageNavigationLockThreadId.get(pageId);
+    if (Date.now() < lockedUntil && lockedThread && lockedThread !== ownerKey) {
+      console.log(`[FB Engine] [PROFILE_SCRAPE] Nhường page ${pageId} — đang khóa cho ${String(lockedThread).substring(0, 24)}`);
+      report(null, 'page_busy');
+      return;
+    }
+
+    tab = await getBusinessSuiteTab(pageId);
+    if (!tab) {
+      // Mở mailbox KHÔNG kèm selected_item_id (nạp thẳng URL thread -> màn ống
+      // kính, khung chat không render) và active:true (tab nền bị Chrome bóp
+      // render — cùng nghệ luồng gửi tin DOM).
+      const inboxUrl = `https://business.facebook.com/latest/inbox/all/?asset_id=${encodeURIComponent(pageId)}&mailbox_id=${encodeURIComponent(pageId)}&thread_type=FB_MESSAGE`;
+      tab = await new Promise((resolve) => chrome.tabs.create({ url: inboxUrl, active: true }, resolve));
+      openedHere = Boolean(tab?.id);
+      if (tab?.id) {
+        await chrome.tabs.update(tab.id, { pinned: true }).catch(() => {});
+        await Promise.race([waitForTabComplete(tab.id, 12000), delay(3500)]);
+      }
+    }
+    if (!tab?.id) {
+      report(null, 'no_biz_tab');
+      return;
+    }
+
+    // Khóa điều hướng page trong lúc cào để sync nền không giật tab
+    pageNavigationLockThreadId.set(pageId, ownerKey);
+    pageNavigationLockUntil.set(pageId, Date.now() + 45000);
+
+    // Mở chat bằng click thật CDP như luồng gửi tin DOM — hết tin URL
+    // selected_item_id (nguyên nhân "thành công ảo" -> identity_mismatch).
+    const openOk = await openBizThreadForScrape(tab, convId, pageId, data.contact_name || null);
+    if (!openOk) {
+      report(null, 'nav_failed');
+      return;
+    }
+
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['pageProfileUrlExtractor.js', 'pageProfileScraper.js']
+      });
+    } catch (injectErr) {
+      console.warn('[FB Engine] [PROFILE_SCRAPE] Inject thất bại:', injectErr.message);
+      report(null, 'inject_failed');
+      return;
+    }
+
+    const pending = new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingProfileScrapes.delete(threadId);
+        resolve({ profile_url: null, reason: 'timeout', attempts: null });
+      }, 45000);
+      pendingProfileScrapes.set(threadId, { resolve, timer });
+    });
+    const ack = await chrome.tabs.sendMessage(tab.id, {
+      type: 'REQUEST_PAGE_PROFILE_SCRAPE',
+      data: { thread_id: threadId, page_id: pageId, conv_id: convId, contact_name: data.contact_name || null }
+    }).catch(() => null);
+    if (!ack || ack.ok !== true) {
+      const entry = pendingProfileScrapes.get(threadId);
+      if (entry) { clearTimeout(entry.timer); pendingProfileScrapes.delete(threadId); }
+      report(null, (ack && ack.reason) || 'content_unavailable');
+      return;
+    }
+
+    const result = await pending;
+    report(result.profile_url || null, result.reason || null, result.attempts);
+  } finally {
+    activeProfileScrapes.delete(threadId);
+    const leftover = pendingProfileScrapes.get(threadId);
+    if (leftover) { clearTimeout(leftover.timer); pendingProfileScrapes.delete(threadId); }
+    if (pageNavigationLockThreadId.get(pageId) === ownerKey) {
+      pageNavigationLockUntil.set(pageId, 0);
+      pageNavigationLockThreadId.delete(pageId);
+    }
+    if (openedHere && tab?.id) {
+      await chrome.tabs.remove(tab.id).catch(() => {});
+      console.log(`[FB Engine] 🔗 [PROFILE_SCRAPE] Đã đóng tab Biz tự mở #${tab.id} (giải phóng RAM).`);
+    }
+  }
 }
 
 async function handleSendPageMessage({ thread_id, content, page_id, client_message_id, attachment = null, attachmentManifest = null, expected_contact_name = null, dispatchMode = null, thread_url = null, customer_uid = null }) {
@@ -8874,6 +9095,17 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           return !!match && Number(fragment[1]) === Number(match[1]);
         }
 
+        function isSenderLabelFragment(value) {
+          const t = String(value || '').trim();
+          if (!t) return false;
+          // Mảnh nhãn giờ-gửi FB dính vào bong bóng ("59 PM by You", "3:36 PM
+          // by Khang" - reproduce 2026-10-30): phần giờ có thể bị cắt mất đầu
+          // ("9:59" còn "59"). Tên người gửi phải viết hoa đầu từ để không nuốt
+          // tin thật kiểu "gặp 3 PM by zoom".
+          return /(?:^|\s)\d{0,2}:\d{2}\s?(?:AM|PM|SA|CH|SÁNG|CHIỀU|TỐI)?\s+by\s+(?:[A-ZÀ-Ỹ][^\s]*\s?){1,5}$/i.test(t)
+            || /^\d{1,2}\s?(?:AM|PM|SA|CH)\s+by\s+(?:[A-ZÀ-Ỹ][^\s]*\s?){1,5}$/i.test(t);
+        }
+
         function stringHash(str) {
           let hash = 0;
           for (let i = 0; i < str.length; i++) {
@@ -8883,7 +9115,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           return (hash >>> 0).toString(36);
         }
 
-        function parseTimeFromLabel(label, fallbackDate) {
+        function parseTimeFromLabel(label, fallbackDate, allowTodayFallback = true) {
           if (!label) return null;
           const timeMatch = label.match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH|SÁNG|CHIỀU|TỐI))?/i);
           if (!timeMatch) return null;
@@ -8904,12 +9136,22 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           const lowerLabel = label.toLowerCase();
           const yesterdayMatch = lowerLabel.match(/hôm qua|yesterday/);
           const dateMatch = lowerLabel.match(/(\d{1,2})\s*tháng\s*(\d{1,2})(?:,?\s*(\d{4}))?/i);
+          const enDateMatch = lowerLabel.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})(?:,?\s*(\d{4}))?\b/i);
           const weekdayMatch = lowerLabel.match(/(thứ hai|thứ ba|thứ tư|thứ năm|thứ sáu|thứ bảy|chủ nhật|t2|t3|t4|t5|t6|t7|cn)/i);
 
           if (dateMatch) {
             const day = parseInt(dateMatch[1], 10);
             const month = parseInt(dateMatch[2], 10) - 1;
             const year = dateMatch[3] ? parseInt(dateMatch[3], 10) : now.getFullYear();
+            now.setFullYear(year, month, day);
+          } else if (enDateMatch) {
+            // Label tiếng Anh ("Message sent October 14, 2026, 3:36 PM"): không
+            // parse được tháng tên thì ngày bị đè bằng ngày fallback của row
+            // khác → cả cụm tin dồn về một ngày (reproduce 2026-10-30).
+            const enMonths = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+            const day = parseInt(enDateMatch[2], 10);
+            const month = enMonths[enDateMatch[1].toLowerCase()];
+            const year = enDateMatch[3] ? parseInt(enDateMatch[3], 10) : now.getFullYear();
             now.setFullYear(year, month, day);
           } else if (yesterdayMatch) {
             now.setDate(now.getDate() - 1);
@@ -8933,6 +9175,10 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // Dùng ngày của fallbackDate nhưng đè giờ phút mới (vì label chỉ có giờ phút của ngày hôm nay)
             const fallback = new Date(fallbackDate);
             now.setFullYear(fallback.getFullYear(), fallback.getMonth(), fallback.getDate());
+          } else if (!allowTodayFallback) {
+            // Đường quét không được dán ngày máy khi label không có ngày và
+            // chưa có mốc nào trong batch - trả null để row đi tiếp không giờ.
+            return null;
           }
 
           if (now.getTime() > Date.now() + 60000) {
@@ -8993,7 +9239,11 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         });
 
         let dom_order = 0;
-        let lastFallbackTime = Date.now();
+        // KHÔNG khởi Date.now(): batch quét mà row đầu không parse được giờ
+        // sẽ dán giờ-quét rồi pass đơn điệu đẩy +1ms cả loạt tin cũ xuống
+        // hiện tại (reproduce 2026-11-03: 12 row ts cách nhau 1ms 07:11:08.51x).
+        // 0 = chưa có mốc; row thiếu giờ thật gửi ts=0, server tự giữ giờ cũ.
+        let lastFallbackTime = 0;
 
         allRows.forEach((row, idx) => {
           if (row.closest(COMPOSER_EXCLUDE)) return;
@@ -9011,14 +9261,17 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             row.querySelector('[aria-label*="Tin nhắn do"], [aria-label*="Message sent"]')
           ) : null;
           let effectiveLabel = rowAriaLabel || (childMsgEl?.getAttribute('aria-label') || '');
-          if (!/Tin nh\u1eafn do .+ g\u1eedi l\u00fac|Message sent by|^L\u00fac\s+.+?,\s*.+?:/i.test(effectiveLabel)) {
+          // "You sent ... Message sent <EN date>" là nhãn outgoing ĐẦY ĐỦ của
+          // FB (kèm ngày): không nhận format này thì timestampLabel rỗng, tin
+          // bị dán mốc fallback của row khác (reproduce 2026-10-30).
+          if (!/Tin nh\u1eafn do .+ g\u1eedi l\u00fac|Message sent by|Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by|^L\u00fac\s+.+?,\s*.+?:|You sent|B\u1ea1n \u0111\u00e3 g\u1eedi/i.test(effectiveLabel)) {
             effectiveLabel = Array.from(row.querySelectorAll('[aria-label]'))
               .map((element) => element.getAttribute('aria-label') || '')
-              .find((label) => /Tin nh\u1eafn do .+ g\u1eedi l\u00fac|Message sent by|^L\u00fac\s+.+?,\s*.+?:/i.test(label))
+              .find((label) => /Tin nh\u1eafn do .+ g\u1eedi l\u00fac|Message sent by|Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by|^L\u00fac\s+.+?,\s*.+?:|You sent|B\u1ea1n \u0111\u00e3 g\u1eedi/i.test(label))
               || effectiveLabel;
           }
 
-          const hasMessageLabel = /Tin nhắn do .+ gửi lúc|Message sent by|^Lúc\s+.+?,\s*.+?:/i.test(effectiveLabel);
+          const hasMessageLabel = /Tin nhắn do .+ gửi lúc|Message sent by|Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by|^Lúc\s+.+?,\s*.+?:|You sent|Bạn đã gửi/i.test(effectiveLabel);
           // data-message-id là attribute Facebook thực sự dùng trên cấu trúc
           // role="article" mới (khớp content.js/page_content.js) - [data-id]/mid.
           // chỉ còn là fallback cho cấu trúc role="row" cũ.
@@ -9109,43 +9362,45 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           const timestampHasExplicitDate = /(?:hôm qua|yesterday|thứ\s+(?:hai|ba|tư|năm|sáu|bảy)|chủ nhật|\bT[2-7]\b|\bCN\b|\d{1,2}\s*tháng\s*\d{1,2}|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b)/i.test(timestampLabel);
           let tsMs = unixSeconds > 0
             ? unixSeconds * 1000
-            : (dateTimeValue && Number.isFinite(Date.parse(dateTimeValue)) ? Date.parse(dateTimeValue) : parseTimeFromLabel(timestampLabel, lastFallbackTime));
+            : (dateTimeValue && Number.isFinite(Date.parse(dateTimeValue)) ? Date.parse(dateTimeValue) : parseTimeFromLabel(timestampLabel, lastFallbackTime || null, false));
           let tsSource = tsMs ? (unixSeconds > 0 || dateTimeValue ? 'facebook_timestamp' : 'facebook_label') : 'fallback';
 
           if (tsMs) {
             lastFallbackTime = tsMs;
           } else {
-            tsMs = lastFallbackTime;
+            tsMs = lastFallbackTime || 0;
           }
 
           if (mediaUrl || isVideoMessage) {
-            // Priority 1: aria-label text is the most reliable direction signal.
-            let mediaOutgoing;
-            const labelSaysOutgoing = /do B\u1ea1n g\u1eedi|Tin nh\u1eafn do B\u1ea1n g\u1eedi l\u00fac|B\u1ea1n \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(effectiveLabel);
-            const labelSaysIncoming = !labelSaysOutgoing && /Tin nh\u1eafn do .+ g\u1eedi l\u00fac|Message sent by/i.test(effectiveLabel);
-            if (labelSaysOutgoing) {
-              mediaOutgoing = true;
-            } else if (labelSaysIncoming) {
-              mediaOutgoing = false;
-            } else {
-              // Geometry fallback: use actual media element rect, not the full-row wrapper.
-              // The row wrapper (div[role="article"]) is always 100% wide so its center
-              // is ~50% — wrongly reads as incoming when threshold is >= 0.55.
-              const mediaRect = (mediaElement || mediaAnchor || semanticVideoElement || row).getBoundingClientRect();
+            // Alignment from the REAL media element wins: aria-labels can be
+            // inherited from a surrounding accessibility wrapper and describe a
+            // NEIGHBOURING bubble (reproduce 2026-10-30: customer video+map
+            // stored outgoing because a row-level "...by You" label from an
+            // adjacent own text leaked into effectiveLabel). Never measure the
+            // row wrapper itself - it is 100% wide, so its right edge always
+            // reads >= 0.80 and mislabels every media row as outgoing.
+            let mediaOutgoing = null;
+            const measuredMediaEl = mediaElement || mediaAnchor || semanticVideoElement || null;
+            if (measuredMediaEl) {
+              const mediaRect = measuredMediaEl.getBoundingClientRect();
               const directionRect = historyDirectionContainer.getBoundingClientRect();
               if (directionRect.width > 0 && mediaRect.width > 0) {
                 // For wide media elements (> 40% of container), use right edge proximity.
                 const mediaWidthRatio = mediaRect.width / directionRect.width;
                 if (mediaWidthRatio > 0.40) {
                   const rightEdgeRatio = (mediaRect.right - directionRect.left) / directionRect.width;
-                  mediaOutgoing = rightEdgeRatio >= 0.80;
+                  if (rightEdgeRatio >= 0.80) mediaOutgoing = true;
+                  else if (rightEdgeRatio <= 0.60) mediaOutgoing = false;
                 } else {
                   const relativeCenter = (mediaRect.left + mediaRect.width / 2 - directionRect.left) / directionRect.width;
-                  mediaOutgoing = relativeCenter >= 0.55;
+                  if (relativeCenter >= 0.55) mediaOutgoing = true;
+                  else if (relativeCenter <= 0.45) mediaOutgoing = false;
                 }
-              } else {
-                mediaOutgoing = false;
               }
+            }
+            if (mediaOutgoing === null) {
+              const labelSaysOutgoing = /do B\u1ea1n g\u1eedi|Tin nh\u1eafn do B\u1ea1n g\u1eedi l\u00fac|B\u1ea1n \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(effectiveLabel);
+              mediaOutgoing = labelSaysOutgoing ? true : false;
             }
             const mediaNativeId = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id')
               || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id') || row.getAttribute('data-id') || null;
@@ -9166,13 +9421,13 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               is_outgoing: mediaOutgoing ? 1 : 0,
               sender_role: mediaOutgoing ? 'operator' : 'customer',
               source: 'dom_history_sync',
-              timestamp_ms: tsMs + dom_order,
+              timestamp_ms: tsMs ? tsMs + dom_order : 0,
               timestamp_source: tsSource,
               dom_order,
               sequence_order: dom_order,
               _clock_minutes: clockMinutes,
               _timestamp_has_explicit_date: timestampHasExplicitDate,
-              created_at: new Date(tsMs + dom_order).toISOString()
+              created_at: new Date(tsMs ? tsMs + dom_order : Date.now()).toISOString()
             });
             dom_order++;
           }
@@ -9199,7 +9454,8 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               senderName = 'Bạn';
               directionMatched = true;
             } else {
-              const nameMatch = currentLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i) || currentLabel.match(/Message sent by ([^]+?) at/i);
+              // Format label mới của FB (2026-11-03): "Message sent 4:03 PM by <tên>: <nội dung>"
+              const nameMatch = currentLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i) || currentLabel.match(/Message sent by ([^]+?) at/i) || currentLabel.match(/Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by\s+([^:]+?):/i);
               if (nameMatch) {
                 const rawSender = nameMatch[1].trim();
                 if (/^(?:Bạn|You)$/i.test(rawSender)) {
@@ -9232,7 +9488,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             }
 
             const robustOutgoing = /do B\u1ea1n g\u1eedi|Tin nh\u1eafn do B\u1ea1n g\u1eedi l\u00fac|B\u1ea1n \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(currentLabel);
-            const robustSender = currentLabel.match(/Tin nh\u1eafn do ([^]+?) g\u1eedi l\u00fac/i) || currentLabel.match(/Message sent by ([^]+?) at/i);
+            const robustSender = currentLabel.match(/Tin nh\u1eafn do ([^]+?) g\u1eedi l\u00fac/i) || currentLabel.match(/Message sent by ([^]+?) at/i) || currentLabel.match(/Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by\s+([^:]+?):/i);
             if (robustOutgoing) {
               isOutgoing = true;
               senderName = 'Bạn';
@@ -9288,6 +9544,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               && Number.isFinite(Number(clockMinutes))
               && Number(cleaned) === (Number(clockMinutes) % 60)) { bubble_idx++; continue; }
             if (isClockMinuteFragment(cleaned, currentLabel || timestampLabel)) { bubble_idx++; continue; }
+            if (isSenderLabelFragment(cleaned)) { bubble_idx++; continue; }
             if (contactName && cleaned.toLowerCase() === String(contactName).trim().toLowerCase()) { bubble_idx++; continue; }
 
             const bubbleNativeEl = leafBubble.closest('[data-message-id], [data-id], [id^="mid."]');
@@ -9310,7 +9567,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (!messages.some(m => m.fb_message_id === deterministicId)) {
               // Preserve Facebook DOM order for messages with the same minute.
               // A bounded offset is deterministic within the canonical oldest→newest pass.
-              const finalTsMs = tsMs + dom_order;
+              const finalTsMs = tsMs ? tsMs + dom_order : 0;
 
               messages.push({
                 fb_message_id: deterministicId,
@@ -9327,7 +9584,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                 sequence_order: dom_order,
                 _clock_minutes: clockMinutes,
                 _timestamp_has_explicit_date: timestampHasExplicitDate,
-                created_at: new Date(finalTsMs).toISOString()
+                created_at: new Date(finalTsMs || Date.now()).toISOString()
               });
             }
             bubble_idx++;
@@ -9370,14 +9627,17 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         for (const message of messages) {
           let currentTimestamp = Number(message.timestamp_ms || 0);
           if (!Number.isFinite(currentTimestamp) || currentTimestamp <= 0) {
-            currentTimestamp = previousDomTimestamp > 0 ? previousDomTimestamp + 1 : Date.now();
+            // Không có mốc nào trong batch thì giữ ts=0 (unknown) - KHÔNG dán
+            // Date.now(): batch toàn tin cũ sẽ bị đóng dấu hiện tại rồi pass
+            // này đẩy +1ms cả loạt xuống cuối thread (reproduce 2026-11-03).
+            currentTimestamp = previousDomTimestamp > 0 ? previousDomTimestamp + 1 : 0;
             message.timestamp_source = 'dom_order';
           } else if (previousDomTimestamp > 0 && currentTimestamp <= previousDomTimestamp) {
             currentTimestamp = previousDomTimestamp + 1;
             message.timestamp_source = 'dom_order';
           }
           message.timestamp_ms = currentTimestamp;
-          message.created_at = new Date(currentTimestamp).toISOString();
+          message.created_at = new Date(currentTimestamp || Date.now()).toISOString();
           delete message._clock_minutes;
           delete message._timestamp_has_explicit_date;
           previousDomTimestamp = currentTimestamp;

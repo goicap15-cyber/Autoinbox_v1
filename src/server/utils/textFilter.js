@@ -182,6 +182,20 @@ const SYSTEM_PATTERNS = [
 
 const SEPARATOR_ONLY_REGEX = /^[\s\u00b7\u2022.\-|•·]+$/;
 
+// Mảnh nhãn giờ-gửi FB dính vào bong bóng ("9:58 AM by Khang", "58 PM by
+// You" - reproduce 2026-11-03): label EN "Message sent October 16, 2026,
+// 9:58 AM by Khang" bị cắt mất đầu thành bubble rác. Tên người gửi phải viết
+// hoa đầu từ để không nuốt tin thật kiểu "gặp 3 PM by zoom". \s đã bao gồm
+// U+202F narrow space mà FB dùng giữa phút và AM/PM.
+const FB_SENDER_LABEL_FRAGMENT_PATTERNS = [
+  /(?:^|\s)\d{0,2}:\d{2}\s?(?:AM|PM|SA|CH|SÁNG|CHIỀU|TỐI)?\s+by\s+(?:[A-ZÀ-Ỹ][^\s]*\s?){1,5}$/i,
+  /^\d{1,2}\s?(?:AM|PM|SA|CH)\s+by\s+(?:[A-ZÀ-Ỹ][^\s]*\s?){1,5}$/i,
+  // Nhãn trợ năng nguyên vẹn làm cả bubble: "Message sent October 16, 2026,
+  // 9:58 AM by Khang" (có/khóang ngày), "Tin nhắn do X gửi lúc 9:58".
+  /^message sent\b[^\n]*\b\d{1,2}:\d{2}\b[^\n]*\bby\s+[A-ZÀ-Ỹ][^\n]*$/i,
+  /^tin nhắn do [^\n]+? gửi lúc\s*\d{1,2}:\d{2}/i
+];
+
 // Chỉ riêng dòng hội thoại hệ thống (kết nối/bạn bè/cuộc gọi) - không bao
 // gồm các pattern metadata khác. Dùng để chặn MEDIA_HINT/unread giả cho
 // thread hệ thống trong khi vẫn giữ isSystemOrMetadataText rộng cho lọc
@@ -215,6 +229,9 @@ function isSystemOrMetadataText(text) {
   if (SEPARATOR_ONLY_REGEX.test(trimmed)) return true;
   if (/(?:Chưa\s*có\s*tin\s*nhắn|ChÃ|tin\s*nh[áÃaàáảãạâầấẩẫậăằắẳẵặ]*[n]|No\s*messages?)/i.test(trimmed)) return true;
   if (RELATIVE_TIME_METADATA_RE.test(trimmed)) return true;
+  for (const pat of FB_SENDER_LABEL_FRAGMENT_PATTERNS) {
+    if (pat.test(trimmed)) return true;
+  }
   if (isKnownPageSystemNotice(trimmed)) return true;
 
   for (const pat of SYSTEM_PATTERNS) {

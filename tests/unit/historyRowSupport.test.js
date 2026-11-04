@@ -35,7 +35,10 @@ test('personal Messenger keeps icon-only likes and semantic-only videos', () => 
   assert.match(content, /const semanticVideo = Array\.from/);
   assert.match(background, /rowEmojiContent && \(leafBubbles\.length === 0 \|\| hasOnlyClockFragments\)/);
   assert.match(background, /videoElement \|\| semanticVideoElement/);
-  assert.match(background, /mediaElement \|\| mediaAnchor \|\| semanticVideoElement \|\| row/);
+  // D2 (2026-10-30): đo thẳng media element, không bao giờ đo row wrapper
+  // (100% width -> mọi media bị đọc thành outgoing).
+  assert.match(background, /mediaElement \|\| mediaAnchor \|\| semanticVideoElement \|\| null/);
+  assert.doesNotMatch(background, /semanticVideoElement \|\| row\)/);
 });
 
 test('personal Messenger treats glued minute suffixes as timestamp chrome', () => {
