@@ -3408,40 +3408,42 @@ wss.on('connection', (ws, req) => {
                 `).get(m.thread_id, bubbleFamilyId, bubbleFamilyId)
               : null;
             if (bubbleBaseRow
-              && String(bubbleBaseRow.content || '').trim() === String(m.content || '').trim()
-              && Number(bubbleBaseRow.is_outgoing) !== (isOutgoing ? 1 : 0)
-              && m.direction_evidence === 'geometry'
-              && /^mid\./.test(bubbleFamilyId)
-              && (bubbleBaseRow.client_message_id === null || bubbleBaseRow.client_message_id === '')
-              && Number(bubbleBaseRow.sent_by_agent || 0) === 0
-              && (bubbleBaseRow.delivery_status === null || !['pending', 'sending'].includes(String(bubbleBaseRow.delivery_status)))) {
-              // Quan sát geometry quyết đoán (bong bóng rõ một bên) sửa chiều
-              // row gốc không dấu vết CRM — cả hai hướng. Không có lối này,
-              // lần heal/đọc sai trước bị "khóa" vĩnh viễn: mọi reading đúng
-              // sau đó bị guard này nuốt (reproduce 2026-11-03 12:09: heal lật
-              // sai Dkkskkss/alo rồi reading out=1 đúng bị SKIP như phantom).
-              db.prepare(`
-                UPDATE messages SET is_outgoing = ?, sender_role = ?,
-                  direction_status = 'confirmed', sender_id = ?
-                WHERE id = ?
-              `).run(isOutgoing ? 1 : 0, isOutgoing ? 'operator' : 'customer',
-                isOutgoing ? safeSenderId : 'CONTACT', bubbleBaseRow.id);
-              syncDebug('WS_GEOMETRY_DIRECTION_FIX', {
-                thread: m.thread_id,
-                fb_message_id: String(stableMessageId).substring(0, 70),
-                base_outgoing: Number(bubbleBaseRow.is_outgoing),
-                observed_outgoing: isOutgoing ? 1 : 0
-              });
-              io.emit('THREAD_MESSAGES_UPDATED', {
-                thread_id: m.thread_id,
-                account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null
-              });
-              break;
-            }
-            if (bubbleBaseRow
-              && String(bubbleBaseRow.content || '').trim() === String(m.content || '').trim()
-              && (Number(bubbleBaseRow.is_outgoing) !== (isOutgoing ? 1 : 0)
-                || Math.abs(Number(tsMs || 0) - Number(bubbleBaseRow.timestamp_ms || 0)) > 60000)) {
+              && String(bubbleBaseRow.content || '').trim() === String(m.content || '').trim()) {
+              // K1 (2026-11-04): base tồn tại + cùng nội dung = CÙNG một lá
+              // vật lý -> bỏ qua MỌI biến thể quan sát (lật chiều, anchor cũ
+              // >60s, re-render cùng hướng ts sát). Trước đây cùng hướng + ts
+              // sát lọt xuống INSERT OR IGNORE và sinh row nhân đôi khi sweep
+              // lại hội thoại cũ (reproduce 2026-11-04 01:59: 9 row
+              // mid.$X__bubble_1 nhân bản block tin thread 100004449999465).
+              if (Number(bubbleBaseRow.is_outgoing) !== (isOutgoing ? 1 : 0)
+                && m.direction_evidence === 'geometry'
+                && /^mid\./.test(bubbleFamilyId)
+                && (bubbleBaseRow.client_message_id === null || bubbleBaseRow.client_message_id === '')
+                && Number(bubbleBaseRow.sent_by_agent || 0) === 0
+                && (bubbleBaseRow.delivery_status === null || !['pending', 'sending'].includes(String(bubbleBaseRow.delivery_status)))) {
+                // Quan sát geometry quyết đoán (bong bóng rõ một bên) sửa chiều
+                // row gốc không dấu vết CRM — cả hai hướng. Không có lối này,
+                // lần heal/đọc sai trước bị "khóa" vĩnh viễn: mọi reading đúng
+                // sau đó bị guard này nuốt (reproduce 2026-11-03 12:09: heal lật
+                // sai Dkkskkss/alo rồi reading out=1 đúng bị SKIP như phantom).
+                db.prepare(`
+                  UPDATE messages SET is_outgoing = ?, sender_role = ?,
+                    direction_status = 'confirmed', sender_id = ?
+                  WHERE id = ?
+                `).run(isOutgoing ? 1 : 0, isOutgoing ? 'operator' : 'customer',
+                  isOutgoing ? safeSenderId : 'CONTACT', bubbleBaseRow.id);
+                syncDebug('WS_GEOMETRY_DIRECTION_FIX', {
+                  thread: m.thread_id,
+                  fb_message_id: String(stableMessageId).substring(0, 70),
+                  base_outgoing: Number(bubbleBaseRow.is_outgoing),
+                  observed_outgoing: isOutgoing ? 1 : 0
+                });
+                io.emit('THREAD_MESSAGES_UPDATED', {
+                  thread_id: m.thread_id,
+                  account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null
+                });
+                break;
+              }
               syncDebug('WS_SKIP_BUBBLE_FAMILY_PHANTOM', {
                 thread: m.thread_id,
                 fb_message_id: String(stableMessageId).substring(0, 70),

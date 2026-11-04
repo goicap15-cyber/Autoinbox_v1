@@ -58,7 +58,7 @@ test('request polling scans both request buttons in its own lightweight mode', (
   assert.match(background, /MESSAGE_REQUEST_SPAM/);
   assert.match(background, /const verifiedPrimary = primaryVisible\.filter/);
   assert.match(background, /rect\.left < Math\.min\(680, window\.innerWidth \* 0\.55\)/);
-  assert.match(scheduler, /reason === 'scheduler_requests' \? 12000 : 30000/);
+  assert.match(scheduler, /scanMode === 'realtime_requests' \? 30000 : 120000/);
   assert.match(background, /\/messages\/requests\/spam\?crm_tab_role=requests/);
   assert.match(background, /People you may know/);
   assert.match(background, /isRealtimeRequestScan && Boolean\(target\.requestSection\)/);

@@ -45,20 +45,21 @@ test('closes duplicate BS tab of the same page, keeps registered one', () => {
   assert.deepEqual(verdict.closeIds, [11]);
 });
 
-test('closes transient discovery/requests messenger tabs, keeps working roles', () => {
+test('closes transient discovery messenger tabs, keeps working roles incl. requests', () => {
   const tabs = [msgr(20), msgr(21), msgr(22), msgr(23)];
   const verdict = classifyTabsForAudit({
     tabs,
     registry: {
       'acc_1:history': 20,      // keep (working role)
       'acc_1:discovery': 21,    // transient -> close
-      'acc_1:requests': 22,     // transient -> close
+      'acc_1:requests': 22,     // keep 2026-10-16: quét nền liên tục, audit đóng sẽ flap
       'acc_1:campaign': 23      // working role -> keep
     },
     protectedIds: []
   });
-  assert.deepEqual(verdict.closeIds.sort((a, b) => a - b), [21, 22]);
+  assert.deepEqual(verdict.closeIds.sort((a, b) => a - b), [21]);
   assert.equal(verdict.closeIds.includes(20), false);
+  assert.equal(verdict.closeIds.includes(22), false);
   assert.equal(verdict.closeIds.includes(23), false);
 });
 

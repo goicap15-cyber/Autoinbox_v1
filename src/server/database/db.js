@@ -1450,7 +1450,11 @@ const migrations = [
     version: 20261013002,
     name: 'add_threads_pinned_at',
     up: (db) => {
-      db.exec('ALTER TABLE threads ADD COLUMN pinned_at TEXT;');
+      try {
+        db.exec('ALTER TABLE threads ADD COLUMN pinned_at TEXT;');
+      } catch (e) {
+        console.log('[DB] Migration v20261013002: threads.pinned_at already exists, skipped.');
+      }
       // Backfill: giữ nguyên thứ tự hiện tại của nhóm ghim (activity mới nhất
       // đứng trước) bằng cách cấp pinned_at cách nhau 1ms giảm dần.
       const pinnedRows = db.prepare(`

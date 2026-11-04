@@ -39,8 +39,9 @@ test('Messenger-typed outgoing text passes all three gates when it has a real mi
   const content = fs.readFileSync('src/extension/content.js', 'utf8');
   const background = fs.readFileSync('src/extension/background.js', 'utf8');
   const server = fs.readFileSync('src/server/server.js', 'utf8');
-  // gate 1 - observer chỉ nhường khi CHƯA có native id
-  assert.equal(/if \(isPlainOutgoingDomText && !parsed\.native_id\) return;/.test(content), true);
+  // gate 1 - observer chỉ nhường khi CHƯA có native id (merge 04/11: bản
+  // ghi markObservedOutgoing trước khi return cho thuật toán nhận echo sidebar)
+  assert.equal(/if \(isPlainOutgoingDomText && !parsed\.native_id\) \{\s*\n\s*markObservedOutgoing\(thread_id, parsed\.content\);\s*\n\s*return;/.test(content), true);
   // gate 2 - bg bỏ qua echo KHÔNG mid thật, echo có mid thật đi tiếp;
   // mid.$X__bubble_N (lá thật đã hydrate) phải được strip hậu tố trước khi
   // test, không thì reading thật của tin ĐI bị nuốt câm ở cổng này.
