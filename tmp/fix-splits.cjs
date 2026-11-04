@@ -1,0 +1,10 @@
+const fs = require('fs');
+const P = 'src/server/services/AppSetupAutomation.js';
+let src = fs.readFileSync(P, 'utf8');
+const NL = String.fromCharCode(10);
+const broken = ".split('" + NL + "')";
+const fixed = ".split('\\n')";
+let count = src.split(broken).length - 1;
+src = src.split(broken).join(fixed);
+fs.writeFileSync(P, src);
+console.log('fixed', count, 'real-newline split(s)');

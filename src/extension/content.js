@@ -794,6 +794,10 @@
   // so ConversationRepository.reconcileExistingMessage's hysteresis (spec 019)
   // gets a chance to resolve it, instead of being silently dropped forever.
   let lastObservedMessages = new Map();
+  // Row reply có quote đã forward ít nhất một lần trong phiên extension này.
+  // Backfill quote cho row cũ cần re-emit ĐÚNG MỘT LẦN (baseline + family
+  // tracker chặn re-emit thường) - set này mở cửa đúng một lần rồi đóng.
+  let quotedReplyForwarded = new Set();
 
   // Messenger mounts an article before its media URL is hydrated. Let the
   // same stable message id pass again only when its payload becomes richer.
@@ -1228,7 +1232,12 @@
     if (finalBubbles.length === 0 && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return [];
 
     let sender_name = '';
+    let labelSenderName = '';
     let is_outgoing = false;
+    // Nguồn bằng chứng chiều: server chỉ chấp nhận heal/sửa chiều row cũ
+    // khi quan sát đến từ geometry quyết đoán (bong bóng rõ trái/phải), không
+    // nhận nhãn tên — 2 acc trùng tên làm nhãn "do Lê Văn Khang gửi" mơ hồ.
+    let direction_evidence = '';
 
     const contactNameEl = document.querySelector('header h1, header h2, [role="main"] h1, [role="main"] h2, span[aria-level="1"]');
     const contactNameStr = contactNameEl ? contactNameEl.textContent.trim() : '';
@@ -1238,20 +1247,34 @@
     if (isMissedCallContent) {
       is_outgoing = false;
       sender_name = contactNameStr || 'Khách hàng';
+      direction_evidence = 'call_label';
     } else if (/do Bạn gửi|Tin nhắn do Bạn gửi lúc|Bạn đã gửi|sent by you|You sent|Message sent by you/i.test(effectiveLabel)) {
       is_outgoing = true;
       sender_name = 'Bạn';
+      direction_evidence = 'label_you';
     } else {
-      // Format label mới của FB (2026-11-03): "Message sent 4:03 PM by <tên>: <nội dung>"
-      const nameMatch = effectiveLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i) || effectiveLabel.match(/Message sent by ([^]+?) at/i) || effectiveLabel.match(/Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by\s+([^:]+?):/i);
+      // Nhãn EN mới của Messenger: "Message sent 12:10 PM by <Tên>: <nội dung>"
+      // (thời gian TRƯỚC "by" — regex cũ "Message sent by X at" không khớp ->
+      // tin khách rơi xuống đoán hình học và bị lật thành outgoing khi cửa sổ
+      // ẩn, reproduce 2026-11-03 12:10).
+      const nameMatch = effectiveLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i)
+        || effectiveLabel.match(/Message sent by ([^]+?) at/i)
+        || effectiveLabel.match(/Message sent [^]*? by ([^:]+?):/i);
       if (nameMatch) {
         const rawSender = nameMatch[1].trim();
         if (/^(?:Bạn|You)$/i.test(rawSender)) {
           is_outgoing = true;
           sender_name = 'Bạn';
+          direction_evidence = 'label_you';
         } else {
           is_outgoing = false;
           sender_name = rawSender;
+          direction_evidence = 'label_name';
+          // Tên giải từ aria-label của tin NHÓM - nhánh realtime bên dưới ghi
+          // đè sender_name thành tên nhóm, nhưng bubble nhãn tên trần cạnh
+          // bubble thật vẫn cần tên này để nhận diện (reproduce 2026-10-11:
+          // nhóm Bi-aaaaaaa dính hàng loạt row tên trần "Tiến Quang"/"Linh").
+          labelSenderName = rawSender;
         }
       } else {
         const hasContactAvatar = contactNameStr ? !!(
@@ -1264,6 +1287,7 @@
         if (hasContactAvatar) {
           is_outgoing = false;
           sender_name = contactNameStr;
+          direction_evidence = 'avatar';
         } else {
           // K2 (2026-11-04): container tham chiếu phải là role="main" của
           // chính hội thoại (closest từ row). FB DOM hiện có phần tử
@@ -1294,6 +1318,7 @@
             const mainRect = mainEl.getBoundingClientRect();
             const nodeRect = targetNode.getBoundingClientRect();
             if (mainRect.width > 0 && nodeRect.width > 0) {
+              direction_evidence = 'geometry';
               // For wide media (> 40% of container), use right edge proximity rather than
               // center — outgoing media aligns to the right margin of the chat column.
               const isWideMedia = (isVideoMessage || isPhotoMessage) && nodeRect.width / mainRect.width > 0.40;
@@ -1317,33 +1342,104 @@
     }
 
     // Facebook can hydrate an incorrect/stale accessibility sender label for
-    // a freshly mounted bubble. In realtime, a clearly left/right visual
-    // bubble is the strongest direction evidence and prevents customer text
-    // from being discarded as our own message until history runs later.
-    if (isRealtime && finalBubbles.length > 0) {
+    // a freshly mounted bubble. A clearly left/right visual bubble is the
+    // strongest direction evidence and prevents customer text from being
+    // discarded as our own message until history runs later.
+    // Đo MỌI lá bong bóng thay vì chỉ lá lớn nhất — nhưng LOẠI lá text ẩn
+    // aria-label ("You sent … Enter, Message sent by … at 12:10 PM" / "Tin
+    // nhắn do … gửi lúc"): lá này tràn full-width (center ~0.56-0.64) nên
+    // vẫn decisive-right ở mọi row, và khi bubble thật chưa laid out (tab
+    // history/ẩn, hydrate sớm) nó TỤI MỘT MÌNH tạo "quyết đoán phải" ảo ->
+    // tin khách bị đá qua phải kèm direction_evidence='geometry' rồi reconcile
+    // lật row (reproduce 2026-11-04: TEST-KHACH-777/áaksasasasas,
+    // WS_DIRECTION_UPDATED 0->1 evidence geometry 04:34:16).
+    // Quyết đoán khi CÓ lá ở một bên rõ (<=0.45 / >=0.55) và KHÔNG có lá nào
+    // ở bên đối nghịch — tránh dính pill reaction/mảnh trang trí bên kia.
+    if (finalBubbles.length > 0) {
       // K2 (2026-11-04): cùng lỗi container với nhánh geometry thường ở trên
       // — closest từ messageRow thay cho document.querySelector toàn trang.
       const mainEl = messageRow.closest?.('div[role="main"]')
         || document.querySelector('div[role="main"]');
-      const visualBubble = finalBubbles.reduce((best, candidate) => {
-        const rect = candidate.getBoundingClientRect();
-        const bestRect = best?.getBoundingClientRect?.();
-        return !bestRect || rect.width * rect.height > bestRect.width * bestRect.height ? candidate : best;
-      }, null);
       const mainRect = mainEl?.getBoundingClientRect?.();
-      const bubbleRect = visualBubble?.getBoundingClientRect?.();
-      if (mainRect?.width > 0 && bubbleRect?.width > 0) {
-        const relativeCenter = (bubbleRect.left + bubbleRect.width / 2 - mainRect.left) / mainRect.width;
-        if (relativeCenter <= 0.45) {
+      if (mainRect?.width > 0) {
+        let sawDecisiveLeft = false;
+        let sawDecisiveRight = false;
+        const decisiveCenters = [];
+        for (const candidate of finalBubbles) {
+          const rect = candidate.getBoundingClientRect?.();
+          if (!rect || rect.width <= 0 || rect.height <= 0) continue;
+          const leafText = String(candidate.textContent || '').trim();
+          // Hai hình thái lá aria ẩn: "You sent <text>. Enter, Message sent
+          // by You at 12:10 PM" (tiền tố You sent) và "<text>Enter, Message
+          // sent by You at ..." (nội dung tin đứng TRƯỚC, reproduce
+          // 04:44:13 centers 0.59,0.64 content "xlcxcxlclxcxcEnter, M...").
+          // Chỉ match đầu chuỗi sẽ sót hình thái 2.
+          const ariaChrome = /Enter,\s*(?:Message sent by|Tin nhắn do)/i.test(leafText)
+            || /^(?:You sent|Message sent|Tin nhắn do|Enter,)/i.test(leafText);
+          if (ariaChrome) continue;
+          const relativeCenter = (rect.left + rect.width / 2 - mainRect.left) / mainRect.width;
+          if (relativeCenter <= 0.45) { sawDecisiveLeft = true; decisiveCenters.push(Math.round(relativeCenter * 100) / 100); }
+          else if (relativeCenter >= 0.55) { sawDecisiveRight = true; decisiveCenters.push(Math.round(relativeCenter * 100) / 100); }
+        }
+        if (sawDecisiveLeft && !sawDecisiveRight) {
           is_outgoing = false;
           sender_name = contactNameStr || 'Khách hàng';
-        } else if (relativeCenter >= 0.55) {
+          direction_evidence = 'geometry';
+          obsDebug({ stage: 'GEOMETRY_DECISIVE', thread: String(extractThreadIdFromUrl() || ''), side: 'left', centers: decisiveCenters.join(','), rt: isRealtime ? 1 : 0, content: String(rawText || '').substring(0, 30) });
+        } else if (sawDecisiveRight && !sawDecisiveLeft) {
           is_outgoing = true;
           sender_name = 'Bạn';
+          direction_evidence = 'geometry';
+          obsDebug({ stage: 'GEOMETRY_DECISIVE', thread: String(extractThreadIdFromUrl() || ''), side: 'right', centers: decisiveCenters.join(','), rt: isRealtime ? 1 : 0, content: String(rawText || '').substring(0, 30) });
         }
       }
     }
+    // NHÓM (Messenger mới): label của article là "Lúc <giờ>, <Tên>: <nội
+    // dung>" — regex format cũ ("Tin nhắn do X gửi lúc") không khớp ở nhóm,
+    // override vị trí lại đổi mọi tin trái thành tên nhóm → member_name rỗng
+    // và header tên <h3> chảy qua thành tin rác (reproduce 2026-10-11 nhóm
+    // Bi-aaaaaaa). Label article có preview nên chắc chắn thuộc article này.
+    const bubbleArticleEl = (finalBubbles.find(Boolean) || messageRow)?.closest?.('[data-message-id]')
+      || (messageRow?.matches?.('[data-message-id]') ? messageRow : null)
+      || messageRow?.querySelector?.('[data-message-id]')
+      || null;
+    const ownArticleLabel = bubbleArticleEl?.getAttribute?.('aria-label') || '';
+    const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+.*,\s*([^:]+?):\s+(.+)$/);
+    if (ownSenderMatch && !/^(?:Bạn|You)$/i.test(ownSenderMatch[1].trim())) {
+      is_outgoing = false;
+      sender_name = ownSenderMatch[1].trim();
+      labelSenderName = ownSenderMatch[1].trim();
+    }
+
+    // Tên thành viên thật trong tin NHÓM: chỉ nhận từ aria-label của tin
+    // (labelSenderName). Override hình ảnh phía trên đổi sender_name thành tên
+    // nhóm cho tin trái - không được lan vào member_name, vì client dùng
+    // member_name để hiện tên + avatar riêng từng người trong nhóm.
+    const memberName = (!is_outgoing && labelSenderName) ? labelSenderName : '';
+    const memberAvatarUrl = memberName ? extractRowSenderAvatar(messageRow, memberName) : '';
     const filter = globalThis.FbCrmTextFilter;
+
+    // Tin TRẢ LỜI: article chứa khối trích dẫn tin gốc với aria-label
+    // "Đi đến tin nhắn đã trả lời" (bản EN: "Go to replied-to message").
+    // Text trong khối có tiền tố "Tin nhắn gốc:" — tách riêng để server lưu
+    // reply_to_text, UI render quote như Messenger thay vì để text gốc chảy
+    // thành tin ảo trùng (reproduce 2026-10-15 thread Hai Anh).
+    let replyQuoteText = '';
+    const quoteContainerEls = bubbleArticleEl?.querySelectorAll?.('[aria-label]') || [];
+    for (const quoteEl of quoteContainerEls) {
+      const quoteAria = String(quoteEl.getAttribute('aria-label') || '');
+      if (/tin nhắn (đã trả lời|gốc)|replied-to message|original message/i.test(quoteAria)) {
+        // KHÔNG dùng cleanBubbleText: FbCrmTextFilter coi "Tin nhắn gốc:..."
+        // là metadata và trả về rỗng -> quote biến mất (reproduce 2026-10-15).
+        // Quote chỉ cần gộp khoảng trắng.
+        const quoteRaw = String(quoteEl.textContent || '').replace(/\s+/g, ' ').trim();
+        replyQuoteText = quoteRaw
+          .replace(/^(?:Tin nhắn gốc|Original message|Replied[- ]to message)\s*:\s*/i, '')
+          .trim()
+          .slice(0, 500);
+        break;
+      }
+    }
 
     // A Like row can contain a visual minute fragment (for example 37sáng)
     // beside its SVG. That fragment is timestamp chrome, not message text.
@@ -1366,8 +1462,11 @@
       const rowNativeId = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null;
       return emojiList.map((emoji, emojiIdx) => ({
         sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
+        member_name: memberName,
+        member_avatar: memberAvatarUrl || null,
         content: emoji,
         is_outgoing,
+        direction_evidence,
         native_id: rowNativeId,
         effective_label: effectiveLabel,
         is_valid: true,
@@ -1395,6 +1494,8 @@
         if (isClockMinuteFragment(cleaned, effectiveLabel)) continue;
         if (MEDIA_PLACEHOLDER_RE.test(cleaned)) continue;
         if (filter?.isSystemOrMetadataText && filter.isSystemOrMetadataText(cleaned)) continue;
+        if (!is_outgoing && labelSenderName
+          && cleaned.replace(/\s+/g, ' ').trim().toLowerCase() === labelSenderName.replace(/\s+/g, ' ').trim().toLowerCase()) continue;
         caption = cleaned;
         break;
       }
@@ -1409,19 +1510,32 @@
       }
       return [{
         sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
+        member_name: memberName,
+        member_avatar: memberAvatarUrl || null,
         content: caption || '',
         is_outgoing,
+        direction_evidence,
         native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
         effective_label: effectiveLabel,
         is_valid: true,
         bubble_idx: 0,
         media_type: isVideoMessage ? 'video' : 'image',
         media_url: mediaUrl,
+        reply_quote_text: replyQuoteText || null,
         dom_anchor: messageRow,
         }];
     }
 
     const results = [];
+    // Header reply "X đã trả lời Y" / "X replied to Y": đa số render bằng h3
+    // (đã skip phía trên) nhưng pass hydration nào đó render bằng div -> lọt
+    // thành row ghost song song tin reply thật ("gộp 2 tin" 2026-10-15). Chặn
+    // Ở MỌI pass (không gate theo khối quote: pass hydration đầu chưa render
+    // quote mà header đã lộ -> ghost tái sinh sau khi DB đã dọn). Tin quảng
+    // cáo "X đã trả lời một quảng cáo." là nội dung thật (isAdNotice) phải
+    // giữ; câu thật "đã trả lời rồi ạ" được bảo vệ bằng lookahead giống
+    // textFilter.
+    const REPLY_HEADER_BUBBLE_RE = /^[^?！?\n]{1,48}\s(?:đã trả lời|replied to)\s(?!(?:.*\s)?(?:chưa|rồi|xong|sao|đâu|gì|à|hả|nhỉ|nha|nhé|thôi|luôn|vậy|đấy|đó|ạ|nhá|rùi|nè|được|yet|already|right|now|ok|okay)\s*[?！?.!…]*$)[^?！?\n]{1,60}$/iu;
     let bubble_idx = 0;
     for (const bubble of finalBubbles) {
       const textContent = cleanBubbleText(bubble.textContent);
@@ -1446,14 +1560,47 @@
         continue;
       }
 
+      // Header <h3> trong article = tên người gửi / "Bạn đã trả lời X" —
+      // không bao giờ là nội dung tin nhắn.
+      if (bubble.closest('h3')) { bubble_idx++; continue; }
+
+      if (!/quảng cáo|replied to (?:an |your )?ad/i.test(cleanText)
+        && REPLY_HEADER_BUBBLE_RE.test(cleanText)) {
+        bubble_idx++;
+        continue;
+      }
+
+      // Khối quote của tin reply ("Tin nhắn gốc:" + nội dung tin gốc) nằm
+      // trong div[aria-label="Đi đến tin nhắn đã trả lời"] bên trong article
+      // reply — không phải nội dung tin reply.
+      let inReplyQuote = false;
+      for (let qn = bubble.parentElement; qn && qn !== bubbleArticleEl; qn = qn.parentElement) {
+        const qAria = qn.getAttribute ? (qn.getAttribute('aria-label') || '') : '';
+        if (qAria && /tin nhắn (đã trả lời|gốc)|replied-to message|original message/i.test(qAria)) { inReplyQuote = true; break; }
+      }
+      if (inReplyQuote) { bubble_idx++; continue; }
+
+      // Nhãn tên người gửi trong hội thoại NHÓM là leaf div[dir=auto] cạnh
+      // bubble -> bị nhặt thành bubble riêng kèm mid thật của row. Text trùng
+      // đúng tên giải từ aria-label là nhãn, không phải tin khách.
+      if (!is_outgoing && labelSenderName
+        && cleanText.replace(/\s+/g, ' ').trim().toLowerCase() === labelSenderName.replace(/\s+/g, ' ').trim().toLowerCase()) {
+        bubble_idx++;
+        continue;
+      }
+
       results.push({
         sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
+        member_name: memberName,
+        member_avatar: memberAvatarUrl || null,
         content: cleanText,
         is_outgoing,
+        direction_evidence,
         native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
         effective_label: effectiveLabel,
         is_valid: true,
-        bubble_idx
+        bubble_idx,
+        reply_quote_text: replyQuoteText || null
       });
       bubble_idx++;
     }
@@ -1488,6 +1635,31 @@
       current = current.parentElement;
     }
     return null;
+  }
+
+  // Avatar thành viên trong tin NHÓM: chỉ quét img trong CHÍNH row tin (không
+  // leo lên ancestor như extractContactAvatarFromNode - tránh bắt nhầm avatar
+  // của row kề). Ưu tiên img có alt/aria-label trùng tên người gửi.
+  function extractRowSenderAvatar(messageRow, senderName) {
+    const imgs = messageRow?.querySelectorAll?.('img');
+    if (!imgs || !imgs.length) return null;
+    const nameLower = String(senderName || '').trim().toLowerCase();
+    let fallback = null;
+    for (const img of imgs) {
+      const src = img.currentSrc || img.src || '';
+      if (!src || src.length < 50) continue;
+      if (!/fbcdn\.net|scontent|platform\.facebook\.com/.test(src)) continue;
+      if (/transparent|blank/.test(src)) continue;
+      const rect = img.getBoundingClientRect?.();
+      const width = Number(rect?.width || img.width || 0);
+      const height = Number(rect?.height || img.height || 0);
+      if (!(width > 0 && height > 0 && width <= 80 && height <= 80)) continue;
+      const label = (String(img.getAttribute?.('alt') || '') + ' ' + String(img.getAttribute?.('aria-label') || '')).toLowerCase();
+      if (/open photo|view photo|mở ảnh|xem ảnh|video/.test(label)) continue;
+      if (nameLower && label.includes(nameLower)) return src;
+      if (!fallback) fallback = src;
+    }
+    return fallback;
   }
 
   let currentBaselineThreadId = null;
@@ -1726,8 +1898,9 @@
         const fbMessageId = verdict.id;
         const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
         const observationSignature = domObservationSignature(parsed);
-        if (verdict.duplicate) continue;
-        if (lastObservedMessages.get(fbMessageId) === observationSignature) continue;
+        const needsQuoteForward = Boolean(parsed.reply_quote_text) && !quotedReplyForwarded.has(fbMessageId);
+        if (verdict.duplicate && !needsQuoteForward) continue;
+        if (lastObservedMessages.get(fbMessageId) === observationSignature && !needsQuoteForward) continue;
         lastObservedMessages.set(fbMessageId, observationSignature);
         bubbleFamilyTracker.markSeen(verdict.key);
 
@@ -1740,12 +1913,15 @@
               thread_id,
               sender_id: null,
               sender_name: parsed.sender_name,
+              member_name: parsed.member_name || null,
+              member_avatar: parsed.member_avatar || null,
               content: parsed.content,
               is_outgoing: false,
               sender_role: 'customer',
               fb_message_id: fbMessageId,
               media_type: parsed.media_type || 'text',
               media_url: parsed.media_url || null,
+              reply_quote_text: parsed.reply_quote_text || null,
               timestamp_ms: timestampMs,
               timestamp_source: timestampMs ? 'facebook_label' : 'startup_catchup',
               created_at: new Date(timestampMs || Date.now()).toISOString(),
@@ -1755,6 +1931,7 @@
               contact_avatar: extractContactAvatarFromNode(row) || ''
             }
           });
+          if (parsed.reply_quote_text) quotedReplyForwarded.add(fbMessageId);
         } catch (_) {}
       }
     }
@@ -1905,12 +2082,16 @@
             thread_id: thread_id,
             sender_id: parsed.is_outgoing ? capturedUserId : null,
             sender_name: parsed.sender_name,
+            member_name: parsed.member_name || null,
+            member_avatar: parsed.member_avatar || null,
             content: parsed.content,
             is_outgoing: parsed.is_outgoing,
+            direction_evidence: parsed.direction_evidence || null,
             sender_role: parsed.is_outgoing ? 'operator' : 'customer',
             fb_message_id: fbMessageId,
             media_type: parsed.media_type || 'text',
             media_url: parsed.media_url || null,
+            reply_quote_text: parsed.reply_quote_text || null,
             timestamp_ms: tsMs,
             timestamp_source: tsSource,
             created_at: new Date(tsMs || Date.now()).toISOString(),
@@ -1923,6 +2104,7 @@
             contact_avatar: contactAvatar || ''
           }
         });
+        if (parsed.reply_quote_text) quotedReplyForwarded.add(fbMessageId);
       }
     } catch (err) {}
   }
@@ -1956,6 +2138,15 @@
       lastThreadAttachAt = Date.now();
       scheduleCustomerProfileUrlScan(thread_id);
       observerPaused = false;
+      // Báo background quét panel "Thành viên trong đoạn chat" cho dropdown @
+      // (background tự dedup 10 phút/thread, thread 1-1 sẽ trả list rỗng).
+      try {
+        if (globalThis.__fbCrmThreadMemberNotifyTimer) clearTimeout(globalThis.__fbCrmThreadMemberNotifyTimer);
+        globalThis.__fbCrmThreadMemberNotifyTimer = setTimeout(() => {
+          const p = chrome.runtime.sendMessage({ type: 'CHAT_THREAD_CHANGED', data: { thread_id } });
+          if (p?.catch) p.catch(() => {});
+        }, 1200);
+      } catch (_) {}
     }
 
     if (observerPaused) return;
@@ -2004,21 +2195,44 @@
         // reconcile/hysteresis path (spec 019) can settle it, rather than a new
         // duplicate row being created or the correction being silently dropped.
         const observationSignature = domObservationSignature(parsed);
+        const needsQuoteForward = Boolean(parsed.reply_quote_text) && !quotedReplyForwarded.has(fbMessageId);
         if (verdict.duplicate) {
-          // Chỉ log khi tracker là lý do DUY NHẤT chặn tin (lastObserved chưa
-          // ghi cùng chữ ký) - còn lại là re-scan bình thường của tin đã
-          // forward, không đáng log.
-          if (lastObservedMessages.get(fbMessageId) !== observationSignature) {
-            obsDebug({
-              stage: 'TRACKER_DUPLICATE',
-              thread: String(thread_id),
-              id: String(fbMessageId || '').substring(0, 50),
-              content: String(parsed.content || '').substring(0, 30)
-            });
+          // Row CÓ quote chưa forward vẫn đi tiếp: server backfill theo
+          // fb_message_id, drift guard phía server chặn id trôi thành ghost.
+          if (!needsQuoteForward) {
+            // Chỉ log khi tracker là lý do DUY NHẤT chặn tin (lastObserved chưa
+            // ghi cùng chữ ký) - còn lại là re-scan bình thường của tin đã
+            // forward, không đáng log.
+            if (lastObservedMessages.get(fbMessageId) !== observationSignature) {
+              obsDebug({
+                stage: 'TRACKER_DUPLICATE',
+                thread: String(thread_id),
+                id: String(fbMessageId || '').substring(0, 50),
+                content: String(parsed.content || '').substring(0, 30)
+              });
+            }
+            return;
           }
+        }
+        if (lastObservedMessages.get(fbMessageId) === observationSignature && !needsQuoteForward) return;
+        // Tin outgoing text: bubble CHƯA có native id thì nhường cho composer/
+        // network confirmation (dom_hash trôi khi hydrate sẽ thành ghost nếu
+        // forward sớm). Đã có native id thì forward - server tự khớp theo mid:
+        // ghép vào row pending của composer hoặc nhận diện trùng mid rồi bỏ.
+        // Nhắn tay ngay trong Messenger không có đường confirmation nào khác,
+        // gate cũ nuốt sạch tin này (reproduce 2026-10-09: 5 tin "alo" nhắn tay
+        // chỉ còn 1 vào CRM).
+        // Gate phải đứng TRƯỚC lastObservedMessages.set/markSeen: mark trước
+        // làm lần đọc lại sau khi mid thật hydrate bị nuốt theo chữ ký cũ —
+        // tin của chính mình mất khỏi CRM (reproduce 2026-11-03: tin B không
+        // có row đối ứng ở thread B).
+        const isPlainOutgoingDomText = parsed.is_outgoing
+          && !parsed.media_url
+          && (!parsed.media_type || parsed.media_type === 'text');
+        if (isPlainOutgoingDomText && !parsed.native_id) {
+          markObservedOutgoing(thread_id, parsed.content);
           return;
         }
-        if (lastObservedMessages.get(fbMessageId) === observationSignature) return;
         lastObservedMessages.set(fbMessageId, observationSignature);
         bubbleFamilyTracker.markSeen(verdict.key);
         if (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
@@ -2027,18 +2241,6 @@
         const tsSource = tsMs ? 'facebook_label' : 'realtime_fallback';
 
         if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
-
-        // Tin outgoing text: bubble CHƯA có native id thì nhường cho composer/
-        // network confirmation (dom_hash trôi khi hydrate sẽ thành ghost nếu
-        // forward sớm). Đã có native id thì forward - server tự khớp theo mid:
-        // ghép vào row pending của composer hoặc nhận diện trùng mid rồi bỏ.
-        // Nhắn tay ngay trong Messenger không có đường confirmation nào khác,
-        // gate cũ nuốt sạch tin này (reproduce 2026-10-09: 5 tin "alo" nhắn tay
-        // chỉ còn 1 vào CRM).
-        const isPlainOutgoingDomText = parsed.is_outgoing
-          && !parsed.media_url
-          && (!parsed.media_type || parsed.media_type === 'text');
-        if (isPlainOutgoingDomText && !parsed.native_id) return;
 
         // Row CHƯA có native id (React hydrate trễ): đợi ~1.5s rồi đọc lại đúng
         // node đó - nếu mid thật đã gắn thì forward bằng mid (server tự khớp,
@@ -2137,8 +2339,9 @@
         const fbMessageId = verdict.id;
         const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
         const observationSignature = domObservationSignature(parsed);
-        if (verdict.duplicate) continue;
-        if (lastObservedMessages.get(fbMessageId) === observationSignature) continue;
+        const needsQuoteForward = Boolean(parsed.reply_quote_text) && !quotedReplyForwarded.has(fbMessageId);
+        if (verdict.duplicate && !needsQuoteForward) continue;
+        if (lastObservedMessages.get(fbMessageId) === observationSignature && !needsQuoteForward) continue;
         const tsMs = parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || row), false);
         lastObservedMessages.set(fbMessageId, observationSignature);
         bubbleFamilyTracker.markSeen(verdict.key);
@@ -2149,12 +2352,16 @@
               thread_id,
               sender_id: parsed.is_outgoing ? capturedUserId : null,
               sender_name: parsed.sender_name,
+              member_name: parsed.member_name || null,
+              member_avatar: parsed.member_avatar || null,
               content: parsed.content,
               is_outgoing: parsed.is_outgoing,
+              direction_evidence: parsed.direction_evidence || null,
               sender_role: parsed.is_outgoing ? 'operator' : 'customer',
               fb_message_id: fbMessageId,
               media_type: parsed.media_type || 'text',
               media_url: parsed.media_url || null,
+              reply_quote_text: parsed.reply_quote_text || null,
               timestamp_ms: tsMs,
               timestamp_source: tsMs ? 'facebook_label' : 'realtime_fallback',
               created_at: new Date(tsMs || Date.now()).toISOString(),
@@ -2164,10 +2371,12 @@
               contact_avatar: extractContactAvatarFromNode(row) || ''
             }
           });
+          if (parsed.reply_quote_text) quotedReplyForwarded.add(fbMessageId);
         } catch (_) {}
       }
     }
     while (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
+    while (quotedReplyForwarded.size > 2000) quotedReplyForwarded.delete(quotedReplyForwarded.keys().next().value);
   }
 
   // Initialize everything

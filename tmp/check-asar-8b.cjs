@@ -1,0 +1,11 @@
+const asar = require('@electron/asar');
+const path = require('path');
+const B = path.sep;
+const asarPath = path.join(__dirname, '..', 'release/win-unpacked/resources/app.asar');
+const svc = asar.extractFile(asarPath, ['dist', 'server', 'services', 'VietSeedingImportService.js'].join(B)).toString('utf8');
+console.log('login-check msg:', svc.includes('đẩy về trang đăng nhập/checkpoint'));
+console.log('sleep 1500 (khong phai 4000):', svc.includes('sleep(1500)') && !svc.includes('sleep(4000)'));
+const idx = svc.indexOf('async function assertFbLoginAccepted');
+console.log('assert fn ton tai:', idx > 0);
+console.log('--- doan dau ham ---');
+console.log(svc.slice(idx, idx + 400));

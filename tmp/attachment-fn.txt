@@ -1,0 +1,78 @@
+// Gửi tin nhắn PAGE kèm file: upload tệp lên Meta (message_attachments) bằng
+// page token rồi gửi bằng attachment_id — đường chính thức cho tệp trên máy.
+async function sendPageThreadViaGraphAttachment(thread_id, text, client_message_id, attachment_id, socket) {
+  const threadRow = db.prepare(`
+    SELECT t.id, t.account_id, s.id AS source_id, s.external_id AS page_id, s.source_type
+    FROM threads t LEFT JOIN inbox_sources s ON s.id = t.source_id
+    WHERE t.id = ?
+  `).get(thread_id);
+  if (!threadRow || threadRow.source_type !== 'page_messenger' || !threadRow.source_id) {
+    throw new Error('Thread Page không hợp lệ hoặc thiếu Page source.');
+  }
+  const att = db.prepare('SELECT * FROM outbound_attachments WHERE id = ?').get(attachment_id);
+  if (!att || !att.storage_path || !fs.existsSync(att.storage_path)) {
+    throw new Error('Tệp đính kèm không còn trên máy — hãy đính lại file.');
+  }
+  const psid = String(thread_id).includes(':') ? String(thread_id).split(':').pop() : String(thread_id);
+  const maxSeqRow = db.prepare('SELECT MAX(COALESCE(sequence_order, id)) AS max_seq FROM messages WHERE thread_id = ?').get(thread_id);
+  const nextSeq = (Number.isFinite(Number(maxSeqRow?.max_seq)) && Number(maxSeqRow.max_seq) > 0) ? Number(maxSeqRow.max_seq) + 1 : 1;
+  const clientMsgId = client_message_id || `client_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const nowMs = Date.now();
+  const pendingFbId = `pending_${clientMsgId}`;
+  const insert = db.prepare(`
+    INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, attachment_id, is_outgoing, sender_role, delivery_status, sequence_order, timestamp_ms, timestamp_source, created_at)
+    VALUES (?, ?, ?, 'SYSTEM', ?, ?, ?, 1, 'operator', 'pending', ?, ?, 'client_submit', ?)
+  `).run(thread_id, pendingFbId, clientMsgId, (text || null), att.media_type, att.id, nextSeq, nowMs, new Date(nowMs).toISOString());
+  const rowId = insert.lastInsertRowid;
+  db.prepare('UPDATE threads SET last_message = ?, last_activity = CURRENT_TIMESTAMP WHERE id = ?').run(text || ('[' + att.media_type + ']'), thread_id);
+  const pendingRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+  io.emit('NEW_MESSAGE', withAttachmentAccessUrl({ ...pendingRow, status: 'pending' }));
+
+  const failPageSend = async (err) => {
+    db.prepare("UPDATE messages SET delivery_status = 'failed', delivery_error = ? WHERE id = ?").run(String(err.message || err), rowId);
+    const failedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+    io.emit('NEW_MESSAGE', withAttachmentAccessUrl({ ...failedRow, thread_id, account_id: threadRow.account_id }));
+    throw err;
+  };
+
+  try {
+    const token = InboxSourceService.getDecryptedToken(threadRow.source_id);
+    if (!token) throw new Error('Page chưa có Page Access Token — hãy bấm "Lấy token" trong modal Fanpage.');
+    // 1) Upload tệp lên Meta
+    const form = new FormData();
+    form.append('message', JSON.stringify({ attachment: { type: att.media_type, payload: {} } }));
+    form.append('filedata', new Blob([fs.readFileSync(att.storage_path)], { type: att.mime_type }), att.original_name || att.safe_name);
+    const upRes = await fetch(`https://graph.facebook.com/v21.0/${threadRow.page_id}/message_attachments?access_token=${encodeURIComponent(token)}`, { method: 'POST', body: form });
+    const upData = await upRes.json().catch(() => ({}));
+    if (upData.error) throw new Error('Upload tệp lên Facebook lỗi: ' + (upData.error.message || 'không rõ'));
+    if (!upData.attachment_id) throw new Error('Facebook không trả attachment_id sau khi upload.');
+    // 2) Gửi tin với attachment_id
+    const sendRes = await fetch(`https://graph.facebook.com/v21.0/${threadRow.page_id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        recipient: { id: psid },
+        message: { attachment: { type: att.media_type, payload: { attachment_id: upData.attachment_id } } },
+        access_token: token,
+      }),
+    });
+    const data = await sendRes.json().catch(() => ({}));
+    if (data.error) {
+      const err = new Error(data.error.error_data?.message || data.error.message || 'Gửi tệp thất bại.');
+      err.code = data.error.code ? `GRAPH_${data.error.code}` : 'GRAPH_ERROR';
+      throw err;
+    }
+    db.prepare(`
+      UPDATE messages SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL WHERE id = ?
+    `).run(data.message_id || pendingFbId, rowId);
+    try {
+      db.prepare("UPDATE outbound_attachments SET status = 'sent', consumed_by_message_id = ? WHERE id = ?").run(rowId, attachment_id);
+    } catch (_) {}
+    const sentRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(rowId);
+    console.log(`[PageApi] ✅ Đã gửi ${att.media_type} qua Page thread=${thread_id} mid=${data.message_id || 'n/a'}`);
+    io.emit('NEW_MESSAGE', withAttachmentAccessUrl({ ...sentRow, thread_id, account_id: threadRow.account_id }));
+    io.emit('THREAD_LIST_UPDATED', { thread_id, account_id: threadRow.account_id });
+  } catch (err) {
+    await failPageSend(err);
+  }
+}

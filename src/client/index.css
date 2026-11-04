@@ -652,3 +652,12 @@ option {
     padding-left: 0;
   }
 }
+
+@keyframes reply-target-flash {
+  0%, 100% { background-color: transparent; }
+  25%, 75% { background-color: rgba(59, 130, 246, 0.14); }
+}
+.reply-target-flash {
+  animation: reply-target-flash 0.9s ease-in-out 2;
+  border-radius: 12px;
+}

@@ -1,7 +1,35 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Send, Image, Paperclip, Smile, FileText, Loader2, AlertCircle, WifiOff, ThumbsUp, Plus, Trash2, RefreshCw } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Send, Image, Paperclip, Smile, FileText, Loader2, AlertCircle, WifiOff, ThumbsUp, Plus, Trash2, RefreshCw, Users } from 'lucide-react';
 import EmojiPickerPopover from './EmojiPickerPopover.jsx';
 import AttachmentPreview from './AttachmentPreview.jsx';
+
+const normVi = (value) => String(value || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/đ/g, 'd')
+  .replace(/Đ/g, 'D')
+  .toLowerCase();
+
+const mentionAvatarUrl = (url) => {
+  const s = String(url || '');
+  return s.startsWith('/api/') || /^https?:/i.test(s) ? s : `/api/avatars/${s}`;
+};
+
+// Vùng mention đang mở: '@' ở đầu dòng hoặc sau khoảng trắng, không có
+// khoảng trắng giữa '@' và con trỏ. Trả về null khi không có mention.
+const scanMention = (text, caret) => {
+  const t = String(text || '');
+  const end = Math.max(0, Math.min(Number.isFinite(caret) ? caret : t.length, t.length));
+  for (let i = end - 1; i >= 0; i -= 1) {
+    const ch = t[i];
+    if (ch === '@') {
+      if (i > 0 && !/\s/.test(t[i - 1])) return null;
+      return { start: i, query: t.slice(i + 1, end) };
+    }
+    if (/\s/.test(ch)) return null;
+  }
+  return null;
+};
 
 export default function MessageComposer({
   onSendMessage,
@@ -9,6 +37,7 @@ export default function MessageComposer({
   onDiscardAttachment,
   capabilities = null,
   senderIdentity = null,
+  groupMembers = [],
   disabled = false,
   disabledReason = 'Không thể gửi - tài khoản Facebook chưa kết nối'
 }) {
@@ -35,6 +64,12 @@ export default function MessageComposer({
   const selectionRef = useRef({ start: 0, end: 0 });
   const dragDepthRef = useRef(0);
   const restoreFocusAfterSendRef = useRef(false);
+  const [mention, setMention] = useState(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const mentionListRef = useRef(null);
+  // Mention đã chọn trong phiên soạn: [{ name, user_id }] — gửi kèm tin để
+  // extension đổi "@Tên" thành chip mention xanh thật bên Messenger.
+  const pickedMentionsRef = useRef([]);
 
   const loadTemplates = useCallback(async () => {
     try {
@@ -130,7 +165,10 @@ export default function MessageComposer({
   }, []);
 
   useEffect(() => {
-    if (disabled) closeEmojiPicker();
+    if (disabled) {
+      closeEmojiPicker();
+      setMention(null);
+    }
   }, [disabled, closeEmojiPicker]);
 
   useEffect(() => {
@@ -143,6 +181,68 @@ export default function MessageComposer({
     });
     return () => cancelAnimationFrame(frame);
   }, [sending, disabled]);
+
+  // Đổi text từ ngoài luồng gõ (chèn emoji, chọn mẫu, gửi xong) có thể làm
+  // mention cũ lệch vị trí — đóng luôn thay vì chèn sai chỗ.
+  useEffect(() => {
+    if (!mention) return;
+    const at = mention.start;
+    if (at < 0 || at >= inputText.length || inputText[at] !== '@'
+      || inputText.slice(at + 1, at + 1 + mention.query.length) !== mention.query) {
+      setMention(null);
+    }
+  }, [inputText, mention]);
+
+  // Danh sách @ chỉ lấy từ group_members (quét panel "Thành viên trong đoạn chat"
+  // lưu theo thread_id) — KHÔNG trộn nguồn khác để khỏi lẫn user nhóm khác.
+  const localMemberRows = useMemo(() => {
+    const seen = new Set();
+    const rows = [];
+    for (const m of (groupMembers || [])) {
+      const name = String(m?.name || '').trim();
+      if (!name) continue;
+      const key = normVi(name);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({
+        key: 'gm:' + String(m.id || name),
+        name,
+        subtitle: '',
+        avatar: m.avatar_url || m.avatar || null,
+        userId: /^\d{5,}$/.test(String(m.id || '')) ? String(m.id) : null,
+        everyone: false
+      });
+    }
+    return rows;
+  }, [groupMembers]);
+
+  const mentionRows = useMemo(() => {
+    if (!mention) return [];
+    const q = normVi(mention.query.trim());
+    const source = localMemberRows;
+    // "@t" -> những người có tên BẮT ĐẦU bằng "t" đứng trước, sau đó mới đến
+    // tên chứa "t" ở giữa — đúng thứ tự user kỳ vọng.
+    const startsWithRows = q ? source.filter((m) => normVi(m.name).startsWith(q)) : [];
+    const includesRows = q ? source.filter((m) => normVi(m.name).includes(q) && !startsWithRows.includes(m)) : [];
+    const rows = (q ? [...startsWithRows, ...includesRows] : source).slice(0, 60);
+    if (localMemberRows.length >= 2 && (!q || normVi('mọi người').includes(q))) {
+      rows.push({
+        key: 'everyone',
+        name: 'mọi người',
+        subtitle: 'Nhắc đến mọi người trong cuộc trò chuyện này',
+        avatar: null,
+        userId: '2211776809571916',
+        everyone: true
+      });
+    }
+    return rows;
+  }, [mention, localMemberRows]);
+
+  useEffect(() => {
+    if (!mention) return;
+    const el = mentionListRef.current?.querySelector('[data-active="true"]');
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [mentionIndex, mention]);
 
   const submitContent = async (rawContent) => {
     const submittedAttachment = attachment;
@@ -160,10 +260,13 @@ export default function MessageComposer({
         content,
         client_message_id: clientMessageId,
         attachment_id: submittedAttachment?.id || null,
-        attachment: submittedAttachment
+        attachment: submittedAttachment,
+        mentions: pickedMentionsRef.current.slice()
       });
       setInputText('');
       setAttachment(null);
+      setMention(null);
+      pickedMentionsRef.current = [];
       selectionRef.current = { start: 0, end: 0 };
       requestAnimationFrame(() => resizeInput(textareaRef.current));
     } catch (err) {
@@ -183,6 +286,28 @@ export default function MessageComposer({
   };
 
   const handleKeyDown = (event) => {
+    if (mention && mentionRows.length > 0) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setMentionIndex((prev) => (prev + 1) % mentionRows.length);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setMentionIndex((prev) => (prev - 1 + mentionRows.length) % mentionRows.length);
+        return;
+      }
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault();
+        applyMentionRow(mentionRows[mentionIndex] || mentionRows[0]);
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setMention(null);
+        return;
+      }
+    }
     if (event.key === 'Escape' && showEmojiPicker) {
       event.preventDefault();
       closeEmojiPicker({ restoreFocus: true });
@@ -201,6 +326,38 @@ export default function MessageComposer({
     const end = Math.min(selectionRef.current.end ?? fallback, inputText.length);
     const nextText = inputText.slice(0, start) + emoji + inputText.slice(end);
     const nextCursor = start + emoji.length;
+    setInputText(nextText);
+    selectionRef.current = { start: nextCursor, end: nextCursor };
+    requestAnimationFrame(() => {
+      if (!target) return;
+      target.focus();
+      target.setSelectionRange(nextCursor, nextCursor);
+      resizeInput(target);
+    });
+  };
+
+  const handleInputChange = (event) => {
+    const next = event.target.value;
+    setInputText(next);
+    rememberSelection();
+    const nextMention = scanMention(next, event.target.selectionStart);
+    setMention(nextMention);
+    setMentionIndex(0);
+  };
+
+  const applyMentionRow = (row) => {
+    if (!row || !mention || !row.name) return;
+    const target = textareaRef.current;
+    const head = inputText.slice(0, mention.start);
+    const tailStart = mention.start + 1 + mention.query.length;
+    const token = '@' + row.name + ' ';
+    const nextCursor = head.length + token.length;
+    const nextText = head + token + inputText.slice(tailStart);
+    const record = { name: row.name, user_id: row.userId || (row.everyone ? '2211776809571916' : '') };
+    if (!pickedMentionsRef.current.some((m) => m.name === record.name)) {
+      pickedMentionsRef.current.push(record);
+    }
+    setMention(null);
     setInputText(nextText);
     selectionRef.current = { start: nextCursor, end: nextCursor };
     requestAnimationFrame(() => {
@@ -514,6 +671,49 @@ export default function MessageComposer({
         onRemove={removeAttachment}
       />
 
+      {mention && mentionRows.length > 0 && (
+        <div className="absolute bottom-full left-4 right-4 z-40 mb-1.5 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-panel)] shadow-2xl">
+          <div ref={mentionListRef} className="max-h-64 overflow-y-auto py-1">
+            {mentionRows.map((row, idx) => (
+              <button
+                key={row.key}
+                type="button"
+                data-active={idx === mentionIndex ? 'true' : undefined}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => applyMentionRow(row)}
+                onMouseEnter={() => setMentionIndex(idx)}
+                className={`flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors ${idx === mentionIndex ? 'bg-[var(--color-bg-hover)]' : ''}`}
+              >
+                {row.everyone ? (
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent)]/15 text-[var(--color-accent)]">
+                    <Users size={16} strokeWidth={1.75} />
+                  </span>
+                ) : (
+                  <span className="relative flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--color-accent)] text-xs font-bold text-[var(--color-text-on-accent)]">
+                    {row.name.charAt(0).toUpperCase()}
+                    {row.avatar && (
+                      <img
+                        key={row.key + ':' + row.avatar}
+                        src={mentionAvatarUrl(row.avatar)}
+                        alt=""
+                        className="absolute inset-0 h-full w-full object-cover"
+                        onError={(event) => { event.currentTarget.style.display = 'none'; }}
+                      />
+                    )}
+                  </span>
+                )}
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-medium text-[var(--color-text-primary)]">{row.name}</span>
+                  {(row.subtitle || row.everyone) && (
+                    <span className="block truncate text-[11px] text-[var(--color-text-muted)]">{row.subtitle || 'Nhắc đến mọi người trong cuộc trò chuyện này'}</span>
+                  )}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <form onSubmit={handleSend} className="flex items-end gap-2 bg-[var(--color-bg-surface)] rounded-2xl px-3 py-2 shadow-sm focus-within:ring-2 focus-within:ring-[var(--color-accent)]/10 transition-all">
         <div className="relative flex-shrink-0">
           <button
@@ -600,10 +800,7 @@ export default function MessageComposer({
           ref={textareaRef}
           rows={1}
           value={inputText}
-          onChange={(event) => {
-            setInputText(event.target.value);
-            rememberSelection();
-          }}
+          onChange={handleInputChange}
           onInput={(event) => resizeInput(event.target)}
           onSelect={rememberSelection}
           onClick={rememberSelection}

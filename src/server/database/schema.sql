@@ -271,6 +271,8 @@ CREATE INDEX IF NOT EXISTS idx_threads_account ON threads(account_id);
 CREATE INDEX IF NOT EXISTS idx_threads_assigned ON threads(assigned_user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+-- active-on quét messages theo timestamp_ms toàn cục (không theo thread)
+CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp_ms);
 
 -- 8. Bảng Message Queue (Hàng đợi tin nhắn)
 CREATE TABLE IF NOT EXISTS message_queue (

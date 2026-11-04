@@ -1,0 +1,10 @@
+const { DatabaseSync } = require('node:sqlite');
+const path = require('path');
+const db = new DatabaseSync(path.join(process.env.APPDATA, 'autochatbot-fb-crm', 'data', 'database.db'), { readOnly: true });
+const cols = db.prepare("PRAGMA table_info(messages)").all().map(c => c.name);
+console.log('COLS:', cols.join(','));
+const failed = db.prepare(`SELECT id, thread_id, fb_message_id, client_message_id, substr(content,1,30) AS content, delivery_status, delivery_error, created_at FROM messages WHERE delivery_status='failed' AND created_at > datetime('now','-1 day') ORDER BY id DESC LIMIT 20`).all();
+console.log('FAILED:', JSON.stringify(failed, null, 1));
+const srcs = db.prepare(`SELECT id, external_id, display_name, source_type, owner_account_id, status, CASE WHEN access_token_encrypted IS NULL THEN 'NO_TOKEN' ELSE 'HAS_TOKEN' END AS tok FROM inbox_sources WHERE source_type='page_messenger'`).all();
+console.log('PAGES:', JSON.stringify(srcs, null, 1));
+db.close();

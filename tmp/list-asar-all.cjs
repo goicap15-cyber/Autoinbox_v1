@@ -1,0 +1,10 @@
+const asar = require('@electron/asar');
+const path = require('path');
+const asarPath = path.join(__dirname, '..', 'release/win-unpacked/resources/app.asar');
+const files = asar.listPackage(asarPath).map((e) => String(e));
+const client = files.filter((f) => /client/i.test(f));
+console.log('client entries:', client.length);
+console.log(client.slice(0, 15).join('\n'));
+const distTop = files.filter((f) => /^\dist\[^\]+$/.test(f));
+console.log('--- dist top-level ---');
+console.log(distTop.join('\n'));

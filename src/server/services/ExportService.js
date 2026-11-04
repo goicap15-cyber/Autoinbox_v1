@@ -9,27 +9,101 @@ if (!fs.existsSync(EXPORT_DIR)) {
   fs.mkdirSync(EXPORT_DIR, { recursive: true });
 }
 
+// 2026-10-22: Excel và CSV dùng chung một nguồn dữ liệu để không còn lệch dòng
+// (trước đây Excel bắt buộc có SĐT/email, CSV thì không). Phạm vi phương án B:
+// mọi contact có bằng chứng lead - được đánh dấu thủ công, có SĐT/email, hoặc
+// đã gán trạng thái (bắt số tự động/campaign chỉ set status_id, không bật
+// lead_captured nên phải tính riêng). Tên khách: bắt số tự động chỉ lưu SĐT
+// vào contacts, tên hiển thị nằm ở threads.contact_name nên fallback sang đó.
+const LEADS_QUERY = `
+  SELECT
+    COALESCE(NULLIF(c.name, ''), t.contact_name) AS name,
+    c.nickname,
+    c.phone,
+    c.email,
+    c.address,
+    c.notes,
+    ls.name AS status_name,
+    c.tags,
+    c.custom_fields,
+    COALESCE(NULLIF(a.name, ''), t.account_id) AS tai_khoan_fb,
+    src.display_name AS page_name,
+    c.profile_url,
+    t.last_activity
+  FROM contacts c
+  JOIN threads t ON c.thread_id = t.id
+  LEFT JOIN lead_statuses ls ON ls.id = c.status_id
+  LEFT JOIN accounts a ON a.id = t.account_id
+  LEFT JOIN inbox_sources src ON src.id = t.source_id
+  WHERE c.lead_captured = 1
+    OR (c.phone IS NOT NULL AND TRIM(c.phone) != '')
+    OR (c.email IS NOT NULL AND TRIM(c.email) != '')
+    OR c.status_id IS NOT NULL
+  ORDER BY t.last_activity DESC
+`;
+
+function parseJsonArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function formatTags(value) {
+  return parseJsonArray(value)
+    .map((tag) => (typeof tag === 'string' ? tag.trim() : ''))
+    .filter(Boolean)
+    .join(', ');
+}
+
+function formatCustomFields(value) {
+  return parseJsonArray(value)
+    .map((field) => {
+      if (!field || typeof field !== 'object') return '';
+      const label = typeof field.label === 'string' ? field.label.trim() : '';
+      const val = typeof field.value === 'string' ? field.value.trim() : '';
+      if (!label) return '';
+      return val ? `${label}: ${val}` : label;
+    })
+    .filter(Boolean)
+    .join('; ');
+}
+
+// last_activity trong DB tồn tại 2 dạng UTC: 'YYYY-MM-DD HH:MM:SS'
+// (CURRENT_TIMESTAMP của SQLite) và ISO 'YYYY-MM-DDTHH:MM:SS.sssZ' - xuất ra
+// Excel trông lộn xộn. Quy cả hai về giờ địa phương 'YYYY-MM-DD HH:MM'.
+function formatLocalDateTime(value) {
+  if (!value) return '';
+  const raw = String(value).trim();
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw) ? `${raw}Z` : raw;
+  const ts = Date.parse(normalized);
+  if (Number.isNaN(ts)) return raw;
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function getLeadRows() {
+  return db.prepare(LEADS_QUERY).all().map((lead) => ({
+    ...lead,
+    the_phan_loai: formatTags(lead.tags),
+    truong_tuy_chinh: formatCustomFields(lead.custom_fields),
+    last_activity: formatLocalDateTime(lead.last_activity)
+  }));
+}
+
 class ExportService {
   /**
    * Xuất danh sách Lead thu thập được ra file Excel (.xlsx)
    * @returns {string} Đường dẫn file Excel đã xuất
    */
   async exportLeadsToExcel() {
-    const leads = db.prepare(`
-      SELECT
-        c.name AS ho_ten,
-        c.phone AS so_dien_thoai,
-        c.email,
-        c.notes AS ghi_chu,
-        t.account_id AS tai_khoan_fb,
-        t.last_activity AS hoat_dong_cuoi,
-        c.tags
-      FROM contacts c
-      JOIN threads t ON c.thread_id = t.id
-      WHERE c.lead_captured = 1
-        AND (c.phone IS NOT NULL OR c.email IS NOT NULL)
-      ORDER BY t.last_activity DESC
-    `).all();
+    const leads = getLeadRows();
 
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'AutoChatbot FB CRM';
@@ -41,13 +115,19 @@ class ExportService {
 
     // Thiết lập Header Row với màu sắc đẹp
     sheet.columns = [
-      { header: 'Họ tên khách hàng', key: 'ho_ten', width: 28 },
-      { header: 'Số điện thoại', key: 'so_dien_thoai', width: 18 },
+      { header: 'Họ tên khách hàng', key: 'name', width: 28 },
+      { header: 'Biệt danh', key: 'nickname', width: 18 },
+      { header: 'Số điện thoại', key: 'phone', width: 18 },
       { header: 'Email', key: 'email', width: 30 },
-      { header: 'Ghi chú', key: 'ghi_chu', width: 40 },
-      { header: 'Tài khoản FB', key: 'tai_khoan_fb', width: 20 },
-      { header: 'Hoạt động cuối', key: 'hoat_dong_cuoi', width: 22 },
-      { header: 'Thẻ phân loại', key: 'tags', width: 20 }
+      { header: 'Địa chỉ', key: 'address', width: 32 },
+      { header: 'Ghi chú', key: 'notes', width: 40 },
+      { header: 'Trạng thái', key: 'status_name', width: 16 },
+      { header: 'Thẻ phân loại', key: 'the_phan_loai', width: 20 },
+      { header: 'Trường tùy chỉnh', key: 'truong_tuy_chinh', width: 30 },
+      { header: 'Tài khoản FB', key: 'tai_khoan_fb', width: 22 },
+      { header: 'Page', key: 'page_name', width: 26 },
+      { header: 'Link FB', key: 'profile_url', width: 34 },
+      { header: 'Hoạt động cuối', key: 'last_activity', width: 22 }
     ];
 
     // Style Header Row
@@ -68,10 +148,7 @@ class ExportService {
 
     // Thêm dữ liệu từng Lead
     leads.forEach((lead, idx) => {
-      const row = sheet.addRow({
-        ...lead,
-        tags: lead.tags ? JSON.parse(lead.tags).join(', ') : ''
-      });
+      const row = sheet.addRow(lead);
       // Màu xen kẽ dòng
       if (idx % 2 === 0) {
         row.eachCell((cell) => {
@@ -85,7 +162,7 @@ class ExportService {
 
     // Freeze header row
     sheet.views = [{ state: 'frozen', ySplit: 1 }];
-    sheet.autoFilter = 'A1:G1';
+    sheet.autoFilter = 'A1:M1';
 
     const fileName = `leads_${Date.now()}.xlsx`;
     const filePath = path.join(EXPORT_DIR, fileName);
@@ -100,16 +177,11 @@ class ExportService {
    * @returns {string} Đường dẫn file CSV đã xuất
    */
   exportLeadsToCSV() {
-    const leads = db.prepare(`
-      SELECT c.name, c.phone, c.email, c.notes, t.account_id, t.last_activity
-      FROM contacts c
-      JOIN threads t ON c.thread_id = t.id
-      WHERE c.lead_captured = 1
-    `).all();
+    const leads = getLeadRows();
 
-    const header = ['Họ tên,Số điện thoại,Email,Ghi chú,Tài khoản FB,Hoạt động cuối'];
+    const header = ['Họ tên,Biệt danh,Số điện thoại,Email,Địa chỉ,Ghi chú,Trạng thái,Thẻ phân loại,Trường tùy chỉnh,Tài khoản FB,Page,Link FB,Hoạt động cuối'];
     const rows = leads.map((l) =>
-      [l.name, l.phone, l.email, l.notes, l.account_id, l.last_activity]
+      [l.name, l.nickname, l.phone, l.email, l.address, l.notes, l.status_name, l.the_phan_loai, l.truong_tuy_chinh, l.tai_khoan_fb, l.page_name, l.profile_url, l.last_activity]
         .map((v) => `"${(v || '').toString().replace(/"/g, '""')}"`)
         .join(',')
     );

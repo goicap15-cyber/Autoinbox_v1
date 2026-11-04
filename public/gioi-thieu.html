@@ -3,7 +3,101 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Giới thiệu MISSPRICE CRM — Quản lý tin nhắn Facebook & Fanpage</title>
+<title>AdsupCRM — Phần Mềm CRM Quản Lý Tin Nhắn Facebook Cho Doanh Nghiệp</title>
+<meta name="description" content="Phần mềm CRM quản lý tin nhắn Facebook & Fanpage: gom hội thoại về một inbox, trả lời tự động bằng AI, gửi tin hàng loạt, bắt số điện thoại khách, xuất Excel — AdsupCRM.">
+<link rel="canonical" href="https://fbcrm.adsup.vn/">
+<meta name="google-site-verification" content="dW2WhsyRLLknWRWrDuwYoNJD4HfOiM_TIA0_JUjNWk0">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%232563eb'/%3E%3Cpath d='M6 7h12a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-7l-4 3v-3H6a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z' fill='%23fff'/%3E%3C/svg%3E">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="AdsupCRM">
+<meta property="og:locale" content="vi_VN">
+<meta property="og:url" content="https://fbcrm.adsup.vn/">
+<meta property="og:title" content="AdsupCRM — Phần Mềm CRM Quản Lý Tin Nhắn Facebook Cho Doanh Nghiệp">
+<meta property="og:description" content="Gom mọi tin nhắn Facebook & Fanpage về một màn hình: trả lời tự động, gắn nhãn khách, gửi tin hàng loạt, thống kê phản hồi.">
+<meta property="og:image" content="https://fbcrm.adsup.vn/gioi-thieu/inbox.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="AdsupCRM — Phần Mềm CRM Quản Lý Tin Nhắn Facebook Cho Doanh Nghiệp">
+<meta name="twitter:description" content="Gom mọi tin nhắn Facebook & Fanpage về một màn hình: trả lời tự động, gắn nhãn khách, gửi tin hàng loạt, thống kê phản hồi.">
+<meta name="twitter:image" content="https://fbcrm.adsup.vn/gioi-thieu/inbox.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "AdsupCRM",
+  "url": "https://fbcrm.adsup.vn/",
+  "applicationCategory": "BusinessApplication",
+  "operatingSystem": "Windows",
+  "description": "Phần mềm CRM quản lý tin nhắn Facebook & Fanpage: gom hội thoại Messenger về một inbox, trả lời tự động bằng AI, gửi tin hàng loạt, xuất dữ liệu Excel/CSV.",
+  "featureList": [
+    "Hộp thư tập trung Messenger cá nhân và Fanpage",
+    "Trả lời tự động theo từ khóa",
+    "Trả lời khách bằng AI (Ollama, OpenAI, Gemini)",
+    "Tự động bắt số điện thoại khách (chuẩn E.164)",
+    "Chiến dịch gửi tin nhắn hàng loạt",
+    "Gắn nhãn, trạng thái và nhắc việc khách hàng",
+    "Thống kê phản hồi chiến dịch",
+    "Xuất dữ liệu Excel/CSV"
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Dữ liệu tin nhắn lưu ở đâu? Có an toàn không?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Toàn bộ hội thoại, khách hàng, cấu hình lưu trong SQLite ngay trên máy chạy CRM — không qua server trung gian nào khác. Bạn có thể xuất ra Excel/CSV bất cứ lúc nào từ bảng thông tin khách." }
+    },
+    {
+      "@type": "Question",
+      "name": "Khách nhắn tài khoản cá nhân có xem được trong CRM không?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Có. Cài extension Chrome kèm theo app, đăng nhập messenger.com — hội thoại cá nhân (kể cả Tin nhắn chờ từ quảng cáo) sẽ đồng bộ về chung inbox và trả lời được ngay trong CRM." }
+    },
+    {
+      "@type": "Question",
+      "name": "Page không gửi được tin, báo \"chưa có Page Access Token\"?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Mở Quản lý, tắt/bật lại kết nối của trang đó để đồng bộ lại token. Đợi trạng thái Hoạt động rồi bấm Lấy hội thoại hoặc bật đồng bộ tự động 2 phút." }
+    },
+    {
+      "@type": "Question",
+      "name": "Số điện thoại khách có được tự lưu không?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Có. Bật Tự động số điện thoại — app quét tin nhắn, nhận diện cả số VN lẫn số quốc tế (chuẩn E.164 như +84…, +81…), lọc số rác rồi tự lưu vào contacts của khách." }
+    },
+    {
+      "@type": "Question",
+      "name": "AI trả lời khách hoạt động thế nào?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Vào Cài đặt AI chọn engine: Local Ollama (chạy trên máy, miễn phí) hoặc OpenAI/Gemini (điền API key). Viết system prompt theo kịch bản bán hàng của bạn để AI trả lời đúng giọng văn." }
+    },
+    {
+      "@type": "Question",
+      "name": "Chiến dịch báo ACCOUNT_NOT_ACTIVE là gì?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Tài khoản Facebook gửi tin chưa kết nối hoặc đã bị ngắt. Vào Quản lý tài khoản, kết nối lại tài khoản tương ứng rồi gửi tiếp." }
+    },
+    {
+      "@type": "Question",
+      "name": "Tài khoản Facebook bị Checkpoint thì làm sao?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Mở Quản lý tài khoản Facebook & Checkpoint, bật Hiện Chrome cho tài khoản đó để mở cửa sổ Facebook và xử lý xác minh/OTP." }
+    },
+    {
+      "@type": "Question",
+      "name": "Máy mới hoặc cài lại máy thì bản quyền thế nào?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Mỗi license có số slot máy cố định. Đổi máy: mở Bản quyền Key → Đăng xuất Key khỏi máy này để giải phóng slot, rồi kích hoạt lại trên máy mới. Cần thêm máy thì mua slot trong Mua License." }
+    },
+    {
+      "@type": "Question",
+      "name": "Quên mật khẩu tài khoản CRM?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Ở màn đăng nhập, bấm Quên mật khẩu? dưới ô mật khẩu và làm theo hướng dẫn, hoặc liên hệ quản trị viên để cấp lại." }
+    },
+    {
+      "@type": "Question",
+      "name": "Gửi tin hàng loạt có bị Facebook khóa không?",
+      "acceptedAnswer": { "@type": "Answer", "text": "CRM gửi tuần tự và nghỉ giữa các tin (mặc định 5 giây). Giữ mức nghỉ hợp lý, không gửi dồn dập để tài khoản an toàn." }
+    }
+  ]
+}
+</script>
 <style>
   :root {
     --bg: #0b1220;
@@ -85,18 +179,49 @@
     -webkit-background-clip: text; background-clip: text; color: transparent;
     margin-bottom: 18px;
   }
-  .hero p.sub { color: var(--muted); font-size: 17px; max-width: 720px; margin: 0 auto 32px; }
+  .hero p.sub { color: var(--muted); font-size: 17px; max-width: 760px; margin: 0 auto 14px; }
+  .hero p.aud { color: #c7d4e8; font-size: 14.5px; max-width: 760px; margin: 0 auto 32px; }
+  .hero p.aud b { color: #fff; }
   .hero .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-  .hero-stats {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 14px; max-width: 780px; margin: 48px auto 0;
+
+  /* ===== Sơ đồ 2 luồng nhận tin ===== */
+  .flow-wrap {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 8px;
   }
-  .hero-stats .stat {
+  .flow-card {
     background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 18px 12px;
+    padding: 24px; position: relative;
   }
-  .hero-stats .stat b { display: block; font-size: 24px; color: #fff; }
-  .hero-stats .stat span { color: var(--muted); font-size: 13.5px; }
+  .flow-card h3 {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 16.5px; color: #fff; margin-bottom: 6px;
+  }
+  .flow-card .f-tag {
+    display: inline-block; font-size: 11.5px; font-weight: 700; letter-spacing: .5px;
+    padding: 3px 10px; border-radius: 999px; margin-bottom: 12px;
+  }
+  .flow-card .f-tag.ext { background: rgba(139,92,246,.14); color: #c4b5fd; }
+  .flow-card .f-tag.page { background: rgba(59,130,246,.14); color: #7db2ff; }
+  .flow-card p { color: var(--muted); font-size: 14px; margin-bottom: 14px; }
+  .flow-steps { list-style: none; }
+  .flow-steps li {
+    display: flex; align-items: flex-start; gap: 10px;
+    color: #c7d4e8; font-size: 13.5px; margin-bottom: 8px;
+  }
+  .flow-steps li b { color: #fff; }
+  .flow-steps .n {
+    flex: none; width: 20px; height: 20px; border-radius: 6px; margin-top: 1px;
+    display: grid; place-items: center; font-size: 11px; font-weight: 700; color: #fff;
+    background: linear-gradient(135deg, var(--blue), var(--purple));
+  }
+  .flow-join { text-align: center; padding: 6px 0; color: var(--muted); font-size: 20px; }
+  .flow-dest {
+    background: linear-gradient(135deg, rgba(59,130,246,.12), rgba(139,92,246,.12));
+    border: 1px solid rgba(59,130,246,.4); border-radius: var(--radius);
+    padding: 20px 24px; text-align: center;
+  }
+  .flow-dest h3 { color: #fff; font-size: 16.5px; margin-bottom: 6px; display: flex; align-items: center; justify-content: center; gap: 10px; }
+  .flow-dest p { color: var(--muted); font-size: 14px; max-width: 720px; margin: 0 auto; }
 
   /* ===== Sections ===== */
   section { max-width: 1140px; margin: 0 auto; padding: 56px 20px; }
@@ -108,36 +233,39 @@
   .sec-head h2 { font-size: clamp(24px, 3vw, 34px); font-weight: 800; color: #fff; }
   .sec-head p { color: var(--muted); margin-top: 10px; max-width: 640px; margin-left: auto; margin-right: auto; }
 
-  .intro-cards {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-    gap: 16px; margin-top: 32px;
-  }
-  .intro-card {
+  /* Feature panels (theo menu app) */
+  .fpanel {
     background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 24px;
+    padding: 26px; margin-bottom: 18px;
   }
-  .intro-card h3 { font-size: 16.5px; color: #fff; margin-bottom: 8px; display: flex; align-items: center; gap: 10px; }
-  .intro-card p { color: var(--muted); font-size: 14.5px; }
-  .intro-card .ico {
-    width: 36px; height: 36px; border-radius: 10px; flex: none;
-    display: grid; place-items: center; background: rgba(59,130,246,.12); color: #7db2ff;
+  .fpanel-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 8px; }
+  .fpanel-head .ico {
+    width: 46px; height: 46px; border-radius: 12px; flex: none;
+    display: grid; place-items: center;
   }
+  .fpanel-head h3 { font-size: 18px; color: #fff; }
+  .fpanel-head .menu-path { font-size: 12.5px; color: #7db2ff; margin-top: 2px; }
+  .fpanel-head .menu-path code {
+    background: var(--bg-soft); border: 1px solid var(--border);
+    padding: 2px 8px; border-radius: 6px; font-size: 12px;
+  }
+  .fpanel > p.fdesc { color: var(--muted); font-size: 14.5px; max-width: 860px; margin-bottom: 18px; }
+  .fpanel ul.fbullets { list-style: none; margin: 0 0 18px; }
+  .fpanel ul.fbullets li {
+    padding-left: 26px; position: relative; margin-bottom: 8px;
+    color: #c7d4e8; font-size: 14px;
+  }
+  .fpanel ul.fbullets li::before {
+    content: ""; position: absolute; left: 4px; top: 8px;
+    width: 9px; height: 9px; border-radius: 3px;
+    background: linear-gradient(135deg, var(--blue), var(--purple));
+  }
+  .fpanel ul.fbullets li b { color: #fff; }
+  .fpanel-shots { display: grid; gap: 16px; }
+  .fpanel-shots.cols-2 { grid-template-columns: 1fr 1fr; }
+  .fpanel-shots.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .fpanel-shots.cols-1 { grid-template-columns: 1fr; }
 
-  /* Features grid */
-  .feat-grid {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(255px, 1fr)); gap: 16px;
-  }
-  .feat {
-    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 24px; transition: transform .15s, border-color .15s;
-  }
-  .feat:hover { transform: translateY(-3px); border-color: var(--blue); }
-  .feat .ico {
-    width: 44px; height: 44px; border-radius: 12px; margin-bottom: 14px;
-    display: grid; place-items: center; font-size: 20px;
-  }
-  .feat h3 { font-size: 16px; color: #fff; margin-bottom: 8px; }
-  .feat p { color: var(--muted); font-size: 14px; }
   .ico-blue { background: rgba(59,130,246,.14); color: #7db2ff; }
   .ico-purple { background: rgba(139,92,246,.14); color: #c4b5fd; }
   .ico-green { background: rgba(34,197,94,.14); color: #86efac; }
@@ -200,20 +328,10 @@
     border-top: 1px solid var(--border); background: #0e1626;
   }
 
-  /* Extras grid */
+  /* Hệ thống grid */
   .extra-grid {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px;
   }
-
-  /* Tips */
-  .tips { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
-  .tip {
-    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 22px;
-  }
-  .tip .t-ico { font-size: 22px; margin-bottom: 10px; }
-  .tip h3 { font-size: 15.5px; color: #fff; margin-bottom: 8px; }
-  .tip p { color: var(--muted); font-size: 14px; }
 
   /* FAQ */
   .faq { max-width: 820px; margin: 0 auto; }
@@ -242,9 +360,6 @@
   @media (prefers-reduced-motion: reduce) {
     .reveal { opacity: 1; transform: none; transition: none; }
   }
-
-  /* Số đếm */
-  .hero-stats .stat b { display: block; font-size: 26px; color: #fff; }
 
   /* Lightbox */
   .shot img { cursor: zoom-in; }
@@ -287,6 +402,9 @@
   @media (max-width: 900px) {
     .step { grid-template-columns: 1fr; gap: 22px; }
     nav { display: none; }
+    .flow-wrap { grid-template-columns: 1fr; }
+    .fpanel-shots.cols-2, .fpanel-shots.cols-3 { grid-template-columns: 1fr; }
+    .fpanel-head { flex-direction: column; }
   }
 </style>
 </head>
@@ -298,13 +416,13 @@
       <span class="mark">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       </span>
-      MISSPRICE CRM
+      AdsupCRM
     </div>
     <nav>
-      <a href="#gioi-thieu">Giới thiệu</a>
+      <a href="#nhan-tin">Nhận tin</a>
       <a href="#chuc-nang">Chức năng</a>
       <a href="#huong-dan">Hướng dẫn</a>
-      <a href="#meo">Mẹo</a>
+      <a href="#he-thong">Hệ thống</a>
       <a href="#faq">FAQ</a>
     </nav>
     <div class="header-actions">
@@ -318,89 +436,229 @@
   <span class="badge">Phần mềm quản lý tin nhắn Facebook &amp; Fanpage</span>
   <h1>Mọi tin nhắn Facebook &amp; Fanpage<br>gọn trên một màn hình</h1>
   <p class="sub">
-    MISSPRICE CRM giúp bạn xem, trả lời, gắn nhãn, nhắc việc và gửi tin hàng loạt cho khách hàng
-    từ nhiều tài khoản Facebook và Fanpage — không cần mở nhiều tab, không bỏ sót tin nhắn.
+    AdsupCRM gom hội thoại từ Messenger cá nhân và Fanpage về một inbox duy nhất: xem, trả lời,
+    gắn nhãn, nhắc việc, trả lời tự động bằng AI, bắt số điện thoại và gửi tin hàng loạt — không cần mở nhiều tab.
+  </p>
+  <p class="aud">
+    Dành cho <b>bán hàng online nhiều Fanpage</b>, <b>đội nhóm nhiều nhân viên</b> và <b>người chạy chiến dịch tin nhắn</b>.
+    Dữ liệu lưu ngay trên máy bạn — chủ động, riêng tư.
   </p>
   <div class="cta">
     <a class="btn btn-primary" href="/">Vào CRM ngay →</a>
     <a class="btn btn-ghost" href="#huong-dan">Xem hướng dẫn sử dụng</a>
   </div>
-  <div class="hero-stats" id="heroStats">
-    <div class="stat"><b><span class="count" data-target="7">0</span>+</b><span>tài khoản Facebook quản lý cùng lúc</span></div>
-    <div class="stat"><b><span class="count" data-target="19">0</span>+</b><span>Fanpage kết nối có token</span></div>
-    <div class="stat"><b><span class="count" data-target="8">0</span></b><span>chức năng chính trong app</span></div>
-    <div class="stat"><b><span class="count" data-target="6">0</span></b><span>bước làm quen trên trang này</span></div>
-  </div>
 </div>
 
-<section id="gioi-thieu">
+<section id="nhan-tin">
   <div class="sec-head">
-    <div class="kicker">Giới thiệu</div>
-    <h2>Dành cho ai?</h2>
-    <p>Ứng dụng chạy ngay trên máy tính của bạn, kết nối trực tiếp với Facebook — dữ liệu nằm trên máy, an toàn và chủ động.</p>
+    <div class="kicker">Tổng quan</div>
+    <h2>2 luồng nhận tin về một inbox</h2>
+    <p>CRM nhận tin nhắn từ cả tài khoản Facebook cá nhân lẫn Fanpage — khách nhắn ở đâu cũng về cùng một chỗ.</p>
   </div>
-  <div class="intro-cards">
-    <div class="intro-card reveal">
-      <h3><span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg></span> Bán hàng online</h3>
-      <p>Nhiều Fanpage bán hàng, khách nhắn liên tục — cần một chỗ gom hết hội thoại để không sót khách.</p>
+
+  <div class="flow-wrap">
+    <div class="flow-card reveal">
+      <span class="f-tag ext">LUỒNG 1 · MESSENGER CÁ NHÂN</span>
+      <h3>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:#c4b5fd"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        Khách nhắn tài khoản cá nhân
+      </h3>
+      <p>Hội thoại trên Messenger cá nhân (kể cả khách từ quảng cáo vào tab <b>Tin nhắn chờ</b>).</p>
+      <ul class="flow-steps">
+        <li><span class="n">1</span><span>Cài <b>extension Chrome</b> kèm theo app và đăng nhập messenger.com</span></li>
+        <li><span class="n">2</span><span>Extension đọc hội thoại và <b>đồng bộ về CRM</b> tự động</span></li>
+        <li><span class="n">3</span><span>Có thể <b>gửi tin bằng chính tài khoản cá nhân</b> ngay trong CRM</span></li>
+      </ul>
     </div>
-    <div class="intro-card reveal">
-      <h3><span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span> Đội nhóm chăm sóc khách</h3>
-      <p>Nhiều nhân viên, mỗi người quản lý tài khoản Facebook riêng — phân công rõ ràng, gắn nhãn khách.</p>
+    <div class="flow-card reveal">
+      <span class="f-tag page">LUỒNG 2 · FANPAGE</span>
+      <h3>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:#7db2ff"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>
+        Khách nhắn Fanpage
+      </h3>
+      <p>Hội thoại qua trang Fanpage kinh doanh — nhận bằng Page Access Token.</p>
+      <ul class="flow-steps">
+        <li><span class="n">1</span><span>Mục <b>Quản lý</b> → thêm tài khoản Facebook, bật kết nối Fanpage</span></li>
+        <li><span class="n">2</span><span><b>Đồng bộ token</b> cho từng trang (nút bật/tắt ngay trên danh sách)</span></li>
+        <li><span class="n">3</span><span>Bấm <b>Lấy hội thoại</b> hoặc bật <b>đồng bộ tự động 2 phút</b></span></li>
+      </ul>
     </div>
-    <div class="intro-card reveal">
-      <h3><span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span> Người chạy chiến dịch tin nhắn</h3>
-      <p>Gửi tin giới thiệu chương trình tới danh sách khách, theo dõi ai đã trả lời, ai để lại số điện thoại.</p>
-    </div>
+  </div>
+
+  <div class="flow-join">↓</div>
+  <div class="flow-dest reveal">
+    <h3>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7db2ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      Inbox tập trung trong CRM
+    </h3>
+    <p>Nhãn <b>Chưa xử lý</b>, chip Fanpage gửi tin, thông tin khách bên phải, trả lời tự động, nhắc việc, xuất Excel/CSV — thao tác mọi thứ tại một màn hình.</p>
   </div>
 </section>
 
 <section id="chuc-nang">
   <div class="sec-head">
     <div class="kicker">Chức năng</div>
-    <h2>8 chức năng chính</h2>
-    <p>Tất cả đều thao tác ngay trên giao diện — không cần mở Facebook riêng.</p>
+    <h2>6 nhóm chức năng — đúng theo menu trong app</h2>
+    <p>Mỗi nhóm ứng với một mục trên menu trái của CRM. Bấm vào ảnh để phóng to.</p>
   </div>
-  <div class="feat-grid">
-    <div class="feat reveal">
+
+  <!-- 1. Hội thoại -->
+  <div class="fpanel reveal">
+    <div class="fpanel-head">
       <div class="ico ico-blue"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
-      <h3>1. Hộp thư tập trung</h3>
-      <p>Tin nhắn từ mọi Fanpage và Messenger cá nhân gom về một danh sách, đánh dấu chưa xử lý, tìm kiếm nhanh.</p>
+      <div>
+        <h3>Hội thoại &amp; khách hàng</h3>
+        <div class="menu-path">Menu: <code>Hội thoại</code></div>
+      </div>
     </div>
-    <div class="feat reveal">
-      <div class="ico ico-purple"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
-      <h3>2. Đa tài khoản Facebook</h3>
-      <p>Thêm nhiều tài khoản, quản lý trạng thái kết nối, xử lý Checkpoint/OTP ngay trong app.</p>
+    <p class="fdesc">Hộp thư tập trung 3 cột: danh sách hội thoại bên trái, khung chat ở giữa, thông tin khách bên phải.</p>
+    <ul class="fbullets">
+      <li><b>Chưa xử lý &amp; badge chưa đọc</b> — tin mới nổi lên đầu, không bỏ sót khách.</li>
+      <li><b>Bộ lọc khoảng ngày</b> — lịch tự vẽ 1 nút, chọn từ ngày → đến ngày, chip hiển thị ngay trên danh sách.</li>
+      <li><b>Thông tin khách</b> — nút nhanh <b>Gọi</b> · <b>VIP</b> · <b>Nhắc</b> · <b>Lưu</b>, trạng thái chăm sóc, nhãn nhân viên.</li>
+      <li><b>Xuất Excel/CSV</b> — danh sách lead kèm số điện thoại, Page, thời gian hoạt động.</li>
+    </ul>
+    <div class="fpanel-shots cols-2">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Màn hình chính</span></div>
+        <img src="gioi-thieu/inbox.png" alt="Inbox tập trung 3 cột của CRM">
+        <div class="cap">Hội thoại · Khung chat · Bảng thông tin khách với Excel/CSV.</div>
+      </div>
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Bộ lọc khoảng ngày</span></div>
+        <img src="gioi-thieu/date-filter.png" alt="Bộ lọc hội thoại theo khoảng ngày 19/10 - 25/10">
+        <div class="cap">Chọn khoảng 19/10 – 25/10, danh sách tự lọc theo ngày hoạt động.</div>
+      </div>
     </div>
-    <div class="feat reveal">
-      <div class="ico ico-green"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></div>
-      <h3>3. Kết nối Fanpage tự động</h3>
-      <p>Tạo app &amp; webhook, đồng bộ token cho từng Fanpage, lấy hội thoại về CRM chỉ với vài nút bấm.</p>
+  </div>
+
+  <!-- 2. Tìm kiếm -->
+  <div class="fpanel reveal">
+    <div class="fpanel-head">
+      <div class="ico ico-cyan"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></div>
+      <div>
+        <h3>Tìm kiếm tin nhắn</h3>
+        <div class="menu-path">Menu: <code>Tìm kiếm</code></div>
+      </div>
     </div>
-    <div class="feat reveal">
-      <div class="ico ico-orange"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M14 2h2"/></svg></div>
-      <h3>4. Trả lời tự động</h3>
-      <p>Đặt quy tắc theo từ khóa khách nhắn (ví dụ "báo giá"), tự chèn tên khách vào mẫu tin trả lời.</p>
+    <p class="fdesc">Tìm toàn văn trong mọi tin nhắn đã đồng bộ — không cần nhớ khách, chỉ cần nhớ từ khóa.</p>
+    <ul class="fbullets">
+      <li><b>Tìm theo từ khóa</b> — ví dụ "báo giá" ra mọi hội thoại có nhắc giá.</li>
+      <li><b>Tốc độ cao</b> — đánh chỉ mục FTS5 trong SQLite, kết quả gần như tức thì.</li>
+      <li><b>Bấm kết quả là mở đúng hội thoại</b> — nhảy thẳng tới khách cần tìm.</li>
+    </ul>
+    <div class="fpanel-shots cols-1">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Tìm kiếm toàn bộ tin nhắn</span></div>
+        <img src="gioi-thieu/search.png" alt="Tìm kiếm tin nhắn với từ khóa báo giá">
+        <div class="cap">Từ khóa "báo giá" — kết quả hiển thị hội thoại + nội dung khớp.</div>
+      </div>
     </div>
-    <div class="feat reveal">
+  </div>
+
+  <!-- 3. Tự động hóa -->
+  <div class="fpanel reveal">
+    <div class="fpanel-head">
+      <div class="ico ico-green"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
+      <div>
+        <h3>Tự động hóa phản hồi</h3>
+        <div class="menu-path">Menu: <code>Tự động hóa</code></div>
+      </div>
+    </div>
+    <p class="fdesc">Đặt quy tắc trả lời tự động theo từ khóa khách nhắn — app tự gửi mẫu tin, bạn chỉ lo khách hot.</p>
+    <ul class="fbullets">
+      <li><b>Từ khóa kích hoạt</b> — ví dụ "báo giá", "giá bao nhiêu", "địa chỉ".</li>
+      <li><b>Mẫu tin có biến (ten_khach_hang)</b> — tin gửi đi tự điền tên khách, đọc tự nhiên.</li>
+      <li><b>Công tắc bật/tắt từng quy tắc</b> — dễ thử nghiệm và tắt ngay khi cần.</li>
+    </ul>
+    <div class="fpanel-shots cols-1">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Quản lý phản hồi tự động</span></div>
+        <img src="gioi-thieu/autoreply.png" alt="Modal quản lý phản hồi tự động theo từ khóa">
+        <div class="cap">Từ khóa "báo giá" + mẫu tin chèn tên khách, thêm quy tắc mới chỉ vài bước.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Chiến dịch -->
+  <div class="fpanel reveal">
+    <div class="fpanel-head">
       <div class="ico ico-pink"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg></div>
-      <h3>5. Chiến dịch gửi tin hàng loạt</h3>
-      <p>Chọn hội thoại từ inbox làm snapshot người nhận, soạn tin, gửi tuần tự có nghỉ giữa các tin.</p>
+      <div>
+        <h3>Chiến dịch gửi tin hàng loạt</h3>
+        <div class="menu-path">Menu: <code>Chiến dịch</code></div>
+      </div>
     </div>
-    <div class="feat reveal">
-      <div class="ico ico-cyan"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><path d="M7 7h.01"/></svg></div>
-      <h3>6. Gắn nhãn, trạng thái, nhắc việc</h3>
-      <p>Gắn nhãn khách cho từng nhân viên, đặt trạng thái chăm sóc, đặt nhắc để không quên khách.</p>
+    <p class="fdesc">Gửi một mẫu tin cho nhiều khách cùng lúc với kiểm soát tốc độ, theo dõi kết quả từng người nhận.</p>
+    <ul class="fbullets">
+      <li><b>Snapshot người nhận</b> — chốt danh sách từ inbox trước khi gửi, biết chính xác đã gửi cho ai.</li>
+      <li><b>Cấu hình gửi</b> — thứ tự, nghỉ giữa các tin để tránh bị Facebook hạn chế.</li>
+      <li><b>Thống kê phản hồi</b> — đã gửi · đã trả lời · đã đưa SĐT · tỷ lệ phản hồi từng chiến dịch.</li>
+    </ul>
+    <div class="fpanel-shots cols-3">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Tạo chiến dịch</span></div>
+        <img src="gioi-thieu/campaign-create.png" alt="Form tạo chiến dịch tin nhắn">
+        <div class="cap">Chọn người nhận + soạn tin.</div>
+      </div>
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Chi tiết chiến dịch</span></div>
+        <img src="gioi-thieu/campaign-detail.png" alt="Chi tiết chiến dịch với tiến độ gửi">
+        <div class="cap">Tiến độ + kết quả từng người.</div>
+      </div>
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Thống kê phản hồi</span></div>
+        <img src="gioi-thieu/campaign-stats.png" alt="Thống kê phản hồi chiến dịch">
+        <div class="cap">Đã trả lời · Đã đưa SĐT · Tỷ lệ.</div>
+      </div>
     </div>
-    <div class="feat reveal">
-      <div class="ico ico-blue"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></div>
-      <h3>7. Thống kê phản hồi chiến dịch</h3>
-      <p>Đếm khách đã trả lời, đã để lại số điện thoại, chưa trả lời — đo tỷ lệ phản hồi từng chiến dịch.</p>
+  </div>
+
+  <!-- 5. Cài đặt AI -->
+  <div class="fpanel reveal">
+    <div class="fpanel-head">
+      <div class="ico ico-purple"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 1v3"/><path d="M15 1v3"/><path d="M9 20v3"/><path d="M15 20v3"/><path d="M1 9h3"/><path d="M1 15h3"/><path d="M20 9h3"/><path d="M20 15h3"/></svg></div>
+      <div>
+        <h3>Cài đặt AI (Dual-AI Engine)</h3>
+        <div class="menu-path">Menu: <code>Cài đặt AI</code></div>
+      </div>
     </div>
-    <div class="feat reveal">
-      <div class="ico ico-purple"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></div>
-      <h3>8. Xuất Excel/CSV &amp; quản lý nhân viên</h3>
-      <p>Xuất dữ liệu khách ra Excel/CSV, tạo tài khoản nhân viên và cấp tài khoản Facebook cho từng người.</p>
+    <p class="fdesc">Chọn "bộ não" trả lời khách: AI chạy ngay trên máy bạn hoặc AI đám mây — đổi qua lại bất cứ lúc nào.</p>
+    <ul class="fbullets">
+      <li><b>Local Ollama</b> — chạy trên máy, miễn phí, dữ liệu không rời máy.</li>
+      <li><b>Cloud OpenAI / Cloud Gemini</b> — chất lượng cao khi cần, điền API key là dùng.</li>
+      <li><b>System Prompt riêng</b> — dạy AI giọng văn, kịch bản bán hàng của bạn.</li>
+    </ul>
+    <div class="fpanel-shots cols-1">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Cấu hình Dual-AI Engine</span></div>
+        <img src="gioi-thieu/ai-config.png" alt="Cấu hình AI: Ollama, OpenAI, Gemini">
+        <div class="cap">3 engine + system prompt — bật engine đang dùng ngay trên thẻ.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 6. Tự động số điện thoại -->
+  <div class="fpanel reveal">
+    <div class="fpanel-head">
+      <div class="ico ico-orange"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg></div>
+      <div>
+        <h3>Tự động số điện thoại</h3>
+        <div class="menu-path">Menu: <code>Tự động số điện thoại</code></div>
+      </div>
+    </div>
+    <p class="fdesc">Quét tin nhắn để bắt số điện thoại khách tự động — hết thời gian copy từng số bằng tay.</p>
+    <ul class="fbullets">
+      <li><b>Nhận diện số VN &amp; quốc tế</b> — chuẩn hóa E.164 (ví dụ +81…, +84…), bỏ số điện, số rác.</li>
+      <li><b>Tự lưu vào contacts</b> — số tìm thấy gắn luôn với hội thoại của khách.</li>
+      <li><b>Đồng bộ với chiến dịch</b> — thống kê "Đã đưa SĐT" của chiến dịch dựa trên dữ liệu này.</li>
+    </ul>
+    <div class="fpanel-shots cols-1">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Tự động hoá số điện thoại</span></div>
+        <img src="gioi-thieu/phone-automation.png" alt="Cấu hình tự động bắt số điện thoại từ tin nhắn">
+        <div class="cap">Bật quét số, cấu hình quy tắc nhận diện theo nhu cầu.</div>
+      </div>
     </div>
   </div>
 </section>
@@ -408,7 +666,7 @@
 <section id="huong-dan">
   <div class="sec-head">
     <div class="kicker">Hướng dẫn</div>
-    <h2>6 bước sử dụng cơ bản</h2>
+    <h2>5 bước bắt đầu</h2>
     <p>Làm theo thứ tự từ trên xuống là bắt đầu dùng được ngay.</p>
   </div>
 
@@ -416,24 +674,24 @@
   <div class="step reveal">
     <div>
       <div class="num">1</div>
-      <h3>Mở app &amp; đăng nhập</h3>
-      <p class="desc">Mở ứng dụng MISSPRICE CRM trên máy. Nếu chưa có tài khoản, chuyển sang tab <b>Đăng ký</b> để tạo bằng Gmail + mã OTP.</p>
+      <h3>Đăng nhập / tạo tài khoản</h3>
+      <p class="desc">Mở CRM và đăng nhập. Chưa có tài khoản? Chuyển tab <b>Đăng ký</b>.</p>
       <ul>
-        <li>Nhập <b>tên đăng nhập hoặc Gmail</b> và <b>mật khẩu</b>, bấm <b>Đăng nhập</b>.</li>
-        <li>Đăng ký mới: nhập Gmail → bấm <b>Lấy OTP</b> → nhập 6 số gửi về mail → đặt mật khẩu → <b>Tạo tài khoản</b>.</li>
-        <li>Quên mật khẩu: bấm "Quên mật khẩu?" ngay dưới ô mật khẩu.</li>
+        <li>Nhập <b>tên đăng nhập hoặc Gmail</b> + mật khẩu → <b>Đăng nhập</b>.</li>
+        <li>Đăng ký mới: nhập Gmail → <b>Lấy OTP</b> → nhập 6 số gửi về mail → đặt mật khẩu → <b>Tạo tài khoản</b>.</li>
+        <li>Quên mật khẩu: bấm <b>"Quên mật khẩu?"</b> dưới ô mật khẩu.</li>
       </ul>
     </div>
     <div class="shots">
       <div class="shot">
         <div class="bar"><i></i><i></i><i></i><span>Màn đăng nhập</span></div>
-        <img src="gioi-thieu/login.png" alt="Màn hình đăng nhập MISSPRICE CRM">
+        <img src="gioi-thieu/login.png" alt="Màn hình đăng nhập AdsupCRM">
         <div class="cap">Đăng nhập bằng tài khoản CRM hoặc Gmail.</div>
       </div>
       <div class="shot">
         <div class="bar"><i></i><i></i><i></i><span>Màn đăng ký</span></div>
         <img src="gioi-thieu/register.png" alt="Màn hình đăng ký tài khoản với mã OTP">
-        <div class="cap">Tạo tài khoản nhân viên bằng Gmail + mã OTP.</div>
+        <div class="cap">Tạo tài khoản bằng Gmail + mã OTP.</div>
       </div>
     </div>
   </div>
@@ -442,21 +700,20 @@
   <div class="step reveal">
     <div>
       <div class="num">2</div>
-      <h3>Kết nối Fanpage</h3>
-      <p class="desc">Để đọc và gửi tin qua Fanpage, mở <b>Quản lý → Fanpage</b> và cấp token cho từng trang.</p>
+      <h3>Kết nối 2 luồng nhận tin</h3>
+      <p class="desc">Mở <b>Quản lý</b> ở menu trái để kết nối nguồn tin — Fanpage và Messenger cá nhân.</p>
       <ul>
-        <li>Vào mục <b>Quản lý</b> ở menu trái → chọn <b>Fanpage</b>.</li>
-        <li>Bấm <b>Tạo app &amp; Webhook</b> (hoặc <b>Nhập token</b> nếu đã có sẵn), rồi bấm <b>Đồng bộ</b>.</li>
-        <li>Đợi danh sách hiện <b>19/19 trang có token</b> — nghĩa là tất cả Fanpage đã sẵn sàng.</li>
-        <li>Tích chọn các trang cần quản lý → bấm <b>Lấy hội thoại</b> để kéo tin nhắn về CRM.</li>
+        <li><b>Fanpage</b>: bấm bật kết nối cho từng trang, đợi trạng thái <b>Hoạt động</b>.</li>
+        <li><b>Tài khoản cá nhân</b>: thêm tài khoản Facebook, cài <b>extension Chrome</b> kèm app rồi đăng nhập messenger.com.</li>
+        <li>Bật <b>đồng bộ tự động 2 phút</b> để tin mới tự chảy về inbox.</li>
       </ul>
-      <div class="tip-line">Mẹo: nếu khung chat báo "chưa có Page Access Token", quay lại bước này và đồng bộ lại token.</div>
+      <div class="tip-line">Nếu khung chat báo "chưa có Page Access Token" — quay lại đây, tắt/bật lại kết nối trang đó.</div>
     </div>
     <div class="shots">
       <div class="shot">
-        <div class="bar"><i></i><i></i><i></i><span>Quản lý → Fanpage</span></div>
-        <img src="gioi-thieu/fanpage.png" alt="Danh sách Fanpage đã có token">
-        <div class="cap">Danh sách Fanpage đã có token, tích chọn rồi bấm "Lấy hội thoại".</div>
+        <div class="bar"><i></i><i></i><i></i><span>Quản lý → Tài khoản &amp; Fanpage</span></div>
+        <img src="gioi-thieu/accounts.png" alt="Quản lý tài khoản Facebook và Fanpage đang kết nối">
+        <div class="cap">Danh sách Fanpage đã kết nối, thêm tài khoản &amp; xử lý Checkpoint tại đây.</div>
       </div>
     </div>
   </div>
@@ -466,12 +723,12 @@
     <div>
       <div class="num">3</div>
       <h3>Xem &amp; trả lời tin nhắn</h3>
-      <p class="desc">Màn hình chính chia 3 cột: danh sách hội thoại, khung chat, thông tin khách.</p>
+      <p class="desc">Màn hình chính chia 3 cột — mọi tin từ 2 luồng gom về đây.</p>
       <ul>
-        <li><b>Cột trái</b>: mọi hội thoại từ Fanpage + Messenger, kèm nhãn <b>Chưa xử lý</b>, số tin chưa đọc.</li>
-        <li><b>Khung giữa</b>: trò chuyện với khách — soạn tin, gửi ảnh, gửi emoji như bình thường.</li>
-        <li><b>Cột phải</b>: thông tin khách với các nút nhanh <b>Gọi</b>, <b>VIP</b>, <b>Nhắc</b>, <b>Lưu</b>; xuất danh sách ra <b>Excel/CSV</b>.</li>
-        <li>Tìm khách nhanh bằng ô <b>Tìm kiếm hội thoại</b> phía trên.</li>
+        <li><b>Cột trái</b>: hội thoại mới nổi đầu, nhãn <b>Chưa xử lý</b>, chip Page gửi tin.</li>
+        <li><b>Khung giữa</b>: soạn tin, gửi ảnh/emoji; khách nhắn Page hay cá nhân đều trả lời tại đây.</li>
+        <li><b>Cột phải</b>: thông tin khách — <b>Gọi</b>, <b>VIP</b>, <b>Nhắc</b>, <b>Lưu</b>, xuất <b>Excel/CSV</b>.</li>
+        <li>Lọc theo <b>khoảng ngày</b> hoặc tìm nhanh bằng <b>Tìm kiếm</b>.</li>
       </ul>
     </div>
     <div class="shots">
@@ -487,14 +744,35 @@
   <div class="step reveal">
     <div>
       <div class="num">4</div>
-      <h3>Gửi tin hàng loạt bằng chiến dịch</h3>
-      <p class="desc">Tạo chiến dịch để gửi một mẫu tin cho nhiều khách cùng lúc, có kiểm soát tốc độ.</p>
+      <h3>Bật tự động hoá</h3>
+      <p class="desc">Để app làm việc thay bạn khi vắng mặt: auto-reply, AI và bắt số điện thoại.</p>
       <ul>
-        <li>Menu trái → <b>Chiến dịch</b> → chọn hội thoại từ inbox (danh sách lưu thành <b>snapshot</b> cố định).</li>
-        <li><b>Đặt tên chiến dịch</b> (khách không nhìn thấy tên này) và <b>viết tin nhắn</b> gửi đi.</li>
-        <li><b>Cấu hình gửi</b>: thứ tự tăng dần, nghỉ giữa các tin (ví dụ 5 giây) để tránh bị Facebook hạn chế.</li>
-        <li>Bấm <b>Tạo snapshot</b>, xem lại trước khi gửi thật, rồi theo dõi tiến độ từng người nhận.</li>
+        <li><b>Tự động hóa</b>: quy tắc trả lời theo từ khóa + biến <b>(ten_khach_hang)</b>.</li>
+        <li><b>Cài đặt AI</b>: chọn Ollama (máy mình) hoặc OpenAI/Gemini (đám mây), viết system prompt theo kịch bản bán hàng.</li>
+        <li><b>Tự động số điện thoại</b>: bật quét — số khách (kể cả số quốc tế) tự chuẩn hóa và lưu vào contacts.</li>
       </ul>
+    </div>
+    <div class="shots">
+      <div class="shot">
+        <div class="bar"><i></i><i></i><i></i><span>Quản lý phản hồi tự động</span></div>
+        <img src="gioi-thieu/autoreply.png" alt="Modal quản lý phản hồi tự động">
+        <div class="cap">Từ khóa "báo giá" kích hoạt mẫu tin tự điền tên khách.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bước 5 -->
+  <div class="step reveal">
+    <div>
+      <div class="num">5</div>
+      <h3>Chạy chiến dịch gửi tin hàng loạt</h3>
+      <p class="desc">Menu <b>Chiến dịch</b> — gửi mẫu tin cho nhiều khách, kiểm soát tốc độ và đo kết quả.</p>
+      <ul>
+        <li>Chọn hội thoại từ inbox làm <b>snapshot</b> người nhận cố định.</li>
+        <li>Đặt tên chiến dịch (khách không thấy), soạn tin, cấu hình <b>nghỉ giữa các tin</b> (ví dụ 5 giây).</li>
+        <li>Theo dõi tiến độ từng người nhận và xem <b>thống kê phản hồi</b> sau khi gửi.</li>
+      </ul>
+      <div class="tip-line">Không spam — giữ mức nghỉ hợp lý giữa các tin để tài khoản an toàn.</div>
     </div>
     <div class="shots">
       <div class="shot carousel" id="campaignCarousel">
@@ -521,117 +799,34 @@
       </div>
     </div>
   </div>
-
-  <!-- Bước 5 -->
-  <div class="step reveal">
-    <div>
-      <div class="num">5</div>
-      <h3>Nhắc việc &amp; gắn nhãn khách</h3>
-      <p class="desc">Trên bảng thông tin khách (cột phải), bạn có các công cụ để không bỏ sót khách.</p>
-      <ul>
-        <li>Bấm <b>Nhắc</b> để đặt nhắc việc theo dõi lại khách vào thời điểm cụ thể.</li>
-        <li>Chọn <b>Trạng thái</b> (ví dụ "Chưa đặt", "Đã liên hệ"...) để theo dõi giai đoạn chăm sóc; có thể <b>tạo trạng thái mới</b>.</li>
-        <li>Gắn <b>nhãn nhân viên</b> vào khách để chia việc cho từng người phụ trách.</li>
-        <li>Bấm <b>VIP</b> để đánh dấu khách quan trọng, <b>Lưu</b> để cập nhật thông tin đã sửa.</li>
-      </ul>
-    </div>
-    <div class="shots">
-      <div class="shot">
-        <div class="bar"><i></i><i></i><i></i><span>Bảng thông tin khách</span></div>
-        <img src="gioi-thieu/inbox.png" alt="Bảng thông tin khách với các nút Gọi, VIP, Nhắc, Lưu">
-        <div class="cap">Các nút Gọi · VIP · Nhắc · Lưu nằm ngay đầu bảng thông tin.</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Bước 6 -->
-  <div class="step reveal">
-    <div>
-      <div class="num">6</div>
-      <h3>Trả lời tự động (Auto-reply)</h3>
-      <p class="desc">Đặt quy tắc để CRM tự trả lời khi khách nhắn đúng từ khóa.</p>
-      <ul>
-        <li>Menu trái → <b>Tự động hóa</b> → mở <b>Quản lý phản hồi tự động</b>.</li>
-        <li>Nhập <b>từ khóa kích hoạt</b> (ví dụ: <i>báo giá, địa chỉ, tư vấn...</i>).</li>
-        <li>Soạn <b>nội dung mẫu phản hồi</b>, bấm <b>+ Chèn (ten_khach_hang)</b> để tin tự điền tên khách.</li>
-        <li>Bấm <b>+ Thêm Quy Tắc</b>; mỗi quy tắc có công tắc <b>Đang bật</b> để bật/tắt linh hoạt.</li>
-      </ul>
-    </div>
-    <div class="shots">
-      <div class="shot">
-        <div class="bar"><i></i><i></i><i></i><span>Quản lý phản hồi tự động</span></div>
-        <img src="gioi-thieu/autoreply.png" alt="Modal quản lý phản hồi tự động">
-        <div class="cap">Từ khóa "báo giá" kích hoạt tin trả lời mẫu có tên khách.</div>
-      </div>
-    </div>
-  </div>
 </section>
 
-<section id="tinh-nang-khac">
+<section id="he-thong">
   <div class="sec-head">
-    <div class="kicker">Mở rộng</div>
-    <h2>Quản lý tài khoản &amp; bản quyền</h2>
-    <p>Hai màn hình còn lại trong quá trình vận hành: tài khoản Facebook và license.</p>
+    <div class="kicker">Hệ thống</div>
+    <h2>Tài khoản, nhân viên &amp; bản quyền</h2>
+    <p>Các màn hình vận hành dành cho quản trị viên.</p>
   </div>
   <div class="extra-grid">
     <div class="shot reveal">
       <div class="bar"><i></i><i></i><i></i><span>Quản lý tài khoản Facebook &amp; Checkpoint</span></div>
       <img src="gioi-thieu/accounts.png" alt="Quản lý tài khoản Facebook và Fanpage đang kết nối">
-      <div class="cap">Thêm tài khoản, xem Fanpage đang kết nối, xử lý Checkpoint/OTP.</div>
+      <div class="cap">Thêm tài khoản, bật/tắt Fanpage, xử lý Checkpoint/OTP.</div>
     </div>
     <div class="shot reveal">
-      <div class="bar"><i></i><i></i><i></i><span>Danh sách tài khoản</span></div>
-      <img src="gioi-thieu/account-list.png" alt="Danh sách tài khoản Facebook với nút kết nối">
-      <div class="cap">Mỗi tài khoản có nút "Kết nối Facebook" khi chưa kết nối.</div>
+      <div class="bar"><i></i><i></i><i></i><span>Nhân viên</span></div>
+      <img src="gioi-thieu/employees.png" alt="Quản lý nhân viên và gán tài khoản Facebook">
+      <div class="cap">Tạo tài khoản nhân viên, gán tài khoản Facebook cho từng người.</div>
     </div>
     <div class="shot reveal">
-      <div class="bar"><i></i><i></i><i></i><span>Quản lý bản quyền</span></div>
+      <div class="bar"><i></i><i></i><i></i><span>Bản quyền Key</span></div>
       <img src="gioi-thieu/license-manage.png" alt="Quản lý bản quyền app">
       <div class="cap">Xem thời hạn, số máy (slot), giải phóng máy khi đổi thiết bị.</div>
     </div>
     <div class="shot reveal">
-      <div class="bar"><i></i><i></i><i></i><span>Gia hạn / nâng cấp license</span></div>
-      <img src="gioi-thieu/license-renew.png" alt="Gia hạn license qua VietQR">
-      <div class="cap">Chọn thời hạn, thêm slot máy, thanh toán qua VietQR.</div>
-    </div>
-  </div>
-</section>
-
-<section id="meo">
-  <div class="sec-head">
-    <div class="kicker">Mẹo</div>
-    <h2>Mẹo dùng hiệu quả</h2>
-  </div>
-  <div class="tips">
-    <div class="tip reveal">
-      <div class="t-ico">💬</div>
-      <h3>Viết tin ngắn gọn, thân thiện</h3>
-      <p>Tin nhắn có cảm xúc, rõ ràng dễ được khách đọc và trả lời hơn. Đừng viết quá dài.</p>
-    </div>
-    <div class="tip reveal">
-      <div class="t-ico">🐢</div>
-      <h3>Không spam — nghỉ giữa các tin</h3>
-      <p>Chiến dịch gửi hàng loạt nên để nghỉ ít nhất 5 giây giữa các tin để tránh Facebook hạn chế tài khoản.</p>
-    </div>
-    <div class="tip reveal">
-      <div class="t-ico">🔑</div>
-      <h3>Kiểm tra token trước khi gửi tin Page</h3>
-      <p>Nếu khung chat báo "chưa có Page Access Token", vào Quản lý → Fanpage đồng bộ lại trước khi gửi.</p>
-    </div>
-    <div class="tip reveal">
-      <div class="t-ico">📸</div>
-      <h3>Chụp snapshot trước khi gửi</h3>
-      <p>Danh sách người nhận lưu thành snapshot cố định — gửi xong bạn vẫn biết chính xác đã gửi cho ai.</p>
-    </div>
-    <div class="tip reveal">
-      <div class="t-ico">🛡️</div>
-      <h3>Xử lý Checkpoint kịp thời</h3>
-      <p>Tài khoản bị Facebook hỏi xác minh sẽ hiện trong mục Quản lý tài khoản — xử lý sớm để không gián đoạn nhận tin.</p>
-    </div>
-    <div class="tip reveal">
-      <div class="t-ico">⏰</div>
-      <h3>Dùng nút Nhắc cho khách hẹn lại</h3>
-      <p>Khách nói "để mai em xem" — bấm Nhắc đặt lịch, hôm sau CRM sẽ nhắc bạn theo dõi lại.</p>
+      <div class="bar"><i></i><i></i><i></i><span>Mua License</span></div>
+      <img src="gioi-thieu/license-payment.png" alt="Gia hạn license qua VietQR">
+      <div class="cap">Chọn thời hạn (1–12 tháng), thêm slot máy, thanh toán VietQR.</div>
     </div>
   </div>
 </section>
@@ -643,36 +838,52 @@
   </div>
   <div class="faq">
     <details class="reveal">
+      <summary>Dữ liệu tin nhắn lưu ở đâu? Có an toàn không?</summary>
+      <p>Toàn bộ hội thoại, khách hàng, cấu hình lưu trong <b>SQLite ngay trên máy chạy CRM</b> — không qua server trung gian nào khác. Bạn có thể xuất ra <b>Excel/CSV</b> bất cứ lúc nào từ bảng thông tin khách.</p>
+    </details>
+    <details class="reveal">
+      <summary>Khách nhắn tài khoản cá nhân có xem được trong CRM không?</summary>
+      <p>Có. Cài <b>extension Chrome</b> kèm theo app, đăng nhập messenger.com — hội thoại cá nhân (kể cả <b>Tin nhắn chờ</b> từ quảng cáo) sẽ đồng bộ về chung inbox và trả lời được ngay trong CRM.</p>
+    </details>
+    <details class="reveal">
       <summary>Page không gửi được tin, báo "chưa có Page Access Token"?</summary>
-      <p>Mở <b>Quản lý → Fanpage</b>, bấm <b>Tạo app &amp; Webhook</b> hoặc <b>Nhập token</b>, rồi <b>Đồng bộ</b>. Đợi danh sách hiện "trang có token" rồi bấm <b>Lấy hội thoại</b>.</p>
+      <p>Mở <b>Quản lý</b>, tắt/bật lại kết nối của trang đó để đồng bộ lại token. Đợi trạng thái <b>Hoạt động</b> rồi bấm <b>Lấy hội thoại</b> hoặc bật đồng bộ tự động 2 phút.</p>
+    </details>
+    <details class="reveal">
+      <summary>Số điện thoại khách có được tự lưu không?</summary>
+      <p>Có. Bật <b>Tự động số điện thoại</b> — app quét tin nhắn, nhận diện cả số VN lẫn số quốc tế (chuẩn E.164 như +84…, +81…), lọc số rác rồi tự lưu vào contacts của khách.</p>
+    </details>
+    <details class="reveal">
+      <summary>AI trả lời khách hoạt động thế nào?</summary>
+      <p>Vào <b>Cài đặt AI</b> chọn engine: <b>Local Ollama</b> (chạy trên máy, miễn phí) hoặc <b>OpenAI/Gemini</b> (điền API key). Viết <b>system prompt</b> theo kịch bản bán hàng của bạn để AI trả lời đúng giọng văn.</p>
     </details>
     <details class="reveal">
       <summary>Chiến dịch báo ACCOUNT_NOT_ACTIVE là gì?</summary>
-      <p>Tài khoản Facebook gửi tin chưa kết nối hoặc đã bị ngắt. Vào <b>Quản lý tài khoản</b>, bấm <b>Kết nối Facebook</b> ở tài khoản tương ứng rồi gửi lại.</p>
+      <p>Tài khoản Facebook gửi tin chưa kết nối hoặc đã bị ngắt. Vào <b>Quản lý tài khoản</b>, kết nối lại tài khoản tương ứng rồi gửi tiếp.</p>
     </details>
     <details class="reveal">
       <summary>Tài khoản Facebook bị Checkpoint thì làm sao?</summary>
       <p>Mở <b>Quản lý tài khoản Facebook &amp; Checkpoint</b>, bật <b>Hiện Chrome</b> cho tài khoản đó để mở cửa sổ Facebook và xử lý xác minh/OTP.</p>
     </details>
     <details class="reveal">
+      <summary>Máy mới hoặc cài lại máy thì bản quyền thế nào?</summary>
+      <p>Mỗi license có số <b>slot máy</b> cố định. Đổi máy: mở <b>Bản quyền Key</b> → <b>Đăng xuất Key khỏi máy này</b> để giải phóng slot, rồi kích hoạt lại trên máy mới. Cần thêm máy thì mua slot trong <b>Mua License</b>.</p>
+    </details>
+    <details class="reveal">
       <summary>Quên mật khẩu tài khoản CRM?</summary>
       <p>Ở màn đăng nhập, bấm <b>Quên mật khẩu?</b> dưới ô mật khẩu và làm theo hướng dẫn, hoặc liên hệ quản trị viên để cấp lại.</p>
     </details>
     <details class="reveal">
-      <summary>License hết hạn thì app có dừng không?</summary>
-      <p>Khi gần hết hạn, mở <b>Mua License</b> hoặc <b>Quản lý bản quyền</b> → <b>Mua / Gia hạn bản quyền mới</b> và thanh toán qua VietQR để gia hạn.</p>
-    </details>
-    <details class="reveal">
       <summary>Gửi tin hàng loạt có bị Facebook khóa không?</summary>
-      <p>CRM gửi tuần tự và nghỉ giữa các tin (mặc định 5 giây). Bạn nên giữ mức nghỉ hợp lý, không gửi dồn dập để tài khoản an toàn.</p>
+      <p>CRM gửi tuần tự và <b>nghỉ giữa các tin</b> (mặc định 5 giây). Giữ mức nghỉ hợp lý, không gửi dồn dập để tài khoản an toàn.</p>
     </details>
   </div>
 </section>
 
 <footer>
-  <div class="f-logo">MISSPRICE CRM</div>
+  <div class="f-logo">AdsupCRM</div>
   <p>Phần mềm quản lý tin nhắn Facebook &amp; Fanpage — tài liệu nội bộ đội nhóm.</p>
-  <p style="margin-top:6px;">© 2026 Missprice CRM. Mọi thông tin trong tài liệu chỉ dành cho nội bộ.</p>
+  <p style="margin-top:6px;">© 2026 AdsupCRM. Mọi thông tin trong tài liệu chỉ dành cho nội bộ.</p>
 </footer>
 
 <!-- Lightbox Modal -->
@@ -736,58 +947,7 @@
   }
 })();
 
-// 2. Số đếm chạy tăng dần (Counter Animation)
-(function initCounter() {
-  var counters = document.querySelectorAll('.hero-stats .count');
-  if (!counters.length) return;
-  var started = false;
-
-  function runCounters() {
-    if (started) return;
-    started = true;
-    var duration = 1200;
-    var startTimestamp = null;
-
-    function step(timestamp) {
-      if (!startTimestamp) startTimestamp = timestamp;
-      var progress = Math.min((timestamp - startTimestamp) / duration, 1);
-      var ease = 1 - Math.pow(1 - progress, 3);
-
-      counters.forEach(function (el) {
-        var target = parseInt(el.getAttribute('data-target'), 10) || 0;
-        el.textContent = Math.floor(ease * target);
-      });
-
-      if (progress < 1) {
-        window.requestAnimationFrame(step);
-      } else {
-        counters.forEach(function (el) {
-          el.textContent = el.getAttribute('data-target');
-        });
-      }
-    }
-    window.requestAnimationFrame(step);
-  }
-
-  if ('IntersectionObserver' in window) {
-    var statsEl = document.getElementById('heroStats');
-    if (statsEl) {
-      var obs = new IntersectionObserver(function (entries) {
-        if (entries[0].isIntersecting) {
-          runCounters();
-          obs.disconnect();
-        }
-      }, { threshold: 0.2 });
-      obs.observe(statsEl);
-    } else {
-      runCounters();
-    }
-  } else {
-    runCounters();
-  }
-})();
-
-// 3. Bấm ảnh để phóng to (Lightbox)
+// 2. Bấm ảnh để phóng to (Lightbox)
 (function initLightbox() {
   var lightbox = document.getElementById('lightbox');
   var lbImg = document.getElementById('lbImg');
@@ -849,7 +1009,7 @@
   });
 })();
 
-// 4. Ảnh tự chuyển ở bước 4 (Carousel)
+// 3. Ảnh tự chuyển ở bước 5 (Carousel)
 (function initCarousel() {
   var carousel = document.getElementById('campaignCarousel');
   if (!carousel) return;

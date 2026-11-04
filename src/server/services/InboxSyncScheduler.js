@@ -28,10 +28,11 @@ class InboxSyncScheduler {
     // while leaving Chrome capacity for manual and campaign sends.
     sidebarIntervalMs = 2000,
     sidebarCooldownMs = 1200,
-    // Requests/Spam live on a separate Messenger surface. Poll them often
-    // enough for the waiting tab to feel live without adding work to every
-    // 2s Inbox tick. Scheduled request scans are deliberately less frequent.
-    requestsIntervalMs = 60000,
+    // Requests/Spam live on a separate Messenger surface with its own tab.
+    // 2026-10-16: user muốn tin nhắn chờ về liên tục như hội thoại - lịch 30s
+    // chạy trong chế độ always-on (trước đây chỉ chạy trong cửa sổ 120s sau
+    // khi bấm icon sync).
+    requestsIntervalMs = 30000,
     // Sidebar work is bounded so a stalled Facebook lazy surface cannot hold
     // the extension command lane for minutes.
     sidebarTimeoutMs = 45000,
@@ -184,8 +185,19 @@ class InboxSyncScheduler {
         // Keep the previous five-minute cadence for the expensive full scan
         // even though lightweight realtime ticks now run once per second.
         if (state.autoRealtimeOnly) {
-          const dispatchedAlwaysOn = this.requestSidebarSync(accId, 'scheduler_realtime_always_on', { scanMode: 'realtime' });
-          if (dispatchedAlwaysOn) state.lastRequestsSyncAt = Date.now();
+          // Tin nhắn chờ quét nền liên tục: đến hạn (30s) nhường lượt cho quét
+          // requests thay vì chỉ quét inbox. Không refresh lastRequestsSyncAt
+          // trên lượt realtime nữa - cũ nó là cơ chế ĐÈ requests mãi mãi trong
+          // always-on (reproduce 2026-10-16: tin chờ chỉ về khi bấm sync).
+          const requestsDue = Date.now() - Number(state.lastRequestsSyncAt || 0) >= this.requestsIntervalMs;
+          if (requestsDue) {
+            const dispatchedRequests = this.requestSidebarSync(accId, 'scheduler_requests', { scanMode: 'realtime_requests' });
+            if (dispatchedRequests) {
+              state.lastRequestsSyncAt = Date.now();
+              return;
+            }
+          }
+          this.requestSidebarSync(accId, 'scheduler_realtime_always_on', { scanMode: 'realtime' });
           return;
         }
         const fullDiscoveryTicks = Math.max(1, Math.round(300000 / this.sidebarIntervalMs));
@@ -374,7 +386,9 @@ class InboxSyncScheduler {
     if (state.inFlight && !force) {
       if (scanMode === 'realtime' && state.activeScanMode === 'realtime_requests'
         && state.activeScanReason === 'scheduler_requests'
-        && now - Number(state.lastSidebarSyncAt || 0) >= 8000
+        // 20s: đủ cho 1 vòng quét requests (possible + spam, có navigate) chạy
+        // trọn; nếu scan treo quá ngưỡng thì realtime vẫn giành lane lại.
+        && now - Number(state.lastSidebarSyncAt || 0) >= 20000
         && now - Number(state.lastRealtimePreemptAt || 0) >= 1000) {
         const priorityWs = this.getConnection(accId);
         if (priorityWs?.readyState === 1) {
@@ -446,7 +460,7 @@ class InboxSyncScheduler {
       // alive without changing the normal Inbox realtime budget.
       time_budget_ms: scanMode === 'realtime'
         ? 5000
-        : (scanMode === 'realtime_requests' ? (reason === 'scheduler_requests' ? 12000 : 30000) : 120000)
+        : (scanMode === 'realtime_requests' ? 30000 : 120000)
     } }));
     console.log(`[INBOX_SYNC_THREADS_DISPATCHED] account=${accId} reason=${reason}`);
     return true;

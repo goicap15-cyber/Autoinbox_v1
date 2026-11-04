@@ -1,0 +1,1840 @@
+✔ removing an account clears CRM-owned data and preserves campaign history (16.2432ms)
+✔ removing an unknown account is a no-op (5.827ms)
+✔ campaign image dispatch is stored with contract_version=2 and verified byte_size/checksum (66.6876ms)
+✖ campaign image dispatch with an untampered file dispatches normally (15.1337ms)
+✔ campaign image bytes tampered with after staging fail checksum verification before dispatch (11.1297ms)
+[DB] CSDL SQLite đã sẵn sàng (WAL Mode, FTS5 enabled): C:\Users\Admin\Downloads\Duan\CRM_FB1\data\database.db
+✔ valid image is stored once and invalid media fails before preview (156.0566ms)
+[DB] CSDL SQLite đã sẵn sàng (WAL Mode, FTS5 enabled): C:\Users\Admin\Downloads\Duan\CRM_FB1\data\database.db
+✔ recovery marks orphaned in-flight work unknown without redispatching (89.9086ms)
+✔ audit events retain actor and immutable delivery history (16.4355ms)
+[DB] CSDL SQLite đã sẵn sàng (WAL Mode, FTS5 enabled): C:\Users\Admin\Downloads\Duan\CRM_FB1\data\database.db
+✔ descending campaign dispatches 5 -> 1 exactly once per recipient (219.7901ms)
+✔ descending campaign executes 50 -> 1 with unique attempts (574.8522ms)
+✔ pause waits for in-flight result and resume does not duplicate it (34.2088ms)
+✔ multiple campaign messages stay sequential within one recipient (50.3831ms)
+✔ a single file upload creates no manifest, matching spec 039 behavior (57.1863ms)
+✔ multiple independently-selected files are grouped into one "files" manifest (17.5218ms)
+✔ a folder selection is packaged into one folder_zip manifest with a real, extractable ZIP (83.6421ms)
+✔ a folder selection with a path-traversal entry is rejected before any file is saved (22.2914ms)
+✔ a real multipart/form-data folder upload round-trips through parseMultipartBody into a working ZIP (72.2623ms)
+✔ folder attachment is rejected when CAMPAIGN_FILE_ENABLED is off (24.9074ms)
+✔ removing a folder ZIP attachment also removes its now-empty manifest row (32.0287ms)
+✔ removing one member of a multi-file manifest keeps the manifest for the remaining member (37.6306ms)
+[DB] CSDL SQLite đã sẵn sàng (WAL Mode, FTS5 enabled): C:\Users\Admin\Downloads\Duan\CRM_FB1\data\database.db
+✔ previewing a campaign with a multi-file manifest succeeds (does not require exactly one attachment) (122.9673ms)
+✔ previewing a message with attachments split across two different manifests still fails (42.4454ms)
+✖ a multi-file manifest dispatches as one queue item and the envelope carries every file (40.965ms)
+✔ a tampered file inside a manifest fails the whole dispatch, not just that one file (42.0779ms)
+✔ a personal route without file capability fails closed before a manifest dispatch, independent of image capability (14.2013ms)
+✖ Facebook confirmation of a manifest dispatch flips the queue and pending message to sent exactly once (32.8108ms)
+✔ a caption-only DOM text match never confirms a pending manifest dispatch (must fail safe, not falsely "sent") (23.4192ms)
+✖ retrying a failed manifest dispatch preserves the same route and manifest, and only one attempt is ever active (36.4104ms)
+[DB] CSDL SQLite đã sẵn sàng (WAL Mode, FTS5 enabled): C:\Users\Admin\Downloads\Duan\CRM_FB1\data\database.db
+✔ campaign lifecycle rejects invalid and duplicate transitions atomically (97.7794ms)
+✔ cancel marks only unsent recipients and preserves sent results (15.5375ms)
+✔ incoming customer phone capture moves the campaign contact into Đã có số, so realtime state and status filters use it immediately (31.2327ms)
+✔ a captured phone outside an active configured campaign is stored but does not assign a status (7.4931ms)
+✔ thank_then_stop queues exactly one thank-you, then stops after confirmation (57.8937ms)
+✔ thank_then_stop still stops remaining work when the thank-you fails to send (10.3759ms)
+✔ thank_then_stop falls back to the default thank-you text when none is configured beyond validation minimum (10.2823ms)
+✔ thank-you submission throwing synchronously (e.g. disconnected source) still stops and audits the failure (12.4465ms)
+✔ campaign enqueue atomically persists one queue row and one pending message (23.0426ms)
+✔ campaign enqueue rolls the queue back when pending-message persistence fails (9.8891ms)
+✔ campaign creation stores an immutable server-resolved recipient snapshot (31.5843ms)
+✔ opted-out, missing, and disconnected recipients fail closed with reasons (8.9828ms)
+✔ T008: cleanup script --dry-run in kết quả không làm thay đổi DB (64.4257ms)
+✔ persists a manually entered customer address without overwriting phone or email (227.3299ms)
+✔ persists and retrieves custom fields as JSON array of {label, value} pairs (212.2597ms)
+✔ clears custom fields with empty array without deleting other contact fields (191.9528ms)
+✔ survives database reopen (round-trip reload) (189.6575ms)
+✔ preserves custom_fields independently of tags and status_id updates (203.5362ms)
+✔ normalizes non-array custom_fields at the server boundary instead of storing malformed JSON (193.7485ms)
+✔ defaults custom_fields to empty array when omitted entirely (188.0046ms)
+✔ persists, preserves and clears a CRM-only nickname (200.7839ms)
+✔ rejects nicknames longer than 80 characters (189.4241ms)
+✔ persists and retrieves lead tags as JSON array (212.4955ms)
+✔ clears tags with empty array without deleting other contact fields (188.5059ms)
+✔ survives database reopen (round-trip reload) (188.24ms)
+✔ preserves status_id independently of tags (202.6301ms)
+✔ normalizes non-array tags at the server boundary instead of storing malformed JSON (202.6225ms)
+[DB] CSDL SQLite đã sẵn sàng (WAL Mode, FTS5 enabled): C:\Users\Admin\Downloads\Duan\CRM_FB1\data\database.db
+✔ thread summary exposes tags and contact completeness fields for local filtering (188.9737ms)
+✔ local-first reload retains conversations and deduplicates history (244.7306ms)
+✔ offline-read retains persisted rows after database reopen (184.4629ms)
+✔ cross-thread mid collision stores a per-thread mirror instead of dropping (211.8304ms)
+✔ creates and updates the one active reminder for a conversation (65.1821ms)
+✔ rejects past reminders and notes longer than 200 characters (6.9786ms)
+✔ completes or cancels an active reminder and permits a later replacement (8.1715ms)
+✔ archives locally, restores manually, and restores automatically only when an incoming message arrives (8.1787ms)
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadA attempt=1/3 delay_ms=2000
+[HISTORY_SYNC_RETRY_FIRE] thread=threadA attempt=1/3
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=staleThread attempt=1/3 delay_ms=2000
+[HISTORY_SYNC_RETRY_SKIPPED] thread=staleThread reason=navigated_away requeues_exhausted=0
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadA attempt=1/3 delay_ms=2000
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadA attempt=1/3 delay_ms=2000
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadA attempt=2/3 delay_ms=6000
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadA attempt=3/3 delay_ms=15000
+[HISTORY_SYNC_RETRY_EXHAUSTED] thread=threadA attempts=3
+✔ transient failure retries automatically and stops once it succeeds (1.998ms)
+✔ navigating to a different thread of the same account cancels the pending retry (0.7501ms)
+✔ a fresh manual request for the same thread also cancels its own pending retry (0.518ms)
+✔ retries stop after the max attempt budget is exhausted (0.8625ms)
+✔ Incremental Sync - cursor transitions retain checkpoint on failure (33.9661ms)
+✔ Incremental Sync - unchanged batches report skipped and do not duplicate (24.541ms)
+✔ Incremental Sync - late fallback scan cannot move an accurately timestamped old message (16.0961ms)
+✔ DOM sequence and sender role are persisted independently from timestamps (10.1068ms)
+✔ POST /api/lead-statuses creates new status with canonical uppercase hex color (226.2539ms)
+✔ POST /api/lead-statuses trims whitespace from name and color (170.7969ms)
+✔ POST /api/lead-statuses returns existing status on duplicate name without creating duplicate rows (191.9692ms)
+✔ POST /api/lead-statuses rejects empty/missing name with 400 (187.3158ms)
+✔ POST /api/lead-statuses rejects short hex, alpha hex, named colors, and invalid hex with 400 (175.4011ms)
+✔ US1: creates mixed snapshot with immutable route data and source counts (31.9361ms)
+✔ US2: dispatches Page with page_id and Personal with page_id: null (10.8659ms)
+✔ US2 fail-closed: route mismatch after snapshot fails closed without fallback (8.496ms)
+✔ US4: image capability is evaluated per recipient route without caption downgrade (8.1353ms)
+✔ US4b: file capability is gated independently from image capability per route (8.6448ms)
+✔ legacy campaign compatibility: historical rows without snapshot fields read and function (9.1506ms)
+✔ Delivery Confirmation: campaign queue remains processing on extension dispatch and only becomes sent upon DOM confirmation (14.0465ms)
+[WS] Đã ghép DOM confirmation vào pending outbound queue_def456
+[WS] Đã ghép DOM confirmation vào pending outbound client-media
+✔ matches a pending outbound row by raw content when cleaned content collapsed to empty (74.3381ms)
+✔ confirmPendingOutbound flips the row to sent and is replay-safe (8.9589ms)
+✔ does not match a pending row from a different thread or with unrelated content (6.1461ms)
+✔ does not match a pending row created outside the confirmation window (5.912ms)
+✔ matchPendingImageOutbound finds a recent pending image dispatch (13.8469ms)
+✔ matchPendingImageOutbound does not match a pending image outside the confirmation window (31.8591ms)
+✔ matchPendingImageOutbound does not match a pending image from a different thread (11.9598ms)
+✔ matchPendingImageOutbound finds a pending manifest dispatch (no attachment_id, only manifest_id) (8.0561ms)
+✔ isMediaConfirmationEvent treats media evidence as a confirmation even with a caption present (0.4279ms)
+✔ matches a temporary numeric outbound id to a later official mid by Messenger timestamp (17.3751ms)
+✔ collapses stored numeric and official ids for the same outbound text (8.6501ms)
+✔ merges a Messenger _media companion into its caption/base row (8.157ms)
+✔ merges an official media companion into the existing temporary attachment row (6.6622ms)
+✔ merges a late _media echo into a CRM row already upgraded to another mid id (13.3955ms)
+✔ collapses media companion rows already stored in the database (11.0864ms)
+✔ detects a recent CRM-owned image so Messenger echo can be ignored (8.2887ms)
+✔ typed media correlation never lets an image observation claim a pending video (10.2327ms)
+✔ confirmation collapses an already-persisted Facebook media echo into the CRM-owned row (11.4737ms)
+✔ outgoing message id-upgrade (temp -> permanent) updates in place, no duplicate row (222.7228ms)
+✔ KNOWN LIMITATION: an unrelated identical-content send within the window merges into the wrong row (203.5592ms)
+[PageApi] 📣 Referral quảng cáo: thread=PSID-1 link=https://www.facebook.com/permalink.php?story_fbid=987654321&id=123456789
+[PageApi] 📣 Referral quảng cáo: thread=PSID-2 link=https://www.facebook.com/permalink.php?story_fbid=2&id=1
+[PageApi] 📣 Referral quảng cáo: thread=PSID-3 link=https://www.facebook.com/permalink.php?story_fbid=4&id=3
+✔ buildAdPostLink dựng permalink từ post_id dạng owner_story (2.5311ms)
+✔ buildAdPostLink post_id trần ghép với pageId (0.249ms)
+✔ buildAdPostLink không có post_id thì dùng ad_id vào ads library (0.2584ms)
+✔ buildAdPostLink không đủ dữ liệu trả null (0.3424ms)
+✔ applyAdReferral referral-only event ADS lưu link + title + ảnh lên thread (354.3892ms)
+✔ applyAdReferral referral trong postback và message đều được bắt (204.774ms)
+✔ applyAdReferral bỏ qua referral không phải ADS và event không có referral (172.2556ms)
+✔ repeated identical Page text with distinct fb_message_id persists as separate messages (352.7013ms)
+✔ KNOWN LIMITATION: identical content+sender+timestamp with no fb_message_id still collides (193.5485ms)
+✔ existing message self-corrects is_outgoing on re-scan, but only after two matching disagreements (181.6792ms)
+✔ an agreeing reading clears a pending direction-flip candidate (210.0761ms)
+✔ a differing second disagreement resets the candidate instead of committing (249.7062ms)
+✔ page contact info updates thread name and backfills missing avatar once (189.1261ms)
+✔ upsertThread with no contact_name never blanks an existing value (195.1356ms)
+✔ getThreadSource resolves page_messenger, personal_messenger, and unset correctly (186.4841ms)
+✔ getMessageTimestamps returns only id+timestamp pairs, in order, skipping unidentified rows (174.0861ms)
+✔ container-edge direction classifier returns incoming, outgoing, and unknown without a midpoint (0.5192ms)
+✔ pending Page direction is stored with a compatibility placeholder and promoted in place (177.1692ms)
+✔ unknown Page direction cannot flip an already confirmed message or trigger a duplicate (182.1301ms)
+✔ pending direction never downgrades a confirmed outgoing message during sync replay (189.8032ms)
+✖ T009: luồng xử lý PAGE_THREAD_MESSAGES_SYNCED_V1, ACK và idempotency (55.7243ms)
+✔ captures a valid incoming phone number and fills an empty contact phone (70.4831ms)
+✔ does not capture an invalid-prefix number and does not touch contacts (6.9073ms)
+✔ replaying the same message is idempotent: no duplicate capture row, no duplicate event data (9.0135ms)
+✔ never overwrites a manual/legacy phone - new capture becomes a candidate instead (7.0643ms)
+✔ legacy non-empty phone (phone_source NULL, matching pre-migration rows) is also protected (33.2139ms)
+✔ multiple distinct valid candidates in one message: first fills empty phone, rest become candidates (8.894ms)
+✔ resolves a personal-Messenger bare PSID to the CRM compound thread_id before writing (37.5328ms)
+✔ does not persist candidates when no valid phone number is present (9.5262ms)
+✔ getContactPhoneView reports selected phone, provenance and candidates (34.3008ms)
+✔ ContactPhoneCaptureRepository.setSelectionState rejects an invalid state (39.4181ms)
+✖ Page image queue emits a verified v2 envelope and confirms only from Facebook observation (72.4981ms)
+✔ Page image bytes changed after staging fail checksum verification before extension dispatch (62.6347ms)
+✖ an official media echo already stored by history is collapsed into the pending CRM row (15.9411ms)
+✖ a stale rich-message dispatch is failed during queue recovery (17.2126ms)
+✖ an image attempt ignores a video observation and remains available for the real image confirmation (19.4518ms)
+✔ rich-message schema exposes attachment, attempt, message, and queue contract fields (29.5009ms)
+✔ repositories persist a thread-bound attachment and immutable attempt transitions (7.7855ms)
+✔ rich-message queue uses contract v2 and never writes campaign idempotency_key (6.6321ms)
+✔ outbound attempt idempotency is independent from campaign queue idempotency (6.1585ms)
+✔ resolveInternalThreadId maps a personal thread's bare PSID back to its compound CRM id (6.4826ms)
+[QueueWorker] Dispatching message 046d929d-8e8d-4713-9dd5-7f7300093d68 for account acct-1
+✔ personal_messenger capability reports image enabled only when its own adapter flag is set (56.2333ms)
+✔ personal_messenger image queue builds a v2 envelope with no page_id and confirms only from Facebook observation (72.0944ms)
+✔ an image upload is rejected before queueing when personal_messenger has no image capability (13.6951ms)
+✔ capabilities are derived from the persisted source and connection, not client routing (34.6517ms)
+✔ staged upload is bound to exactly one thread and cannot be discarded through another thread (19.3156ms)
+✔ attachment-only submit is atomic and leaves campaign queue idempotency NULL (23.8949ms)
+✔ repeated first submit returns the same logical message, attempt, and queue (13.6493ms)
+✔ an attachment staged for another thread is rejected before any message is created (14.6805ms)
+✔ retry appends an immutable attempt and repeated retry requests remain idempotent (21.5656ms)
+✔ Unicode emoji sequences and quick-like are persisted byte-for-byte (24.8257ms)
+✔ a new submit gets a real timestamp_ms and sorts after older history, not before it (24.4463ms)
+✔ partial sidebar snapshot preserves other conversations (25.0274ms)
+✔ same Facebook thread id stays isolated between connected accounts (16.9835ms)
+✔ empty sidebar snapshot preserves all conversations (8.3295ms)
+✔ incoming updates do not promote a message request into the normal inbox (7.9118ms)
+✔ an explicit inbox sync can promote a replied message request (5.7376ms)
+✔ a verified Requests surface can repair a legacy Inbox classification (7.8005ms)
+[DB] CSDL SQLite đã sẵn sàng (WAL Mode, FTS5 enabled): C:\Users\Admin\Downloads\Duan\CRM_FB1\data\database.db
+✔ sidebar orders mixed SQLite and ISO activity timestamps by real time (201.2884ms)
+(node:22388) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/advancedConversationFilters.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ advanced conversation filters (Spec 033)
+  ✔ matches OR within groups and AND across groups (2.4528ms)
+  ✔ matches quick filters for due, unread, VIP and needing work (1.5632ms)
+  ✔ keeps an incomplete manual draft while quick filters are toggled (1.7893ms)
+  ✔ derives stable display options from serialized tags (34.7001ms)
+  ✔ supports contact, reminder, archive and activity grouped choices (10.271ms)
+  ✔ requires every valid manual rule and rejects incomplete rules (2.0159ms)
+✔ advanced conversation filters (Spec 033) (58.2918ms)
+(node:7532) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/appSidebarPresentation.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ app sidebar hover presentation (Spec 034)
+  ✔ starts compact and declares the intended close delay (10.9666ms)
+  ✔ opens immediately for pointer entry and cancels a pending close on re-entry (0.729ms)
+  ✔ keeps the overlay visible while keyboard focus is inside (0.5737ms)
+  ✔ collapses only after both pointer and focus leave (0.304ms)
+✔ app sidebar hover presentation (Spec 034) (14.9728ms)
+✔ detectMimeType identifies the initial rich-message formats (2.2457ms)
+✔ validateAttachment identifies an MP4 as video media (2.7834ms)
+✔ validateAttachment trusts MP4 bytes and extension when Chromium declares PDF (0.4544ms)
+✔ sanitizeFilename preserves a recognizable safe Vietnamese filename (0.4317ms)
+✔ checksumSha256 is stable for the same bytes (0.4226ms)
+✔ assertSafePath accepts children and rejects traversal/outside paths (2.2658ms)
+✔ validateAttachment returns normalized metadata for valid content (0.8111ms)
+✔ validateAttachment rejects empty, oversized, mismatched and truncated PDF bytes (0.8223ms)
+✔ validateAttachment accepts a safe chat file from its allow-listed extension (0.3308ms)
+✔ Spec 040 accepts arbitrary declared file types and preserves checksum (5.461ms)
+✔ Spec 040 rejects executable risk before queueing (0.9939ms)
+✔ isSafeArchiveEntryPath accepts normal relative paths, rejects traversal/absolute/drive paths (0.7913ms)
+✔ validateZipArchiveEntries accepts a normal archive and reports entry/byte counts (21.3099ms)
+✔ validateZipArchiveEntries rejects a traversal entry inside the archive (4.9819ms)
+✔ validateZipArchiveEntries rejects a symlink entry inside the archive (6.497ms)
+✔ validateZipArchiveEntries rejects an archive with too many entries (3.1012ms)
+✔ validateAttachmentAsync validates a safe zip file end-to-end and rejects an unsafe one (2.1079ms)
+✔ registration creates STAFF and login creates a hashed server-side session (1262.1539ms)
+✔ registration rejects duplicate names and weak passwords without granting ADMIN (1273.2052ms)
+✔ invalid login is generic and logout revokes the cookie session (1711.4892ms)
+✔ cookie parser preserves values containing equals signs (0.2279ms)
+✔ managed login migrates a valid legacy local account to central auth (1515.2716ms)
+✔ stripBizSentByAttribution removes trailing sent-by attribution (next-line name) (1.8639ms)
+✔ stripBizSentByAttribution removes same-line attribution (0.387ms)
+✔ stripBizSentByAttribution leaves clean text untouched (0.2248ms)
+✔ stripBizSentByAttribution on attribution-only input yields empty (4.1859ms)
+✔ isBizSentByAttributionOnly detects attribution-only rows (0.4468ms)
+✔ mid-text mention of the phrase is not stripped (0.2175ms)
+✔ each Facebook bubble occurrence is preserved even when grouped content repeats (2.482ms)
+✔ history persistence stores a distinct grouped bubble occurrence (50.8973ms)
+✔ identical text, like and video occurrences in one native family are never collapsed (0.5736ms)
+✔ authoritative history promotes a sidebar preview without duplicating it (2.8897ms)
+✔ native and DOM observations of the same text or image reuse one row (3.9518ms)
+✔ stale sidebar regression after a newer outbound is not a new incoming message (1.0393ms)
+✔ detects only a recent exact outbound text as a possible sidebar echo (0.907ms)
+✔ normalization uses DOM sequence inside the same Facebook minute (1.1887ms)
+✔ a later partial scan cannot move an already stored customer text (2.4556ms)
+✔ an authoritative Messenger DOM window repairs stale relative sequence slots (1.4606ms)
+✔ background.js findAttachButtonCenter implements composer proximity and exact label boosting (3.9106ms)
+✔ Scoring logic prioritizes paperclip button near composer over unrelated sidebar video button (0.7446ms)
+✔ stageBusinessSuiteAttachment uses preferDirectInput: false (4.0948ms)
+✔ stageAttachmentViaFileChooser uses 8000ms timeout for file chooser (3.6022ms)
+✔ evaluateBusinessSuiteUploadState returns ready: false while upload is busy or button is disabled (1.7232ms)
+✔ evaluateBusinessSuiteUploadState returns ready: true when upload finishes and send button is enabled (0.6571ms)
+✔ background.js implements waitForBusinessSuiteAttachmentReady and calls it in handleSendPageMessage (5.5508ms)
+✔ background.js checkFacebookCookiesAndRegister guards against infinite loops (4.2899ms)
+✔ call owned by the logged-in account is outgoing (1.6371ms)
+✔ call owned by the other participant is incoming (0.4396ms)
+✔ new Messenger timed accessibility format identifies both sides (0.4458ms)
+✔ unrelated labels do not override avatar or geometry fallback (0.215ms)
+✔ deduplicates one outgoing call action during the cooldown (1.4549ms)
+✔ deduplicates incoming ringing across profiles by caller when thread is unknown (0.3641ms)
+✔ deduplicates an old Messenger window navigated to groupcall and a new popup (3.1569ms)
+✔ keeps the same tab throughout later cleanup ticks (0.3419ms)
+✔ composer dispatch settles a campaign queue and stops its CRM bubble spinner (14.8438ms)
+✔ composer dispatch does not auto-confirm a non-campaign queue (0.901ms)
+[DB] CSDL SQLite đã sẵn sàng (WAL Mode, FTS5 enabled): C:\Users\Admin\Downloads\Duan\CRM_FB1\data\database.db
+✔ validateAndNormalizeMessages accepts 1 to 5 messages and supports empty text for attachment drafts (2.1225ms)
+✔ validateAndNormalizeMessages rejects > 5 messages and empty array with proper error codes (1.5433ms)
+✔ validateAndNormalizeMessages rejects content exceeding 2000 characters with MESSAGE_INVALID (0.5928ms)
+✔ preview enforces text OR valid attachment for every message (236.809ms)
+✔ 2 recipients x 3 messages dispatch sequentially in order: A1, A2, A3, B1, B2, B3 (347.9682ms)
+✔ countAccountSentToday counts in-flight (created, dispatched), unknown, and confirmed attempts (116.9035ms)
+✔ validateReadyForStart reserves quota for concurrent running campaigns on same account (69.905ms)
+✔ createAttempt atomically enforces daily cap inside SQLite transaction (10.3711ms)
+✔ CampaignRunner pauses cleanly when daily cap is reached without infinite loop (36.1789ms)
+✔ Concurrent race condition: simultaneous attempts under tight cap allow only 1 to succeed (14.1264ms)
+✔ validateReadyForStart counts only remaining unsent messages for retry/resumed campaigns (20.2163ms)
+(node:27796) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/campaignPhoneAutomationPresentation.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ recommends Đã có số and safe-stop for a new campaign (4.2176ms)
+✔ does not recommend automation when the reusable status is absent (0.3127ms)
+✔ never overwrites an operator draft after they change policy or target status (2.4689ms)
+✔ createDraft defaults phone_capture_policy to continue (43.8714ms)
+✔ createDraft rejects thank_then_stop without thank-you text (7.7053ms)
+✔ createDraft rejects an invalid policy value (6.8713ms)
+✔ continue policy only audits, never touches recipient status (29.2887ms)
+✔ stop_remaining cancels a pending recipient immediately and applies the configured status (11.9974ms)
+✔ stop_remaining never interrupts a recipient already mid-dispatch, then finalizes once it settles (13.4792ms)
+✔ missing configured status is audited as unavailable but stop still completes (13.4538ms)
+✔ handling the same capture twice never double-applies (idempotent) (11.9694ms)
+✔ a campaign not currently active (completed) is not affected by a new capture (14.6869ms)
+✔ CampaignService forwards phone-capture policy, thank-you text and target status to the persisted draft (20.3444ms)
+✔ CampaignService rejects a target status that no longer exists (8.9316ms)
+✔ counts a newly attributed reply without comparing timestamps (30.914ms)
+✔ a historical message is not counted without a response event (2.2762ms)
+✔ phone statistics use the capture attached to the attributed message (2.8081ms)
+✔ missed calls never count as campaign replies and stale attribution is repaired (3.2077ms)
+✔ outgoing messages never count as campaign replies (1.6981ms)
+✔ records an incoming reply against the latest sent campaign recipient (3.9796ms)
+✔ does not attribute an incoming message to another account (1.5684ms)
+✔ rejects a historical DOM message from before the campaign send minute (1.8908ms)
+✔ accepts the first reply in the same displayed minute as campaign send (1.6622ms)
+[ProcessManager] Chrome account acc-visible ẩn chạy ngầm trong cửa sổ đồng bộ hai phút.
+[ProcessManager] Bật sáng cửa sổ Chrome cho account acc-dead!
+[ProcessManager] Bật sáng cửa sổ Chrome cho account acc-nonexistent!
+✔ ProcessManager: isProcessAlive correctly detects dead pid (3.8921ms)
+✔ ProcessManager: getStatus cleans up dead process entry and returns STOPPED (0.7197ms)
+✔ ProcessManager: getDisplayMode returns display state for alive process, STOPPED for dead (0.4671ms)
+✔ ProcessManager: minimizeAccountForSync preserves BACKGROUND, changes VISIBLE to SYNC_MINIMIZED (68.6045ms)
+✔ ProcessManager: hideAccountProcess returns error for dead process and removes stale entry (0.6552ms)
+✔ ProcessManager: unhideWindow returns error for dead process and removes stale entry (0.9771ms)
+✔ Auto-hide request lifecycle: background=true registers, background=false clears (0.6462ms)
+[ProcessManager] Đã dừng toàn bộ Chrome process tree account acc-dead2 (PID 999999999).
+[ProcessManager] Đã ẩn Chrome của account acc-live chạy ngầm (vẫn sống để extension đồng bộ).
+[ProcessManager] Bật sáng cửa sổ Chrome cho account acc-live!
+[ProcessManager] (Linux/macOS) Vui lòng kiểm tra cửa sổ Chrome PID 11580
+✔ ProcessManager: concurrent hide and unhide serializes and supersedes older operation (13.3948ms)
+✔ ProcessManager: stopAccountProcess supersedes any pending display operation (1.4487ms)
+✔ REGISTER_ACCOUNT auto-hide flow emits ACCOUNT_DISPLAY_CHANGED (2.0567ms)
+✔ CHECKPOINT_DETECTED flow unhides window and emits ACCOUNT_DISPLAY_CHANGED (0.457ms)
+✔ Topbar ChatHeader toggle error handling logic alerts on API failure (0.3353ms)
+✔ closeChromePidsGracefullySync trên non-win32 trả về mảng rỗng (0.4199ms)
+✔ ProcessManager: stopAccountProcess với PID đã chết trả về true và dọn entry (3434.8165ms)
+✔ ProcessManager: hideAccountProcess and unhideWindow success path updates displayMode (1.2943ms)
+(node:32188) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/color.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ color.js utilities
+  ▶ isValidHexColor
+    ✔ accepts valid 6-digit hex colors with leading hash (4.7027ms)
+    ✔ rejects short hex, alpha hex, missing hash, or invalid characters (0.4061ms)
+  ✔ isValidHexColor (6.9178ms)
+  ▶ isCanonicalHexColor
+    ✔ accepts only uppercase #RRGGBB format (0.7278ms)
+    ✔ rejects lowercase hex or unpadded/unhashed strings (0.4245ms)
+  ✔ isCanonicalHexColor (1.7565ms)
+  ▶ normalizeHexColor
+    ✔ normalizes lowercase and unhashed hex into canonical uppercase #RRGGBB (0.7383ms)
+    ✔ returns null for invalid inputs, 3-digit hex, and 8-digit alpha hex (0.3343ms)
+  ✔ normalizeHexColor (1.4844ms)
+  ▶ hexToRgb and rgbToHex
+    ✔ converts hex to RGB components and back (2.1879ms)
+    ✔ returns null for invalid hex in hexToRgb (0.2189ms)
+  ✔ hexToRgb and rgbToHex (2.7687ms)
+  ▶ luminance and contrast
+    ✔ calculates correct relative luminance (0.6709ms)
+    ✔ calculates contrast ratio correctly (3.1363ms)
+    ✔ getContrastTextColor returns dark text for light bg and light text for dark bg (0.565ms)
+  ✔ luminance and contrast (4.8101ms)
+  ▶ getStatusBadgeStyle
+    ✔ returns a solid badge with the higher-contrast text color (0.4571ms)
+    ✔ returns empty object for invalid color (0.2049ms)
+  ✔ getStatusBadgeStyle (0.8549ms)
+✔ color.js utilities (20.6101ms)
+✔ accepting a candidate adopts its normalized value and provenance (26.9576ms)
+✔ accepting a candidate throws PhoneCaptureNotFoundError for an unknown/mismatched id (8.8942ms)
+✔ a manual phone edit that changes the value marks phone_source manual and clears capture provenance (9.0975ms)
+✔ resending the same phone value does not reset provenance to manual (11.5867ms)
+✔ omitting phone entirely preserves existing provenance untouched (12.2863ms)
+✔ accepting a second candidate demotes the previously selected capture (17.0201ms)
+✔ a duplicate incoming candidate (same message, same number) never creates a second capture row (8.363ms)
+(node:30860) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/conversationFilterPopoverLogic.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ ConversationFilterPopover state & lifecycle logic
+  ▶ Draft Isolation
+    ✔ editing draft does not mutate applied filters (27.8837ms)
+    ✔ cancel/dismiss discards draft and keeps applied filters intact (0.5762ms)
+    ✔ clear all resets draft to empty (0.6121ms)
+    ✔ apply sanitizes draft and updates applied state (0.8791ms)
+  ✔ Draft Isolation (32.6465ms)
+✔ ConversationFilterPopover state & lifecycle logic (34.0029ms)
+(node:31376) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/conversationFilters.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ conversationFilters.js pure utility
+  ▶ Basic constructors & counters
+    ✔ createDefaultFilters returns empty state (3.1398ms)
+    ✔ cloneFilters creates independent copy (1.064ms)
+    ✔ normalizes valid source keys and drops malformed or duplicate keys (0.4574ms)
+    ✔ countActiveFilters and hasActiveFilters calculate correctly (0.4995ms)
+    ✔ areFiltersEqual checks order-independent equality (2.88ms)
+  ✔ Basic constructors & counters (10.2579ms)
+  ▶ sanitizeFilters
+    ✔ drops removed sources and statuses safely while retaining valid options (1.2437ms)
+    ✔ always retains core source type keys (PERSONAL and PAGE) regardless of available sources (0.5096ms)
+    ✔ spec 044: drops account: key once the account is removed, mirroring source: keys for Pages (0.5412ms)
+  ✔ sanitizeFilters (2.959ms)
+  ▶ matchesConversationFilters
+    ✔ returns true for empty filters (5.3248ms)
+    ✔ filters by source type (0.5682ms)
+    ✔ filters by specific source ID (0.3755ms)
+    ✔ spec 044: filters by specific personal account ID (0.3362ms)
+    ✔ OR matching within source group (0.3167ms)
+    ✔ filters by status ID (OR within status group) (0.2438ms)
+    ✔ AND matching across Source and Status groups (0.2682ms)
+    ✔ handles threads with missing or null attributes safely (0.2678ms)
+  ✔ matchesConversationFilters (8.5084ms)
+✔ conversationFilters.js pure utility (27.9965ms)
+(node:23508) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/customFields.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ customFields.js utilities
+  ▶ limit constants
+    ✔ exposes expected limits (1.2497ms)
+  ✔ limit constants (2.8684ms)
+  ▶ normalizeCustomField
+    ✔ trims whitespace on both label and value (3.162ms)
+  ✔ normalizeCustomField (3.6031ms)
+  ▶ parseCustomFields
+    ✔ parses array of {label, value} pairs and trims whitespace (1.0193ms)
+    ✔ parses JSON string representation (0.3111ms)
+    ✔ returns empty array on malformed JSON string without crashing (0.3049ms)
+    ✔ drops malformed entries but keeps valid ones in the same array (0.6723ms)
+    ✔ allows duplicate labels (no dedup, unlike tags) (1.1306ms)
+  ✔ parseCustomFields (4.8878ms)
+  ▶ validateCustomField
+    ✔ accepts valid new field (0.9096ms)
+    ✔ rejects empty label (0.5601ms)
+    ✔ accepts empty value (only label is required) (0.3994ms)
+    ✔ rejects control characters in label or value (3.5369ms)
+    ✔ rejects label exceeding 40 characters (0.4585ms)
+    ✔ rejects value exceeding 200 characters (1.2336ms)
+    ✔ allows duplicate label (unlike tags) (0.5757ms)
+    ✔ rejects addition when already at max 20 fields (0.3373ms)
+  ✔ validateCustomField (10.7529ms)
+  ▶ addCustomField and removeCustomField
+    ✔ adds valid new field to the end (0.5826ms)
+    ✔ removes field by index and preserves the rest (0.3313ms)
+    ✔ remove on out-of-range index returns unchanged list (0.4525ms)
+  ✔ addCustomField and removeCustomField (1.6748ms)
+  ▶ areCustomFieldsEqual
+    ✔ returns true for matching arrays (0.3874ms)
+    ✔ returns false for different contents, order, or lengths (0.4561ms)
+  ✔ areCustomFieldsEqual (1.0524ms)
+✔ customFields.js utilities (26.407ms)
+✔ cleanFacebookProfileUrl cleans numeric profile.php URLs (2.9035ms)
+✔ cleanFacebookProfileUrl cleans vanity username URLs (0.5086ms)
+✔ cleanFacebookProfileUrl rejects Business Suite, system routes, and external links (0.2935ms)
+✔ isProfileLinkIndicator recognizes profile cues in text and href (0.8229ms)
+✔ extractProfileUrlFromElement fallback to numeric threadId when no container exists (0.6707ms)
+✔ ContactService.update persists and retrieves profile_url in SQLite (71.1511ms)
+✔ shouldProbe fires once when dispatches reach the stall limit (2.024ms)
+✔ any sync result resets the stall counter (count=0 results count too) (1.0652ms)
+✔ probe ACK clears probing and the counter (0.9075ms)
+✔ probe timeout ends the cycle; a fresh stall cycle probes again (0.655ms)
+✔ new registration resets everything (0.3756ms)
+✔ accounts are tracked independently and dispatches during probe do not grow the count (0.3475ms)
+✔ invalid account ids are ignored (2.2395ms)
+✔ same message re-scanned with a flipped is_outgoing produces the SAME id (SC-001) (4.3489ms)
+✔ a stable native_id makes the id direction-independent regardless of content/label drift (0.5543ms)
+✔ grouped native bubbles keep the legacy first id and distinguish later bubbles (0.4108ms)
+✔ genuinely different content still produces different ids (no regression, SC-002) (0.3769ms)
+✔ shouldSkipObservation: identical id+direction already forwarded -> skip (0.26ms)
+✔ shouldSkipObservation: same id but direction now disagrees -> do NOT skip (let the correction through, SC-001) (0.5076ms)
+✔ shouldSkipObservation: id never seen before -> do NOT skip (0.2622ms)
+✔ separate physical bubbles with identical content keep separate ids (0.226ms)
+✔ content observer has no delayed startup or thread-change baseline window (3.7587ms)
+✔ reread timer re-parses the exact bubble anchor, not the mutation root (14.7087ms)
+✔ echo suppression exempts rows whose label proves an incoming customer sender (1.5177ms)
+✔ loss-path diagnostics are instrumented for composer-debug (4.2734ms)
+✔ tracker: re-parse với bubble_idx trôi (phantom) bị đánh dấu duplicate (2.4234ms)
+✔ tracker: like-group tích lũy (thêm bản sao giống nhau) KHÔNG bị nuốt (18.9573ms)
+✔ tracker: drift khi batch bị cắt nhỏ (observer bắt node lá) vẫn duplicate (1.041ms)
+✔ tracker: chữ ký KHÁC nhau (direction flip / media hydrate thêm) không bị nuốt (7.6608ms)
+✔ tracker: id không phải mid.* (dom_ hash) đi qua nguyên trạng (2.5432ms)
+✔ tracker: family riêng biệt không ảnh hưởng nhau dù nội dung giống (0.2183ms)
+✔ tracker: markSeen idempotent và resolveBatch chỉ đọc khi chưa markSeen (0.2355ms)
+✔ tracker: content.js mirror đồng bộ với bản testable (3.5029ms)
+[DB] CSDL SQLite đã sẵn sàng (WAL Mode, FTS5 enabled): C:\Users\Admin\Downloads\Duan\CRM_FB1\data\database.db
+✔ company admin assigns accounts and employee only sees assigned accounts (12.4574ms)
+✔ assignment rejects an account from another company (25.8419ms)
+✔ a superseded extension socket cannot delete its healthy replacement (6.8826ms)
+✔ send timeout reports failure without reloading the extension (8.4627ms)
+✔ optional chat prewarm cannot occupy the serialized send chain (5.5429ms)
+✔ direct sends use the original non-destructive websocket wait (4.0483ms)
+✔ an old extension socket cannot clear a newer connected socket (4.4536ms)
+✖ desktop startup never kills Chrome because a worker heartbeat is late (8.4853ms)
+✔ queued media uses the existing websocket without destructive recovery (78.0816ms)
+✔ global phone automation starts disabled and requires a target status to be enabled (15.8604ms)
+✔ enabled global automation marks a genuine captured-phone contact without a campaign (9.9748ms)
+✔ disabled automation stores phone capture but leaves the status unchanged (9.1273ms)
+✔ an active campaign target status explicitly overrides the global target (8.706ms)
+✔ history scraper guards an image timestamp minute from becoming a caption (54.0925ms)
+✔ older-history loader detects a virtual page swap with unchanged scroll geometry (2.633ms)
+✔ personal Messenger history reads emoji image labels before timestamp minute fragments (111.076ms)
+✔ personal Messenger keeps icon-only likes and semantic-only videos (6.0599ms)
+✔ personal Messenger treats glued minute suffixes as timestamp chrome (9.7215ms)
+✔ personal Messenger accepts the exact received-like SVG title inside a clickable bubble (4.361ms)
+✔ realtime sidebar recognizes icon-only Like without relying on unread dot (2.8631ms)
+✔ personal Messenger replaces a timestamp-only SVG row with a Like glyph (4.0655ms)
+✔ history sync rejects DOM results when the tab changes user during parsing (3.3886ms)
+✔ a blank first-open conversation activates history and remains scroll-recoverable (4.2574ms)
+✔ old label format: "Tin nhắn do Bạn gửi lúc..." -> outgoing (no regression) (0.4535ms)
+✔ old label format: "Tin nhắn do <ten khach> gửi lúc..." -> incoming (no regression) (0.6633ms)
+✔ new role=article label matching contact_name -> incoming (0.5441ms)
+✔ new role=article label NOT matching contact_name -> outgoing (exclusion inference) (0.4702ms)
+✔ new role=article label with no contact_name to compare against -> unmatched, caller must skip (0.1764ms)
+✔ empty/null label -> unmatched (0.1325ms)
+✔ name comparison is case-insensitive and trims whitespace (0.0921ms)
+✔ real DOM-captured label from live investigation (2026-08-19): date+comma inside the label must not break sender extraction (0.1247ms)
+✔ real DOM-captured label for a self-sent test message (2026-08-19): "Bạn:" name resolves to outgoing via exclusion (0.0782ms)
+✔ boundary actually reached -> SYNCED (1.686ms)
+✔ crawl stalled but no known boundary yet (no_scroll_growth) -> SYNCED (genuinely no more content to load) (0.3605ms)
+✔ crawl stopped only because it ran out of round budget -> PARTIAL (1.8992ms)
+✔ legacy checkpoint without stop_reason -> SYNCED (backward-compatible, never downgrades old data) (0.3817ms)
+✔ on-demand page remains partial until scrolling reaches the real beginning (0.1985ms)
+✔ round-budget matches the modes actually sent by the server (2.6376ms)
+✔ unknown mode falls back to a safe default instead of silently under-crawling (0.2125ms)
+✔ stop reason prioritizes boundary_reached over no_scroll_growth (0.1508ms)
+✔ stop reason is no_scroll_growth when content genuinely stopped growing (0.1091ms)
+✔ stop reason defaults to max_rounds_hit when the loop just ran out of budget (0.1479ms)
+✔ CRM viewport scroll up stores the mounted page before existing messages (2.38ms)
+✔ CRM viewport scroll down does not classify the page as older history (0.2648ms)
+✔ legacy older history modes remain unchanged (0.443ms)
+✔ server preserves real CRM wheel delta for an older-page request (6.3133ms)
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadA attempt=1/3 delay_ms=5
+[HISTORY_SYNC_RETRY_REQUEUED] thread=threadA reason=navigated_away requeue=1/3
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadC attempt=1/3 delay_ms=5
+✔ navigated_away guard hands the thread to the requeue handler instead of dropping it (77.6279ms)
+[HISTORY_SYNC_RETRY_REQUEUED] thread=threadC reason=navigated_away requeue=1/3
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadC attempt=1/3 delay_ms=5
+[HISTORY_SYNC_RETRY_REQUEUED] thread=threadC reason=navigated_away requeue=2/3
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadC attempt=1/3 delay_ms=5
+[HISTORY_SYNC_RETRY_REQUEUED] thread=threadC reason=navigated_away requeue=3/3
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadC attempt=1/3 delay_ms=5
+[HISTORY_SYNC_RETRY_SKIPPED] thread=threadC reason=navigated_away requeues_exhausted=3
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadC attempt=1/3 delay_ms=5
+[HISTORY_SYNC_RETRY_SKIPPED] thread=threadC reason=navigated_away requeues_exhausted=3
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadD attempt=1/3 delay_ms=5
+✔ requeue is capped at 3 per thread so a permanently failing thread cannot loop forever (265.4248ms)
+[HISTORY_SYNC_RETRY_REQUEUED] thread=threadD reason=navigated_away requeue=1/3
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadD attempt=1/3 delay_ms=5
+[HISTORY_SYNC_RETRY_FIRE] thread=threadD attempt=1/3
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadD attempt=1/3 delay_ms=5
+[HISTORY_SYNC_RETRY_REQUEUED] thread=threadD reason=navigated_away requeue=1/3
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadE attempt=1/3 delay_ms=5
+✔ a retry that actually fires resets the requeue budget for that thread (197.9071ms)
+[HISTORY_SYNC_RETRY_SKIPPED] thread=threadE reason=navigated_away requeues_exhausted=0
+[HISTORY_SYNC_RETRY_SCHEDULED] thread=threadF attempt=1/3 delay_ms=5000
+✔ without a configured handler the guard still skips safely (no crash) (83.8204ms)
+✔ cancelRetry before the timer prevents both fire and requeue (50.3693ms)
+[INBOUND_MEDIA] Hydrated: {
+  message_id: 1,
+  thread_id: 'thread-a',
+  media_type: 'image',
+  duration_ms: 4
+}
+[INBOUND_MEDIA] Hydrated: {
+  message_id: 1,
+  thread_id: 'thread-b',
+  media_type: 'video',
+  duration_ms: 1
+}
+[INBOUND_MEDIA] Hydrated: {
+  message_id: 2,
+  thread_id: 'thread-c',
+  media_type: 'video',
+  duration_ms: 0
+}
+✔ incoming media hydration updates the surviving durable row and coalesces duplicate work (116.7516ms)
+✔ thread hydration selects only missing downloadable media rows (1.3098ms)
+✔ duplicate database rows sharing one video URL download only once (0.9138ms)
+[PAGE_SOURCE] ✅ Tự động tạo page source: src_page_789 (Page 789)
+✖ ensurePageSource binds owner to a pre-existing owner-less row (auto-discovered page) (44.3343ms)
+✔ ensurePageSource never steals an owner that is already bound (1.1588ms)
+✔ ensurePageSource creates a bound ACTIVE row when none exists (1.4033ms)
+[INBOX_SYNC_REGISTER] account=acc interval_ms=2000
+[INBOX_SYNC_THREADS_DISPATCHED] account=acc reason=manual_window_inbox
+[INBOX_SYNC_REQUESTS_DEFER] account=acc reason=manual_window_requests defer=in_flight
+[INBOX_SYNC_WINDOW_STARTED] account=acc duration_ms=60000
+[INBOX_SYNC_WINDOW_STOPPED] account=acc reason=manual
+[INBOX_SYNC_UNREGISTER] account=acc
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=thread reason=crm_scroll_viewport queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=thread reason=crm_scroll_viewport remaining_queue=0
+[INBOX_SYNC_MESSAGES_RESULT] lane=acc account=acc thread=thread
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=thread reason=crm_scroll_viewport queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=thread reason=crm_scroll_viewport remaining_queue=0
+[INBOX_SYNC_MESSAGES_DEFER] account=acc lane=acc thread=thread reason=crm_scroll_viewport defer=in_flight
+[INBOX_SYNC_MESSAGES_DEFER] account=acc lane=acc thread=thread reason=crm_scroll_viewport defer=in_flight
+[INBOX_SYNC_MESSAGES_RESULT] lane=acc account=acc thread=thread
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=thread reason=crm_scroll_viewport_replay queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=thread reason=crm_scroll_viewport_replay remaining_queue=0
+✔ default lightweight inbox fallback targets near-realtime delivery (2.9352ms)
+✔ operator opening a sync window dispatches a deep FULL scan immediately (2026-09-19: bấm sync = quét sâu ngay, không phải realtime nhẹ) (16.2379ms)
+✔ viewport scroll delta reaches the extension dispatcher (2.9432ms)
+[INBOX_SYNC_MESSAGES_RESULT] lane=acc account=acc thread=thread
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=thread reason=first queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=thread reason=first remaining_queue=0
+[INBOX_SYNC_MESSAGES_DEFER] account=acc lane=acc thread=thread reason=changed defer=in_flight
+✔ rapid viewport gestures are accumulated while Messenger sync is in flight (175.3286ms)
+[INBOX_SYNC_MESSAGES_RESULT] lane=acc account=acc thread=thread
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=thread reason=changed_replay queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=thread reason=changed_replay remaining_queue=0
+[INBOX_SYNC_MESSAGES_RESULT] lane=acc account=acc thread=thread
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=one reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=one reason=changed remaining_queue=0
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=two reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_RESULT] lane=acc account=acc thread=one
+✔ in-flight thread change is replayed after the current sync result (62.6549ms)
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=two reason=changed remaining_queue=0
+[INBOX_SYNC_MESSAGES_RESULT] lane=acc account=acc thread=two
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=old reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=old reason=changed remaining_queue=0
+[INBOX_SYNC_MESSAGES_PREEMPTED] account=acc removed=1 requeued=0
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=new reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=new reason=changed remaining_queue=0
+[INBOX_SYNC_MESSAGES_RESULT] lane=acc account=acc thread=new
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=a reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=a reason=changed remaining_queue=0
+[INBOX_SYNC_MESSAGES_PREEMPTED] account=acc removed=1 requeued=0
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=b reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=b reason=changed remaining_queue=0
+[INBOX_SYNC_MESSAGES_PREEMPTED] account=acc removed=1 requeued=0
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=a reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=a reason=changed remaining_queue=0
+[INBOX_SYNC_REGISTER] account=acc interval_ms=2000
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=acc thread=history reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc account=acc thread=history reason=changed remaining_queue=0
+[INBOX_SYNC_THREADS_DISPATCHED] account=acc reason=scheduler_realtime
+[INBOX_SYNC_THREADS_RESULT] account=acc count=0
+[INBOX_SYNC_MESSAGES_RESULT] lane=acc account=acc thread=history
+[INBOX_SYNC_REGISTER] account=acc interval_ms=2000
+[INBOX_SYNC_THREADS_DISPATCHED] account=acc reason=scheduler_requests
+[INBOX_SYNC_THREADS_RESULT] account=acc count=0
+[INBOX_SYNC_UNREGISTER] account=acc
+[INBOX_SYNC_REGISTER] account=acc interval_ms=2000
+[INBOX_SYNC_THREADS_DISPATCHED] account=acc reason=scheduler_requests
+[INBOX_SYNC_PREEMPT_REQUESTS] account=acc
+[INBOX_SYNC_THREADS_RESULT] account=acc count=0
+[INBOX_SYNC_UNREGISTER] account=acc
+[INBOX_SYNC_REGISTER] account=acc interval_ms=2000
+[INBOX_SYNC_THREADS_DISPATCHED] account=acc reason=scheduler_realtime
+[INBOX_SYNC_REQUESTS_DEFER] account=acc reason=crm_waiting_tab defer=in_flight
+[INBOX_SYNC_THREADS_RESULT] account=acc count=0
+✔ account queue remains single-flight while different threads wait (53.8097ms)
+✔ manual navigation can preempt a stale conversation without its late result releasing the new job (13.2658ms)
+✔ high priority navigation can switch away and immediately back despite thread cooldown (0.7899ms)
+✔ realtime sidebar polling continues while history crawl owns the account (0.8082ms)
+✔ lightweight request polling reaches the extension with a bounded budget (3.1811ms)
+✔ scheduled Requests scan yields to realtime while an explicit waiting-tab scan remains protected (0.6052ms)
+[INBOX_SYNC_THREADS_DISPATCHED] account=acc reason=waiting_tab_replay
+[INBOX_SYNC_THREADS_RESULT] account=acc count=0
+[INBOX_SYNC_UNREGISTER] account=acc
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=page:pageA thread=thread_pA reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=page:pageA account=acc thread=thread_pA reason=changed remaining_queue=0
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=page:pageB thread=thread_pB reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=page:pageB account=acc thread=thread_pB reason=changed remaining_queue=0
+[INBOX_SYNC_MESSAGES_RESULT] lane=page:pageA account=acc thread=thread_pA
+[INBOX_SYNC_MESSAGES_RESULT] lane=page:pageB account=acc thread=thread_pB
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=page:pageA thread=pA_1 reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=page:pageA account=acc thread=pA_1 reason=changed remaining_queue=0
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc lane=page:pageA thread=pA_2 reason=changed queue_depth=1
+[INBOX_SYNC_MESSAGES_RESULT] lane=page:pageA account=acc thread=pA_1
+✔ opening the waiting tab queues a request scan behind the active inbox scan (90.7321ms)
+✔ threads from different pages run concurrently in parallel lanes (1.7898ms)
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=page:pageA account=acc thread=pA_2 reason=changed remaining_queue=0
+[INBOX_SYNC_MESSAGES_RESULT] lane=page:pageA account=acc thread=pA_2
+✔ threads from the same page serialize sequentially (single-flight per page) (57.8424ms)
+✔ decline execution never uses the accept-neighbor fallback (2.9694ms)
+✔ decline does not stop ringtone before locating and clicking its own control (2.8874ms)
+✔ decline never silences ringtone before Messenger confirms the action (8.8663ms)
+✔ red decline fallback is independent from Accept (6.4482ms)
+✔ late incoming media is inserted by durable sequence instead of being discarded (2.1911ms)
+✔ history publishes immediately and hydrates media in the background (4.17ms)
+✔ the selected chat always prefers the durable contact avatar (3.2199ms)
+✔ incoming customer media is never discarded by the outgoing anti-ghost guard (3.716ms)
+✔ realtime customer messages survive extension websocket reconnects (3.312ms)
+✔ an already-open Messenger tab can replace a stale content observer (2.2124ms)
+✔ realtime media uses row-scoped sources and every message carries DOM position (4.1744ms)
+✔ backend persists realtime messages in their confirmed DOM slot (31.4719ms)
+✔ history sync repairs stale DOM order and drops clock minute fragments (7.8006ms)
+✖ initial sweep queues each unsynced thread once and remembers completion (110.6351ms)
+✖ forced initial sweep can run again after completion (189.0688ms)
+✖ initial sweep partitions threads into page and personal lanes with priority sorting (68.5472ms)
+✔ initial sweep re-arms automatically when newly discovered threads appear after completion (129.2928ms)
+(node:13272) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/leadStatusColorPickerLogic.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ Lead Status Color Picker UI & State Logic (Spec 022 Phase 7)
+  ▶ Draft vs Committed State Transitions
+    ✔ opening create form initializes committed color to #2684FF and picker closed (1.0423ms)
+    ✔ opening picker initializes draft from committed color (0.2896ms)
+    ✔ canceling or clicking outside discards draft and keeps committed color (0.167ms)
+    ✔ applying picker commits draft to form without triggering API request (0.2126ms)
+    ✔ outer Create action submits committed color and resets all create/picker state (1.6151ms)
+    ✔ contact switching resets create status form and closes color picker (0.2474ms)
+  ✔ Draft vs Committed State Transitions (5.7106ms)
+  ▶ Badge and Selection Rendering
+    ✔ selected custom status uses readable badge styling (0.579ms)
+    ✔ persisted color remains intact after normalization (0.2892ms)
+  ✔ Badge and Selection Rendering (1.1796ms)
+✔ Lead Status Color Picker UI & State Logic (Spec 022 Phase 7) (87.645ms)
+(node:20456) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/leadTagsLogic.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ Lead Tags Logic & State Transitions (Spec 028)
+  ▶ Direct Toggle & Optimistic Rollback
+    ✔ direct toggle updates committed tags immediately (1.9036ms)
+    ✔ direct toggle rolls back on save rejection (0.8801ms)
+  ✔ Direct Toggle & Optimistic Rollback (3.9008ms)
+  ▶ Inline Editor Draft & Apply Lifecycle
+    ✔ three consecutive custom labels accumulate instead of replacing a stale draft (0.361ms)
+    ✔ opening editor copies committedTags to draftTags (0.7722ms)
+    ✔ draft edits do not affect committed tags until apply (0.7771ms)
+    ✔ canceling or escape discards draft without changing committed tags (0.3407ms)
+  ✔ Inline Editor Draft & Apply Lifecycle (2.8626ms)
+  ▶ Contact Switching & Unmount Reset
+    ✔ switching contact resets editor, draft tags, and input errors (0.4868ms)
+  ✔ Contact Switching & Unmount Reset (0.7019ms)
+  ▶ Unknown Legacy Tag Preservation
+    ✔ starter chips and legacy tags render together without dropping legacy tags (0.3033ms)
+  ✔ Unknown Legacy Tag Preservation (0.5354ms)
+✔ Lead Tags Logic & State Transitions (Spec 028) (9.7683ms)
+✔ legacy contact with more than 20 tags cannot add a new tag until one is removed (2.9757ms)
+(node:26368) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/leadVipAction.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ VIP quick action rules (Spec 030)
+  ✔ adds one canonical VIP tag without changing existing tags (7.3844ms)
+  ✔ removes a legacy VIP spelling case-insensitively without changing other tags (0.5545ms)
+  ✔ does not add VIP when the contact is already at the tag limit (0.5055ms)
+  ✔ still allows a VIP removal when legacy data exceeds the tag limit (0.251ms)
+✔ VIP quick action rules (Spec 030) (10.3923ms)
+✔ desktop license startup cannot remain on an infinite loading screen (2.4862ms)
+✔ server license checks have a shorter upstream timeout (3.6235ms)
+✔ local dev flags require an explicit true value (0.9813ms)
+✔ local dev access accepts loopback addresses only (0.2247ms)
+✔ local dev access requires both the flag and a loopback request (0.2115ms)
+✔ sidebar polling is opt-in for one minute and the icon can stop it early (6.2122ms)
+✔ turning polling off closes only discovery and requests tabs (4.0463ms)
+(node:3608) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/src/client/utils/messageDedup.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ hides only a nearby provisional sidebar echo of an outbound text (4.6406ms)
+✔ collapses an exact Messenger _media companion into the base message (2.0203ms)
+✔ does not collapse unrelated images (0.7689ms)
+✔ collapses an optimistic and durable copy of the same outbound attachment (0.7514ms)
+✔ keeps native video confirmation and removes the CRM duplicate (0.7ms)
+✔ keeps ambiguous rapid outgoing videos instead of hiding an intentional send (0.3834ms)
+✔ hides a delayed provisional sidebar echo of the same outbound text (0.3711ms)
+✔ removes a CRM video duplicate even when its Facebook timestamp is stale (0.7269ms)
+✔ legacy messages receive confirmed direction status without changing is_outgoing (11.6905ms)
+✔ keeps one Messenger tab and closes duplicate Messenger tabs (6.9387ms)
+✔ never treats a groupcall as a background Messenger tab (0.3025ms)
+✔ maps registered tabs to independent chat, campaign, discovery and history roles (1.4742ms)
+✔ legacy personal and interaction keys map only to chat (1.1041ms)
+✔ campaign, history and request tabs never forward realtime rows (4.451ms)
+✔ only chat and discovery surfaces forward realtime events (0.2761ms)
+✔ background reuses the stable interaction tab for operator sends (53.4616ms)
+✔ discovery/history automation tabs cannot be adopted as the interaction tab (4.6022ms)
+✔ managed Chrome profiles automatically block native Facebook notifications (4.5671ms)
+✔ T004: kiểm tra blacklist thread_id chặn UNKNOWN_THREAD và sentinel rác (4.4039ms)
+✔ T004: cleanContactName và isInvalidContactName chặn chuỗi lặp lại "Tất cả tin nhắn" (2.2941ms)
+✔ tin không có thời gian hợp lệ được xếp sau mọi tin có thời gian (18.6443ms)
+✔ các tin không thời gian giữ nguyên thứ tự cũ trong nhóm của chúng (5.6912ms)
+✔ live-evidence regression (2026-08-20): a message captured now is NOT stamped with a ~5-hour-stale anchor (2.9788ms)
+✔ a genuinely recent anchor (well within the stale threshold) is still used for extrapolation (no regression) (0.3802ms)
+✔ backward extrapolation (scroll-back history, nextKnownTs but no lastKnownTs) is unaffected by the staleness bound (FR-002) (0.1794ms)
+✔ interpolation between two known anchors is unaffected by the staleness bound (FR-002) (0.1854ms)
+✔ no anchors at all falls back to now-based spacing (existing behavior, unchanged) (0.1635ms)
+✔ outbound state constants expose the safe lifecycle (1.8206ms)
+✔ safe diagnostics remove credentials without mutating input (0.2586ms)
+✔ duplicate history event does not create a second outbound row (163.776ms)
+✔ history replay with a changed synthetic DOM id reuses the existing row (14.2783ms)
+✔ history timestamp never moves a thread backwards or to the current clock (10.3846ms)
+✔ normalizing a multi-page history snapshot removes duplicate ranks and orders old messages first (16.0432ms)
+✔ rich-message multipart parser returns a zero-copy video slice (5.5869ms)
+✔ accepts a raw numeric page id (1.5287ms)
+✔ extracts id from a profile.php?id= link, with or without scheme (0.4562ms)
+✔ extracts id from a generic ?id= query string (0.3324ms)
+✔ returns null for a vanity-name page URL (no numeric id present) (0.2859ms)
+✔ returns null for empty/whitespace-only/missing input (0.2204ms)
+✔ trims surrounding whitespace before checking for a pure numeric id (0.1301ms)
+✔ like button aria-label matching identifies thumbs-up correctly (1.2364ms)
+✔ cleanMessageText normalizes like phrases to 👍 (132.6432ms)
+✔ avatar multi-tier hierarchy prioritizes right details pane over sidebar and header (0.2969ms)
+✔ direction resolution matches contact avatar by name or generic alt (0.2532ms)
+✔ isLikeElementOrWrapper logic identifies thumbs-up inside role="button" message bubble (0.3079ms)
+✔ rawUnits sorting keeps interleaved text and like messages in strict DOM order (0.3495ms)
+✔ like color evidence classifies page yellow/gold like as outgoing and blue like as incoming (36.2451ms)
+✔ deterministic contextual like IDs remain stable across viewport shifts (0.5431ms)
+✔ reconcileBatchWithAnchors preserves exact interleaved order of text and like messages (30.7462ms)
+✔ recognizes the repeated Meta automatic-lead notice despite whitespace/punctuation (1.341ms)
+✔ does not classify a real customer message merely because it has no Facebook id (0.2857ms)
+✔ backend text guard suppresses the Meta notice but preserves genuine phone text (2.0998ms)
+✔ extension boundary uses the same exact suppression while preserving a customer number (5.0762ms)
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc_1 lane=page:page_99 thread=page:page_99:user_123 reason=initial_sweep queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=page:page_99 account=acc_1 thread=page:page_99:user_123 reason=initial_sweep remaining_queue=0
+[INBOX_SYNC_MESSAGES_RESULT] lane=page:page_99 account=acc_1 thread=user_123
+✔ extractBareThreadId extracts the PSID/client thread ID correctly across all namespace formats (1.1785ms)
+✔ PAGE_THREAD_MESSAGES_SYNCED_V1 pipeline with new thread succeeds without foreign key violation (254.5504ms)
+✔ InboxSyncScheduler.markThreadSyncResult finds and releases in-flight page job using bare ID fallback (3.6457ms)
+✔ T001: 1. Accumulator gom trọn vẹn snapshot qua các vòng unmount và dedupe chuẩn (35.5102ms)
+✔ T001: 2. calculateStepDistance tính bước cuộn 70-85% viewport, có min/max an toàn (0.2846ms)
+✔ T001: 3. isMessageLogContainer nhận diện đúng vùng chat chính, loại trừ sidebar/nav (3.3264ms)
+✔ T001: 4. dispatchScrollGestures thực hiện chuỗi fallback cuộn (0.6761ms)
+✔ T001: 5. waitForDomSettle thoát an toàn khi spinner treo và phát hiện growth qua ID (307.9596ms)
+✔ T001: 6. Mutex Manager ngăn 2 crawler chạy song song và hủy khi đổi thread (1.0285ms)
+✔ T001: 7. Realtime Leak Guard khóa luồng NEW_PAGE_MESSAGE_FROM_DOM trong lúc crawl (0.2129ms)
+✔ T001: 8. findPageHistoryScroller chấm điểm và chọn chính xác khung cuộn của Page (0.556ms)
+✔ T001: 9. waitForDomSettle mode older không thoát sớm trước minWaitMs khi chưa có growth hoặc spinner (264.1821ms)
+✔ T001: 10. waitForDomSettle mode older nhận diện spinner xuất hiện rồi biến mất là đã tải xong (415.3449ms)
+✔ T010: caption "video"/"ảnh" của media sống sót qua ingest; duration rác vẫn bị lọc (128.7346ms)
+✔ T011: dom_order không bao giờ ghi đè timestamp đã tồn tại khi cào lại (re-stamp drift) (14.0567ms)
+✔ T012: shouldUpgradeTimestamp chặn drift dom_order nhưng vẫn cho rank cao hơn / giờ chưa có qua (0.2442ms)
+✔ page batch reconcile slots observed rows into DOM order and never moves unobserved rows (15.6884ms)
+✔ page batch reconcile is idempotent and appends new messages after existing DOM order (4.281ms)
+[DB] CSDL SQLite đã sẵn sàng (WAL Mode, FTS5 enabled): C:\Users\Admin\Downloads\Duan\CRM_FB1\data\database.db
+[PAGE_SOURCE] ✅ Tự động tạo page source: src_page_9998887771791458825355 (Tiệm Trà Hoa Quả)
+[PAGE_SOURCE] 🔗 Đã gắn owner 10009998881791458825355 cho source src_page_8887776661791458825363 (trước đây NULL).
+▶ Unit Test: InboxSourceService.ensurePageSource for Auto-Discovery
+  ✔ tạo page source mới thành công không cần token (5.7525ms)
+  ✔ idempotent: gọi lại không bị lỗi và giữ nguyên source (0.5983ms)
+  ✔ tự động gắn owner cho source mồ côi (owner_account_id IS NULL) (0.8117ms)
+✔ Unit Test: InboxSourceService.ensurePageSource for Auto-Discovery (8.6091ms)
+▶ Unit Test: pageDiscovery.cleanPageName
+  ✔ làm sạch tên Page hợp lệ và loại bỏ khoảng trắng / ngoặc kép thừa (1.4417ms)
+  ✔ loại bỏ các tên generic hệ thống hoặc thuần chữ số (2.7994ms)
+✔ Unit Test: pageDiscovery.cleanPageName (6.0848ms)
+▶ Unit Test: pageDiscovery.decodeFbUnicode
+  ✔ giải mã các ký tự escape của Facebook (0.5087ms)
+✔ Unit Test: pageDiscovery.decodeFbUnicode (1.4293ms)
+▶ Unit Test: pageDiscovery.parsePagesFromHtml
+  ✔ bóc tách Page từ JSON Comet trong thẻ <script data-sjs> (14.8719ms)
+  ✔ bóc tách Page từ cấu trúc delegate_page (chuyển đổi profile) (0.4005ms)
+  ✔ bóc tách bằng regex fallback khi JSON bị nhúng trong chuỗi string JS (0.2449ms)
+  ✔ loại bỏ trùng lặp nếu cùng 1 Page xuất hiện nhiều lần (0.3056ms)
+  ✔ bỏ qua tài khoản cá nhân (User) và trùng với accountId (0.3593ms)
+  ✔ khử trùng lặp NPE Dual ID (Actor ID 6159... và Legacy Page ID 1112...) cho cùng 1 tên Page (0.2585ms)
+✔ Unit Test: pageDiscovery.parsePagesFromHtml (17.4649ms)
+▶ Unit Test: pageDiscovery đọc delegate_page_id dạng CHUỖI (không có object)
+  ✔ page Meditech B chỉ có delegate_page_id chuỗi -> lấy đúng ID page thật, loại profile (0.3915ms)
+  ✔ hai page THẬT trùng tên không bị gộp mất (dedupe theo page-id, không theo tên) (0.3867ms)
+✔ Unit Test: pageDiscovery đọc delegate_page_id dạng CHUỖI (không có object) (1.8967ms)
+▶ Unit Test: pageDiscovery đảo ngược Cổng nhôm đúc 24h (7684 là page thật)
+  ✔ node User có delegate_page object: giữ delegate id, profile alias bị loại (4.1365ms)
+✔ Unit Test: pageDiscovery đảo ngược Cổng nhôm đúc 24h (7684 là page thật) (4.4847ms)
+✔ T005: ghép batch lịch sử cũ có anchor tin nhắn trùng khớp (2.1483ms)
+✔ T005: batch cuộn tin cũ mất anchor nhưng có boundary_evidence khớp DB (0.2741ms)
+✔ T005: batch cuộn tin cũ mất anchor VÀ thiếu boundary_evidence hợp lệ -> retry_required (0.4557ms)
+✔ T005: hai tin "alo" liên tiếp cùng nội dung không bị merge/gộp nhầm (0.2677ms)
+✔ reconcileBatchWithAnchors chèn tin cũ xuất hiện trước anchor vào đúng vị trí trước anchor trong page_initial (0.2988ms)
+✔ T008: page_scroll_older tra ve reached_top khi khong co tin cu nao moi (overlap) (0.2182ms)
+✔ T008: page_scroll_older loc trung va tra ve reached_top khi incomingBatch deu da co trong DB (0.1632ms)
+✔ T009: normalizeMessageSequence sort on dinh theo phut va khong dung hash ngau nhien (60.312ms)
+✔ T003: trích xuất page_id từ URL query asset_id hoặc path (3.8513ms)
+✔ T003: xác minh quyền sở hữu Page thuộc Account (với mock DB đơn giản) (0.4595ms)
+✔ T003: xác minh quyền sở hữu Page với SQLite CSDL thực tế (fallback threads & auto-backfill) (15.5886ms)
+✔ isActionLabel matches known header action-button labels (1.387ms)
+✔ filterCandidateNames drops action labels, keeps real names, dedupes (1.2179ms)
+✔ label-only header becomes unreadable (empty) -> existing trust-ID policy applies (0.5538ms)
+✔ readable wrong name survives filtering (miswrite protection stays) (1.5794ms)
+✔ pageNameExtractor: cleanPageName loại bỏ rác, URL và giữ tên hợp lệ (2.0474ms)
+✔ pageNameExtractor: extractPageNameFromScripts bóc tách chính xác từ script JSON của Meta (0.8628ms)
+✔ pageNameExtractor: extractPageNameFromTitle bóc tách chuẩn cấu trúc title của Meta Business Suite (0.464ms)
+✔ pageNameExtractor: extractPageNameFromDom bóc tách từ switcher DOM (0.342ms)
+✔ pageNameExtractor: detectPageName ưu tiên Scripts -> DOM -> Title (0.431ms)
+[PAGE_SOURCE] ✅ Tự động tạo page source: src_page_123456 (Page 123456)
+[PAGE_SOURCE] 🏷️ Tự động cập nhật display_name cho source src_page_123456: "Cà Phê Hà Nội - 299"
+[PAGE_SOURCE] ✅ Tự động tạo page source: src_page_999999 (Page 999999)
+[PAGE_SOURCE] 🏷️ Cập nhật display_name cho page 999999: "Page 999999" -> "Tiệm Trà Tháng Năm"
+✔ InboxSourceService: ensurePageSource tạo mới với fallback name và cập nhật khi có pageName (15.5386ms)
+✔ InboxSourceService: updatePageDisplayName cập nhật tên thật và bỏ qua tên không hợp lệ (31.4694ms)
+✔ T001: bóc tách timestamp từ data-utime hoặc time[datetime] (1.6782ms)
+✔ T001: bóc tách timestamp từ aria-label và data-tooltip-content (1.4083ms)
+✔ T001: bóc tách separator + bubble clock tiếng Việt & Anh (1.1028ms)
+✔ T001: bóc tách separator dạng gộp thời gian + thứ/ngày của Meta Business Suite (2.0114ms)
+✔ T001: trả về timestamp_ms = 0 và unknown khi không có bằng chứng thời gian (1.8087ms)
+✔ T002: Video player duration text (0:00 / 0:19, 0:03, 0:19) không bị nhận nhầm thành date separator (0.3367ms)
+✔ T-Sep: parseDateSeparator đọc DD/MM/YYYY (kèm và không kèm giờ) (0.4974ms)
+✔ T-Sep: regression các format đã hoạt động (14:53 T7, Hôm Nay, video guard) (0.2679ms)
+✔ T-Sep: giờ tương đối (N phút / N giờ / N ngày) (0.5746ms)
+✔ T-Sep: Thứ 2 dạng số (digit weekday) parse được (0.6902ms)
+✔ T002: getTimestampRank đánh giá chuẩn xác thang điểm từ 1 đến 6 (1.018ms)
+✔ T002: Nguồn cấp cao hơn nâng cấp nguồn cấp thấp hơn (0.2996ms)
+✔ T002: Nguồn cùng cấp hoặc cấp thấp hơn không được phép ghi đè (0.1658ms)
+✔ T002: upgradeMessageTimestamp cập nhật timestamp trong CSDL khi source cao hơn (82.8236ms)
+✔ pageVideoDetector - phát hiện thẻ <video> có direct src (4.1696ms)
+✔ pageVideoDetector - phát hiện thẻ <video> có <source src> và poster (0.4499ms)
+✔ pageVideoDetector - phát hiện thẻ link video /reel/ kèm label xem video (0.6711ms)
+✔ pageVideoDetector - bỏ qua cuộc gọi video (call log guard) (0.2051ms)
+✔ pageVideoDetector - trả về isVideo: false cho ảnh thông thường (0.7063ms)
+✔ pageVideoDetector - trả về isVideo: false cho tin nhắn văn bản thông thường (0.3048ms)
+✔ pageVideoUploader - resolvePreferredKind chuẩn xác cho các loại attachment (0.3584ms)
+✔ pageVideoDetector - phát hiện thẻ <video> có src dạng blob: trong Business Suite và lọc sạch thời lượng 0:00 / 0:19 (2.3616ms)
+✔ pageVideoDetector - phát hiện video dạng blob: có caption kèm theo thời lượng (0.2832ms)
+✔ pageVideoDetector - phát hiện video khách gửi có thời lượng 0:00 / 0:03 và bóc tách thumbnail img (0.3616ms)
+✔ pageVideoDetector - phát hiện video khách gửi có style background-image làm poster (0.3549ms)
+✔ pageVideoDetector - extractVideoCdnFromReact trích xuất playable_url từ React Fiber (0.4185ms)
+✔ pageVideoDetector - bóc tách playable_url từ React Fiber khi thẻ <video> chỉ có src dạng blob: (0.2752ms)
+✔ pageVideoDetector - bóc tách preview_url từ React Fiber khi video chỉ có thời lượng 0:00 / 0:03 (0.2138ms)
+✔ pageVideoDetector - ưu tiên lấy link CDN trực tiếp từ thuộc tính DOM data-crm-video-url (0.2631ms)
+✔ pageVideoDetector - lấy link CDN từ resolvedVideoCache khi đã được giải mã (0.4086ms)
+✔ stageBusinessSuiteAttachment uses preferDirectInput: false to trigger trusted file chooser via paperclip (3.8838ms)
+✔ stagePersonalMessengerAttachment uses preferDirectInput: true for ALL kinds (video freeze fix 2026-09-24) (8.7273ms)
+✔ findAttachButtonCenter scores combined photo/video labels positively for video preferredKind (2.8541ms)
+✔ acceptsKind in stageAttachmentViaFileChooser allows wildcard and video mime formats (3.4966ms)
+✔ FbPageVideoUploader correctly resolves and checks video attachments (0.4894ms)
+✔ rewrites a session-only cookie with a far-future expirationDate (16.0244ms)
+✔ leaves an already-persistent cookie untouched (2.2355ms)
+✔ does nothing when the cookie is missing entirely (not logged in yet) (0.2512ms)
+✔ does not throw when chrome.cookies is unavailable (0.3551ms)
+✔ personal Messenger sends are serialized and image work is not detached by a timeout race (5.8719ms)
+✔ personal images prefer the mounted composer file input before chooser interception (4.4822ms)
+✔ failed media draft is isolated before both text and attachment sends (2.609ms)
+✔ composer-dispatched text is persisted as sent before the ACK watchdog can fail it (3.8332ms)
+✔ personal video submission is not poisoned by videos already present in conversation history (3.3518ms)
+✔ a later hydrated observation enriches an existing incoming video row (6.6166ms)
+✔ url-less video hydration stays silent or shows syncing indicator until the real media URL is available (0.6725ms)
+✔ campaign personal sends use durable external thread identity and fail closed on contact mismatch (3.3812ms)
+✔ campaign recipient composer is thread-bound even when selected contacts share the same name (25.8454ms)
+✔ a trusted attachment click is a single submit and history retains url-less media confirmations (11.3247ms)
+✔ composer media confirmation uses the existing outbound correlation path (5.6874ms)
+✔ message_queue migration accepts image/video/file and failed cleanup does not poison the next send (2.82ms)
+✔ hydrated outgoing video confirms pending state without replaying anonymous history or calls (1.5842ms)
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc1 lane=acc1 thread=t1 reason=initial_sweep queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc1 account=acc1 thread=t1 reason=initial_sweep remaining_queue=0
+[INBOX_SYNC_MESSAGES_PREEMPT_REQUEUED] account=acc1 lane=acc1 thread=t1 reason=initial_sweep preempt=1
+[INBOX_SYNC_MESSAGES_PREEMPTED] account=acc1 removed=1 requeued=1
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc1 lane=acc1 thread=t1 reason=initial_sweep queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc1 account=acc1 thread=t1 reason=initial_sweep remaining_queue=0
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc1 lane=acc1 thread=t2 reason=crm_navigation queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc1 account=acc1 thread=t2 reason=crm_navigation remaining_queue=0
+[INBOX_SYNC_MESSAGES_PREEMPTED] account=acc1 removed=1 requeued=0
+✔ preempted background sweep job is re-dispatched instead of being lost (101.5283ms)
+[INBOX_SYNC_MESSAGES_QUEUED] account=acc1 lane=acc1 thread=t3 reason=initial_sweep queue_depth=1
+[INBOX_SYNC_MESSAGES_DISPATCHED] lane=acc1 account=acc1 thread=t3 reason=initial_sweep remaining_queue=0
+[INBOX_SYNC_MESSAGES_PREEMPTED] account=acc1 removed=1 requeued=0
+✔ preempted operator-driven job keeps the old behavior (dropped, not requeued) (82.4697ms)
+✔ history-completed threads are not re-queued after preempt (88.5993ms)
+✔ promoting a pending profile stops the old account process and removes pending alias (3.9594ms)
+✔ a contract_version 1 envelope is never validated (legacy passthrough) (2.5164ms)
+✔ a single attachment envelope validates exactly as before spec 040 (0.4102ms)
+✔ a valid attachment_manifest with several files passes (0.2923ms)
+✔ an empty attachment_manifest is rejected (1.4467ms)
+✔ a manifest with one invalid member is rejected, not silently dropped (1.3797ms)
+✔ an MP4 video attachment is accepted and unsupported video MIME is rejected (0.3251ms)
+✔ a personal_messenger envelope with page_id set is rejected regardless of manifest (0.193ms)
+✔ an envelope with neither content nor attachment nor manifest is rejected (0.1654ms)
+✔ expectedAccountId mismatch is rejected even for a manifest envelope (0.204ms)
+✔ quick_templates schema exists in isolated database (252.6243ms)
+✔ GET returns empty array when no templates exist (304.7115ms)
+✔ POST creates template and GET returns in sorted order (254.9401ms)
+✔ POST rejects empty or whitespace-only content (224.3472ms)
+✔ POST rejects content exceeding 2000 characters (187.9238ms)
+✔ POST rejects duplicate content case-insensitively (ASCII & Vietnamese Unicode) (164.9468ms)
+✔ DELETE returns 404 when ID does not exist (154.2664ms)
+✔ DELETE rejects invalid ID (170.8238ms)
+✔ DELETE successfully removes template and allows clearing to empty array (199.5417ms)
+(node:29316) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/reminderPresentation.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ reminder presentation utilities (Spec 032)
+  ✔ treats active past and current reminders as due but future and invalid values as calm (3.2442ms)
+  ✔ renders Vietnamese urgency boundaries for due now, minutes, hours and days (0.4381ms)
+  ✔ creates an accessible urgency label with optional reminder note (0.3299ms)
+  ✔ moves only due conversations first and preserves order within both groups (2.0062ms)
+✔ reminder presentation utilities (Spec 032) (9.0525ms)
+✔ uses the bundled path for the current platform when it exists on disk (5.292ms)
+✔ falls back to legacyBinChromePath when the new bundled path is missing (no regression, spec 046) (2.5098ms)
+✔ falls back to installed system Chrome or the literal google-chrome command (1.6804ms)
+✔ preferSystemChrome selects Chrome Stable before an available bundled browser (5.6347ms)
+✔ never throws when legacyBinChromePath is omitted entirely (1.7441ms)
+✔ manifest installs the additive sidebar activity observer before the existing content observer (1.5933ms)
+✔ sidebar observer fingerprints changes and debounces mutation bursts (0.7789ms)
+✖ background reuses the existing sidebar parser for a non-terminal partial result (8.7123ms)
+✔ realtime hints update threads without completing or masking the legacy sync job (2.9316ms)
+✔ realtime discovery confirms a stable lazy-load tail before cycling to the top (3.6529ms)
+✔ request polling scans both request buttons in its own lightweight mode (10.7326ms)
+✔ sidebar scroll resolves the semantic left scroller and falls back to a trusted wheel (3.9298ms)
+✔ attachment and missed-call sidebar summaries are signals, not chat bubbles (2.6355ms)
+✔ client normalizes SQLite UTC timestamps in every sidebar ordering path (5.9455ms)
+✔ REST starts bounded background media hydration and downloader follows Facebook redirects (5.4528ms)
+✔ Facebook account avatar is persisted instead of reverting to a letter (10.3729ms)
+✔ accepts an explicitly incoming changed preview even when unread is already cleared (1.6392ms)
+✔ rejects a weak sidebar echo of a recent outbound but keeps strong incoming evidence (0.3595ms)
+✔ explicit outgoing preview wins over a stale unread marker (0.143ms)
+✔ rejects outgoing, unchanged, unknown-direction, and activity previews (0.5065ms)
+✔ server grants weak sidebar previews a one-hour outbound echo lookback (3.0403ms)
+✔ same sidebar content in one thread always has one provisional identity (2.3888ms)
+✔ same content from different users cannot collide (0.3166ms)
+✔ first registration is never in cooldown (1.2838ms)
+✔ a dispatch marks the account in cooldown for the configured window (0.9981ms)
+✔ cooldown is tracked per account, not globally (0.2409ms)
+✔ remainingMs reports how long is left, zero once expired (0.2271ms)
+✔ skips sweep when sidebar preview matches stored last message (2.4102ms)
+✔ skips when preview is a truncated prefix of the stored message (0.2685ms)
+✔ skips when stored is a prefix of the preview (BS shows more text than stored) (0.1852ms)
+✔ never skips unread threads even when preview matches (0.1509ms)
+✔ does not skip when the last message changed (3.0414ms)
+✔ does not skip very short previews (repeated short chats like "ok") (0.4435ms)
+✔ normalizes zero-width chars, whitespace and case before comparing (0.4876ms)
+✔ never skips when preview or stored content is empty (0.3139ms)
+✔ isStaleThreadLastActivity: old last message and not unread -> defer (0.2661ms)
+✔ strips _extension_replay suffix (the mass-failure case) (1.1178ms)
+✔ strips plain _replay suffix (possibly repeated) (0.2524ms)
+✔ leaves allowed base reasons untouched (0.1535ms)
+✔ handles empty and null safely (0.1418ms)
+✔ concurrent callers for one role share exactly one creation promise (7.6154ms)
+✔ inside-lock recheck reuses a tab registered before creation starts (0.6848ms)
+✔ different roles can create independently (2.9359ms)
+✔ failed creation clears the role lock so a later call can retry (0.9842ms)
+✔ keeps one BS tab per page, closes only duplicate messengers, leaves user tabs (4.1282ms)
+✔ closes duplicate BS tab of the same page, keeps registered one (0.4528ms)
+✔ closes transient discovery/requests messenger tabs, keeps working roles (0.263ms)
+✔ never closes protected (marker) tabs and never touches non-extension URLs (0.2621ms)
+✔ unregistered BS tab of an already-covered page is closed, other page kept (0.497ms)
+✔ pickPageTabEviction: evicts oldest-synced inactive page tab when budget reached (0.5095ms)
+✔ pickPageTabEviction: under budget / target has tab / all active -> no eviction (0.2791ms)
+(node:13556) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/Admin/Downloads/Duan/CRM_FB1/tests/unit/tags.test.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\Admin\Downloads\Duan\CRM_FB1\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+▶ tags.js utilities
+  ▶ STARTER_TAGS constants
+    ✔ exposes expected starter tags and limits (1.4664ms)
+  ✔ STARTER_TAGS constants (2.3136ms)
+  ▶ normalizeTag and tagKey
+    ✔ trims whitespace and folds case correctly (0.2058ms)
+  ✔ normalizeTag and tagKey (0.4067ms)
+  ▶ parseTags
+    ✔ parses array of strings and trims whitespace (0.375ms)
+    ✔ parses JSON string representation (0.2465ms)
+    ✔ returns empty array on malformed JSON string without crashing (0.216ms)
+    ✔ deduplicates case-insensitively and preserves first display casing (0.347ms)
+    ✔ preserves long and over-limit legacy lists without truncating data (0.4385ms)
+    ✔ treats non-JSON stored strings as malformed legacy data (0.3372ms)
+    ✔ preserves arbitrary unknown legacy tags (0.2001ms)
+  ✔ parseTags (6.6606ms)
+  ▶ hasTag
+    ✔ checks tag membership case-insensitively (0.3038ms)
+  ✔ hasTag (0.4473ms)
+  ▶ validateTag
+    ✔ accepts valid new tag (0.3527ms)
+    ✔ rejects empty or whitespace-only tag (0.2097ms)
+    ✔ rejects control characters (0.1263ms)
+    ✔ rejects tag exceeding 40 characters (0.1527ms)
+    ✔ rejects duplicate tag case-insensitively (0.35ms)
+    ✔ rejects addition when already at max 20 tags (3.4602ms)
+  ✔ validateTag (5.1393ms)
+  ▶ addTag and removeTag
+    ✔ adds valid new tag to the end (0.539ms)
+    ✔ removes tag case-insensitively and preserves other tags (0.166ms)
+    ✔ remove on non-existent tag returns unchanged list (0.0762ms)
+  ✔ addTag and removeTag (1.0087ms)
+  ▶ toggleTag
+    ✔ removes tag if already present (0.1521ms)
+    ✔ adds tag if not present (0.0962ms)
+  ✔ toggleTag (0.3724ms)
+  ▶ areTagsEqual
+    ✔ returns true for matching arrays (0.1494ms)
+    ✔ returns false for different contents or lengths (0.0731ms)
+  ✔ areTagsEqual (0.3044ms)
+✔ tags.js utilities (17.7311ms)
+✔ strips an unread divider concatenated with the first real message (35.5299ms)
+✔ rejects relative-time metadata mounted beside Messenger bubbles (2.0002ms)
+✔ strips a Messenger delivery badge glued directly to message text (4.8792ms)
+✔ strips Vietnamese accessibility label without losing message content (0.3914ms)
+✔ strips English accessibility label without losing message content (0.3015ms)
+✔ identifies and rejects system labels as contact names (1.496ms)
+✔ rejects the E2EE "restore chat history" interstitial as message content, not just Vietnamese wording (2026-08-20 live capture) (0.5913ms)
+✔ rejects short day-of-week/relative-day separators leaking in as fake messages (spec 047) (0.3547ms)
+✔ rejects the Business Suite "add a personalized message" CTA leaking in as a fake Page message (2026-08-20 live report) (0.4446ms)
+✔ rejects standalone and trailing time/date noise fragments (0.3611ms)
+✔ rejects standalone middle dots, bullets, and separator noise leaking in from Messenger sidebar (0.2384ms)
+✔ AI-agent junk: chip đánh giá + notice tiếp quản + zero-width bị lọc (4.3538ms)
+✔ legacy namespaced row keeps its identity when the same page resolves again (109.7478ms)
+✔ a different page for the same bare id mints its own namespaced id (real collision) (1.1284ms)
+✔ bare-first: unbound bare row is adopted instead of minting a duplicate (1.0742ms)
+✔ bare-first: unknown thread resolves to the bare id (0.9167ms)
+✔ personal-bound bare row collides for an incoming page conversation (0.647ms)
+✔ ConversationRepository.upsertThread keeps Page 1 and Page 2 conversations distinct for the same customer (2.3357ms)
+✔ ConversationRepository.upsertThread adopts an unbound bare row instead of minting a duplicate (1.5157ms)
+✔ T006: state machine chuyển UNINITIALIZED -> BASELINING -> READY khi nhận ACK committed (23.7427ms)
+✔ T006: timeout 10s hoặc ACK lỗi chuyển sang retry generation mới và bảo toàn buffer (0.6249ms)
+✔ T006: chính sách tràn bộ đệm (buffer overflow 100 tin) (1.2246ms)
+✔ quét lại thiếu thời gian (ts <= 0) không xóa timestamp đã lưu (117.1305ms)
+✖ quét lại có thời gian hợp lệ + source xịn hơn thì được cập nhật (10.0834ms)
+✔ T007: getMessageDisplayTime không fallback sang created_at khi timestamp_ms <= 0 (2.6896ms)
+✔ T007: getMessageDateKey và formatDateSeparatorLabel không nhóm ngày dựa trên created_at (0.3381ms)
+✔ T007: isConfirmedOutgoing chỉ coi là tin gửi đi khi direction_status là confirmed (0.3375ms)
+✔ rejects the Facebook "0" placeholder used while a page is mid-login/logged out (1.1278ms)
+✔ rejects falsy/empty input without throwing (0.2247ms)
+✔ accepts a real-looking numeric Facebook user id (0.1447ms)
+✔ trims whitespace and still rejects "0" after trimming (0.2346ms)
+▶ vietnamPhone.js
+  ▶ RULE_VERSION
+    ✔ exposes a numeric rule version (0.9152ms)
+  ✔ RULE_VERSION (3.0489ms)
+  ▶ isPrefixActive
+    ✔ accepts every whitelisted range from FR-002 (0.3195ms)
+    ✔ rejects gaps just outside the whitelisted ranges (0.4257ms)
+    ✔ 095 is active (Viettel allocation live since 07/2026 - enabled 2026-09-17) (0.1475ms)
+  ✔ isPrefixActive (1.2164ms)
+  ▶ normalizeVietnamMobile
+    ✔ accepts the four documented formats and normalizes to the same domestic number (1.1038ms)
+    ✔ accepts plain unformatted domestic input (0.2184ms)
+    ✔ rejects a 10-digit sequence with an invalid prefix (0.3105ms)
+    ✔ rejects wrong lengths (9 and 11 digits) (1.4112ms)
+    ✔ rejects malformed/non-phone input without throwing (0.2729ms)
+    ✔ rejects a value that does not start with a 0 or 84/+84 marker (0.4389ms)
+  ✔ normalizeVietnamMobile (4.3702ms)
+  ▶ findPhoneNumbers
+    ✔ finds a single valid number inside a sentence (0.8834ms)
+    ✔ finds multiple distinct valid candidates in one message (1.1691ms)
+    ✔ ignores a valid-looking prefix embedded inside a longer digit run (0.191ms)
+    ✔ does not extract an invalid-prefix number even when well formatted (0.2847ms)
+    ✔ does not extract 9-digit or 11-digit sequences (0.589ms)
+    ✔ returns empty array for empty/non-string input without throwing (0.1521ms)
+    ✔ normalizes +84 and 84 forms to the domestic candidate (0.2787ms)
+  ✔ findPhoneNumbers (5.2891ms)
+✔ vietnamPhone.js (14.73ms)
+✔ waiting tab clears stale chat and ignores out-of-order list responses (2.2382ms)
+✔ realtime thread events are scoped to the visible inbox folder (9.6162ms)
+ℹ tests 802
+ℹ suites 46
+ℹ pass 786
+ℹ fail 16
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7441.1849
+
+✖ failing tests:
+
+test at tests\integration\campaignAttachmentIntegrity.test.js:87:1
+✖ campaign image dispatch with an untampered file dispatches normally (15.1337ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'failed'
+  - 'dispatched'
+  
+      at C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\integration\campaignAttachmentIntegrity.test.js:92:10 {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'failed',
+    expected: 'dispatched',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\integration\campaignFileTransport.test.js:90:1
+✖ a multi-file manifest dispatches as one queue item and the envelope carries every file (40.965ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'failed'
+  - 'dispatched'
+  
+      at C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\integration\campaignFileTransport.test.js:127:10 {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'failed',
+    expected: 'dispatched',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\integration\campaignFileTransport.test.js:199:1
+✖ Facebook confirmation of a manifest dispatch flips the queue and pending message to sent exactly once (32.8108ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'failed'
+  - 'processing'
+  
+      at C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\integration\campaignFileTransport.test.js:224:10 {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'failed',
+    expected: 'processing',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\integration\campaignFileTransport.test.js:302:1
+✖ retrying a failed manifest dispatch preserves the same route and manifest, and only one attempt is ever active (36.4104ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'failed'
+  - 'dispatched'
+  
+      at C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\integration\campaignFileTransport.test.js:343:10
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'failed',
+    expected: 'dispatched',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\integration\page_batch_sync_pipeline.test.js:8:1
+✖ T009: luồng xử lý PAGE_THREAD_MESSAGES_SYNCED_V1, ACK và idempotency (55.7243ms)
+  { code: 'SQLITE_ERROR' }
+
+test at tests\integration\richMessageAttachments.test.js:74:1
+✖ Page image queue emits a verified v2 envelope and confirms only from Facebook observation (72.4981ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'failed'
+  - 'dispatched'
+  
+      at C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\integration\richMessageAttachments.test.js:79:10
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'failed',
+    expected: 'dispatched',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\integration\richMessageAttachments.test.js:130:1
+✖ an official media echo already stored by history is collapsed into the pending CRM row (15.9411ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  false !== true
+  
+      at C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\integration\richMessageAttachments.test.js:151:10
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\integration\richMessageAttachments.test.js:156:1
+✖ a stale rich-message dispatch is failed during queue recovery (17.2126ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+  
+  + 'failed'
+  - 'dispatched'
+  
+      at C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\integration\richMessageAttachments.test.js:160:10
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'failed',
+    expected: 'dispatched',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\integration\richMessageAttachments.test.js:184:1
+✖ an image attempt ignores a video observation and remains available for the real image confirmation (19.4518ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  false !== true
+  
+      at C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\integration\richMessageAttachments.test.js:211:10
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\unit\extensionConnectionResilience.test.js:57:1
+✖ desktop startup never kills Chrome because a worker heartbeat is late (8.4853ms)
+  AssertionError [ERR_ASSERTION]: The input was expected to not match the regular expression /forceExtensionReload|recoverExtensionConnection|probeExtensionConnection/. Input:
+  
+  'function startServer() {\r\n' +
+    "  const allowedProfileDirs = db.prepare('SELECT profile_dir FROM accounts WHERE profile_dir IS NOT NULL').all()\r\n" +
+    '    .map(({ profile_dir }) => path.isAbsolute(profile_dir)\r\n' +
+    '      ? profile_dir\r\n' +
+    "      : path.resolve(__dirname, '../..', profile_dir));\r\n" +
+    '  processManager.stopOrphanedManagedChromeProfiles(allowedProfileDirs);\r\n' +
+    '\r\n' +
+    '  const listenPromise = new Promise((resolve, reject) => {\r\n' +
+    '    const onError = (error) => {\r\n' +
+    "      server.off('listening', onListening);\r\n" +
+    '      reject(error);\r\n' +
+    '    };\r\n' +
+    '    const onListening = () => {\r\n' +
+    "      server.off('error', onError);\r\n" +
+    '      console.log(`[Server] http://localhost:${PORT}`);\r\n' +
+    '      console.log(`[Server] WebSocket ws://localhost:${PORT}`);\r\n' +
+    '      resolve({ port: Number(PORT), pid: process.pid });\r\n' +
+    '    };\r\n' +
+    "    server.once('error', onError);\r\n" +
+    "    server.once('listening', onListening);\r\n" +
+    "    server.listen(PORT, '0.0.0.0');\r\n" +
+    '  });\r\n' +
+    '\r\n' +
+    '  // Bật poller đọc sự kiện webhook từ cầu nối hosting (webhook.php) cho Page API\r\n' +
+    '  // 2.5s thay vì 5s — tin khách realtime về CRM trong ~3s sau khi webhook live\r\n' +
+    '  pageApiService.startBridgePolling(io, db, 2500);\r\n' +
+    '  // Tự động đồng bộ hội thoại page 3s/lần (fallback khi webhook chưa đăng ký:\r\n' +
+    '  // page dán token ngoài không có webhook về CRM mình, watcher là đường chính).\r\n' +
+    '  // 6s cũ cho độ trễ trung bình ~4s; 3s giảm còn ~1.5-2s. Đổi lại số call\r\n' +
+    '  // Graph tăng gấp đôi — nếu Meta báo rate limit (watcher log "CHU KỲ LỖI")\r\n' +
+    '  // thì trả về 6000. Page có webhook vẫn đi cầu nối 2.5s nhanh hơn.\r\n' +
+    '  pageApiService.startPageConversationWatcher(io, db, 3000);\r\n' +
+    '  // Re-subscribe webhook fields mọi page có token (thêm field mới như\r\n' +
+    '  // messaging_referrals thì page cũ phải re-subscribe mới nhận event).\r\n' +
+    '  pageApiService.resubscribeAllPages(db).catch(() => {});\r\n' +
+    '  // BỎ dọn page chưa có token lúc khởi động (2026-10-08): page được "Đồng bộ"\r\n' +
+    '  // phát hiện mà chưa tạo token là trạng thái hợp lệ — xóa là mất page khỏi\r\n' +
+    '  // popup sau mỗi lần tắt/mở app. App bị gỡ đã có removeAccountPages dọn sạch.\r\n' +
+    '\r\n' +
+    '    // Dọn dẹp các tên rác hệ thống (ví dụ: "Tất cả tin nhắn", "Hộp thư đến", "Tin nhắn") đã lưu vào CSDL trước đây\r\n' +
+    '  try {\r\n' +
+    '    const dirtySystemNames = [\r\n' +
+    "      'Tất cả tin nhắn', 'Tất cả', 'All messages', 'All',\r\n" +
+    "      'Tin nhắn trực tiếp', 'Direct messages',\r\n" +
+    "      'Tin nhắn', 'Messages',\r\n" +
+    "      'Hộp thư đến', 'Hộp thư', 'Inbox',\r\n" +
+    "      'Chưa đọc', 'Unread', 'Đã xong', 'Done',\r\n" +
+    "      'Gắn dấu sao', 'Đã gắn dấu sao', 'Starred',\r\n" +
+    "      'Spam', 'Thư rác', 'Đang', 'Facebook', 'Messenger', 'Meta'\r\n" +
+    '    ];\r\n' +
+    "    const placeholders = dirtySystemNames.map(() => '?').join(',');\r\n" +
+    '    db.prepare(`\r\n' +
+    '      UPDATE threads \r\n' +
+    "      SET contact_name = 'Khách hàng' \r\n" +
+    '      WHERE contact_name IN (${placeholders}) \r\n' +
+    "         OR contact_name LIKE 'Đang hoạt động%' \r\n" +
+    "         OR contact_name LIKE 'Hoạt động%'\r\n" +
+    '    `).run(...dirtySystemNames);\r\n' +
+    '    db.prepare(`\r\n' +
+    '      UPDATE contacts \r\n' +
+    "      SET name = 'Khách hàng' \r\n" +
+    '      WHERE name IN (${placeholders}) \r\n' +
+    "         OR name LIKE 'Đang hoạt động%' \r\n" +
+    "         OR name LIKE 'Hoạt động%'\r\n" +
+    '    `).run(...dirtySystemNames);\r\n' +
+    '\r\n' +
+    '    // Dọn dẹp tin nhắn rác từ các nút menu Meta Business Suite & chuẩn hóa lại thứ tự tin nhắn\r\n' +
+    '    db.prepare(`\r\n' +
+    '      DELETE FROM messages\r\n' +
+    "      WHERE (content IN ('Meta Business Suite', 'Liên kết', 'Chỉnh sửa', 'Trợ giúp', 'Tùy chọn khác', 'Cài đặt') OR content LIKE '%Meta Business Suite%')\r\n" +
+    '        AND (timestamp_ms IS NULL OR timestamp_ms <= 0)\r\n' +
+    '    `).run();\r\n' +
+    '\r\n' +
+    '    // Dọn dẹp notice E2EE bị bắt nhầm thành tin nhắn của khách. Filter cũ thiếu\r\n' +
+    '    // pattern tiếng Anh "Messages and calls are secured with end-to-end\r\n' +
+    '    // encryption" - mỗi lần mở app, initial sweep mở từng hội thoại, notice\r\n' +
+    '    // E2EE (không có mid ổn định nên dedup không chặn) bị insert thành tin mới:\r\n' +
+    '    // is_unread=1 + unread_manual=1 sai hàng loạt, preview thành chữ bảo mật,\r\n' +
+    '    // timestamp trùng giờ mở app (reproduce 2026-10-07). Xóa notice, gỡ cờ\r\n' +
+    '    // chưa đọc cho thread không còn tin khách thật, dựng lại preview +\r\n' +
+    '    // last_activity từ tin còn lại.\r\n' +
+    '    const E2EE_NOTICE_PATTERNS = [\r\n' +
+    '      /^messages and calls are secured with end-to-end encryption\\.?$/i,\r\n' +
+    '      /^messages and calls are end-to-end encrypted\\.?$/i,\r\n' +
+    '      /^personal chats are secured with end-to-end encryption\\.?$/i,\r\n' +
+    '      /^tin nhắn và cuộc gọi (?:đang )?được bảo mật.*$/i,\r\n' +
+    '      /^bảo mật (?:bằng tính năng mã hóa|đầu cuối).*$/i,\r\n' +
+    '    ];\r\n' +
+    '    const noticeCandidates = db.prepare(`\r\n' +
+    '      SELECT id, thread_id, content FROM messages\r\n' +
+    '      WHERE is_outgoing = 0\r\n' +
+    '        AND (\r\n' +
+    "          content LIKE 'Messages and calls are secured with end-to-end encryption%'\r\n" +
+    "          OR content LIKE 'Messages and calls are end-to-end encrypted%'\r\n" +
+    "          OR content LIKE 'Personal chats are secured with end-to-end encryption%'\r\n" +
+    "          OR content LIKE 'Tin nhắn và cuộc gọi %bảo mật%'\r\n" +
+    "          OR content LIKE 'bảo mật %'\r\n" +
+    '        )\r\n' +
+    '    `).all();\r\n' +
+    "    const deleteNotice = db.prepare('DELETE FROM messages WHERE id = ?');\r\n" +
+    '    const noticeThreadIds = new Set();\r\n' +
+    '    let deletedNoticeCount = 0;\r\n' +
+    '    for (const row of noticeCandidates) {\r\n' +
+    "      const noticeText = String(row.content || '').trim();\r\n" +
+    '      if (!E2EE_NOTICE_PATTERNS.some((pattern) => pattern.test(noticeText))) continue;\r\n' +
+    '      deleteNotice.run(row.id);\r\n' +
+    '      noticeThreadIds.add(row.thread_id);\r\n' +
+    '      deletedNoticeCount++;\r\n' +
+    '    }\r\n' +
+    '    const healTouchedThreads = (threadIdSet) => {\r\n' +
+    '      for (const noticeThreadId of threadIdSet) {\r\n' +
+    '        const hasRealIncoming = db.prepare(`\r\n' +
+    '          SELECT 1 FROM messages\r\n' +
+    '          WHERE thread_id = ? AND is_outgoing = 0\r\n' +
+    "            AND fb_message_id NOT LIKE 'dom_%'\r\n" +
+    "            AND fb_message_id NOT LIKE 'sidebar_preview_%'\r\n" +
+    '          LIMIT 1\r\n' +
+    '        `).get(noticeThreadId);\r\n' +
+    '        if (!hasRealIncoming) {\r\n' +
+    "          db.prepare('UPDATE threads SET is_unread = 0, unread_manual = 0 WHERE id = ?').run(noticeThreadId);\r\n" +
+    '        }\r\n' +
+    '        const remaining = db.prepare(`\r\n' +
+    '          SELECT content, COALESCE(timestamp_ms, 0) AS ts FROM messages\r\n' +
+    "          WHERE thread_id = ? AND fb_message_id NOT LIKE 'dom_%'\r\n" +
+    "            AND fb_message_id NOT LIKE 'sidebar_preview_%'\r\n" +
+    '          ORDER BY COALESCE(timestamp_ms, 0) DESC, id DESC LIMIT 1\r\n' +
+    '        `).get(noticeThreadId);\r\n' +
+    '        if (remaining) {\r\n' +
+    "          db.prepare('UPDATE threads SET last_message = ?, last_activity = ? WHERE id = ?')\r\n" +
+    '            .run(remaining.content, new Date(remaining.ts).toISOString(), noticeThreadId);\r\n' +
+    '        } else {\r\n' +
+    "          db.prepare('UPDATE threads SET last_message = NULL WHERE id = ?').run(noticeThreadId);\r\n" +
+    '        }\r\n' +
+    '      }\r\n' +
+    '    };\r\n' +
+    '\r\n' +
+    '    // (1) Notice E2EE bị bắt nhầm thành tin nhắn của khách.\r\n' +
+    '    healTouchedThreads(noticeThreadIds);\r\n' +
+    '\r\n' +
+    '    // (2) Bubble nhân đôi từ đợt hydrate khi mở thread: row dom_ (mất native\r\n' +
+    '    // id) trùng nội dung với một row mid thật trong cùng thread là bản render\r\n' +
+    '    // lại của tin cũ, không phải tin mới (reproduce 2026-10-07 "Khi nào bạn\r\n' +
+    '    // muốn ăn" x2). Guard runtime chặn từ nay về sau, ở đây dọn row cũ.\r\n' +
+    '    const dupDomRows = db.prepare(`\r\n' +
+    '      SELECT m.id, m.thread_id FROM messages m\r\n' +
+    '      WHERE m.is_outgoing = 0\r\n' +
+    "        AND m.fb_message_id LIKE 'dom_%'\r\n" +
+    "        AND (m.media_type IS NULL OR m.media_type = 'text')\r\n" +
+    '        AND EXISTS (\r\n' +
+    '          SELECT 1 FROM messages twin\r\n' +
+    '          WHERE twin.thread_id = m.thread_id\r\n' +
+    '            AND twin.is_outgoing = 0\r\n' +
+    '            AND twin.id != m.id\r\n' +
+    "            AND COALESCE(twin.content, '') = COALESCE(m.content, '')\r\n" +
+    "            AND twin.fb_message_id NOT LIKE 'dom_%'\r\n" +
+    "            AND twin.fb_message_id NOT LIKE 'sidebar_preview_%'\r\n" +
+    '        )\r\n' +
+    '    `).all();\r\n' +
+    "    const deleteDupRow = db.prepare('DELETE FROM messages WHERE id = ?');\r\n" +
+    '    const dupThreadIds = new Set();\r\n' +
+    '    for (const row of dupDomRows) {\r\n' +
+    '      deleteDupRow.run(row.id);\r\n' +
+    '      dupThreadIds.add(row.thread_id);\r\n' +
+    '    }\r\n' +
+    '    healTouchedThreads(dupThreadIds);\r\n' +
+    '\r\n' +
+    '    // (2b) Cặp nhân đôi preview ↔ tin thật: bong bóng provisional\r\n' +
+    '    // (sidebar_preview_, giờ quan sát) chưa được claim vì operator click trễ\r\n' +
+    '    // hoặc preview bị Messenger cắt ngắn, rồi history sync chèn thêm row thật\r\n' +
+    '    // cùng nội dung. Heal (2) chỉ dọn cặp dom_ ↔ tin thật, không đụng preview.\r\n' +
+    '    // Row thật (mid/dom) là bản chính thức - xóa preview mồ côi.\r\n' +
+    '    const previewRows = db.prepare(`\r\n' +
+    '      SELECT p.id, p.thread_id, p.content,\r\n' +
+    '        (SELECT COUNT(*) FROM messages real\r\n' +
+    '          WHERE real.thread_id = p.thread_id AND real.is_outgoing = 0\r\n' +
+    "            AND real.id != p.id AND real.fb_message_id NOT LIKE 'sidebar_preview_%'\r\n" +
+    "            AND COALESCE(real.content, '') != '') AS realIncomingCount\r\n" +
+    '      FROM messages p\r\n' +
+    "      WHERE p.is_outgoing = 0 AND p.fb_message_id LIKE 'sidebar_preview_%'\r\n" +
+    '    `).all();\r\n' +
+    '    const realIncomingByThread = new Map();\r\n' +
+    "    const deleteOrphanPreview = db.prepare('DELETE FROM messages WHERE id = ?');\r\n" +
+    '    const orphanPreviewThreadIds = new Set();\r\n' +
+    '    for (const preview of previewRows) {\r\n' +
+    '      if (!Number(preview.realIncomingCount)) continue;\r\n' +
+    '      if (!realIncomingByThread.has(preview.thread_id)) {\r\n' +
+    '        realIncomingByThread.set(preview.thread_id, db.prepare(`\r\n' +
+    '          SELECT content FROM messages\r\n' +
+    '          WHERE thread_id = ? AND is_outgoing = 0\r\n' +
+    "            AND fb_message_id NOT LIKE 'sidebar_preview_%'\r\n" +
+    "            AND COALESCE(content, '') != ''\r\n" +
+    '        `).all(preview.thread_id));\r\n' +
+    '      }\r\n' +
+    "      const previewText = String(preview.content || '').trim();\r\n" +
+    '      if (!previewText) continue;\r\n' +
+    "      const truncated = previewText.replace(/(?:\\u2026|\\.{3})$/, '').trimEnd();\r\n" +
+    '      const isPrefixTwin = truncated.length >= 24;\r\n' +
+    '      const matched = realIncomingByThread.get(preview.thread_id).some((row) => {\r\n' +
+    "        const realText = String(row.content || '');\r\n" +
+    '        return realText === previewText || (isPrefixTwin && realText.startsWith(truncated));\r\n' +
+    '      });\r\n' +
+    '      if (matched) {\r\n' +
+    '        deleteOrphanPreview.run(preview.id);\r\n' +
+    '        orphanPreviewThreadIds.add(preview.thread_id);\r\n' +
+    '      }\r\n' +
+    '    }\r\n' +
+    '  '... 30375 more characters
+  
+      at TestContext.<anonymous> (C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\unit\extensionConnectionResilience.test.js:63:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1382:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:960:18)
+      at Test.postRun (node:internal/test_runner/test:1522:19)
+      at Test.run (node:internal/test_runner/test:1447:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'function startServer() {\r\n  const allowedProfileDirs = db.prepare(\'SELECT profile_dir FROM accounts WHERE profile_dir IS NOT NULL\').all()\r\n    .map(({ profile_dir }) => path.isAbsolute(profile_dir)\r\n      ? profile_dir\r\n      : path.resolve(__dirname, \'../..\', profile_dir));\r\n  processManager.stopOrphanedManagedChromeProfiles(allowedProfileDirs);\r\n\r\n  const listenPromise = new Promise((resolve, reject) => {\r\n    const onError = (error) => {\r\n      server.off(\'listening\', onListening);\r\n      reject(error);\r\n    };\r\n    const onListening = () => {\r\n      server.off(\'error\', onError);\r\n      console.log(`[Server] http://localhost:${PORT}`);\r\n      console.log(`[Server] WebSocket ws://localhost:${PORT}`);\r\n      resolve({ port: Number(PORT), pid: process.pid });\r\n    };\r\n    server.once(\'error\', onError);\r\n    server.once(\'listening\', onListening);\r\n    server.listen(PORT, \'0.0.0.0\');\r\n  });\r\n\r\n  // Bật poller đọc sự kiện webhook từ cầu nối hosting (webhook.php) cho Page API\r\n  // 2.5s thay vì 5s — tin khách realtime về CRM trong ~3s sau khi webhook live\r\n  pageApiService.startBridgePolling(io, db, 2500);\r\n  // Tự động đồng bộ hội thoại page 3s/lần (fallback khi webhook chưa đăng ký:\r\n  // page dán token ngoài không có webhook về CRM mình, watcher là đường chính).\r\n  // 6s cũ cho độ trễ trung bình ~4s; 3s giảm còn ~1.5-2s. Đổi lại số call\r\n  // Graph tăng gấp đôi — nếu Meta báo rate limit (watcher log "CHU KỲ LỖI")\r\n  // thì trả về 6000. Page có webhook vẫn đi cầu nối 2.5s nhanh hơn.\r\n  pageApiService.startPageConversationWatcher(io, db, 3000);\r\n  // Re-subscribe webhook fields mọi page có token (thêm field mới như\r\n  // messaging_referrals thì page cũ phải re-subscribe mới nhận event).\r\n  pageApiService.resubscribeAllPages(db).catch(() => {});\r\n  // BỎ dọn page chưa có token lúc khởi động (2026-10-08): page được "Đồng bộ"\r\n  // phát hiện mà chưa tạo token là trạng thái hợp lệ — xóa là mất page khỏi\r\n  // popup sau mỗi lần tắt/mở app. App bị gỡ đã có removeAccountPages dọn sạch.\r\n\r\n    // Dọn dẹp các tên rác hệ thống (ví dụ: "Tất cả tin nhắn", "Hộp thư đến", "Tin nhắn") đã lưu vào CSDL trước đây\r\n  try {\r\n    const dirtySystemNames = [\r\n      \'Tất cả tin nhắn\', \'Tất cả\', \'All messages\', \'All\',\r\n      \'Tin nhắn trực tiếp\', \'Direct messages\',\r\n      \'Tin nhắn\', \'Messages\',\r\n      \'Hộp thư đến\', \'Hộp thư\', \'Inbox\',\r\n      \'Chưa đọc\', \'Unread\', \'Đã xong\', \'Done\',\r\n      \'Gắn dấu sao\', \'Đã gắn dấu sao\', \'Starred\',\r\n      \'Spam\', \'Thư rác\', \'Đang\', \'Facebook\', \'Messenger\', \'Meta\'\r\n    ];\r\n    const placeholders = dirtySystemNames.map(() => \'?\').join(\',\');\r\n    db.prepare(`\r\n      UPDATE threads \r\n      SET contact_name = \'Khách hàng\' \r\n      WHERE contact_name IN (${placeholders}) \r\n         OR contact_name LIKE \'Đang hoạt động%\' \r\n         OR contact_name LIKE \'Hoạt động%\'\r\n    `).run(...dirtySystemNames);\r\n    db.prepare(`\r\n      UPDATE contacts \r\n      SET name = \'Khách hàng\' \r\n      WHERE name IN (${placeholders}) \r\n         OR name LIKE \'Đang hoạt động%\' \r\n         OR name LIKE \'Hoạt động%\'\r\n    `).run(...dirtySystemNames);\r\n\r\n    // Dọn dẹp tin nhắn rác từ các nút menu Meta Business Suite & chuẩn hóa lại thứ tự tin nhắn\r\n    db.prepare(`\r\n      DELETE FROM messages\r\n      WHERE (content IN (\'Meta Business Suite\', \'Liên kết\', \'Chỉnh sửa\', \'Trợ giúp\', \'Tùy chọn khác\', \'Cài đặt\') OR content LIKE \'%Meta Business Suite%\')\r\n        AND (timestamp_ms IS NULL OR timestamp_ms <= 0)\r\n    `).run();\r\n\r\n    // Dọn dẹp notice E2EE bị bắt nhầm thành tin nhắn của khách. Filter cũ thiếu\r\n    // pattern tiếng Anh "Messages and calls are secured with end-to-end\r\n    // encryption" - mỗi lần mở app, initial sweep mở từng hội thoại, notice\r\n    // E2EE (không có mid ổn định nên dedup không chặn) bị insert thành tin mới:\r\n    // is_unread=1 + unread_manual=1 sai hàng loạt, preview thành chữ bảo mật,\r\n    // timestamp trùng giờ mở app (reproduce 2026-10-07). Xóa notice, gỡ cờ\r\n    // chưa đọc cho thread không còn tin khách thật, dựng lại preview +\r\n    // last_activity từ tin còn lại.\r\n    const E2EE_NOTICE_PATTERNS = [\r\n      /^messages and calls are secured with end-to-end encryption\\.?$/i,\r\n      /^messages and calls are end-to-end encrypted\\.?$/i,\r\n      /^personal chats are secured with end-to-end encryption\\.?$/i,\r\n      /^tin nhắn và cuộc gọi (?:đang )?được bảo mật.*$/i,\r\n      /^bảo mật (?:bằng tính năng mã hóa|đầu cuối).*$/i,\r\n    ];\r\n    const noticeCandidates = db.prepare(`\r\n      SELECT id, thread_id, content FROM messages\r\n      WHERE is_outgoing = 0\r\n        AND (\r\n          content LIKE \'Messages and calls are secured with end-to-end encryption%\'\r\n          OR content LIKE \'Messages and calls are end-to-end encrypted%\'\r\n          OR content LIKE \'Personal chats are secured with end-to-end encryption%\'\r\n          OR content LIKE \'Tin nhắn và cuộc gọi %bảo mật%\'\r\n          OR content LIKE \'bảo mật %\'\r\n        )\r\n    `).all();\r\n    const deleteNotice = db.prepare(\'DELETE FROM messages WHERE id = ?\');\r\n    const noticeThreadIds = new Set();\r\n    let deletedNoticeCount = 0;\r\n    for (const row of noticeCandidates) {\r\n      const noticeText = String(row.content || \'\').trim();\r\n      if (!E2EE_NOTICE_PATTERNS.some((pattern) => pattern.test(noticeText))) continue;\r\n      deleteNotice.run(row.id);\r\n      noticeThreadIds.add(row.thread_id);\r\n      deletedNoticeCount++;\r\n    }\r\n    const healTouchedThreads = (threadIdSet) => {\r\n      for (const noticeThreadId of threadIdSet) {\r\n        const hasRealIncoming = db.prepare(`\r\n          SELECT 1 FROM messages\r\n          WHERE thread_id = ? AND is_outgoing = 0\r\n            AND fb_message_id NOT LIKE \'dom_%\'\r\n            AND fb_message_id NOT LIKE \'sidebar_preview_%\'\r\n          LIMIT 1\r\n        `).get(noticeThreadId);\r\n        if (!hasRealIncoming) {\r\n          db.prepare(\'UPDATE threads SET is_unread = 0, unread_manual = 0 WHERE id = ?\').run(noticeThreadId);\r\n        }\r\n        const remaining = db.prepare(`\r\n          SELECT content, COALESCE(timestamp_ms, 0) AS ts FROM messages\r\n          WHERE thread_id = ? AND fb_message_id NOT LIKE \'dom_%\'\r\n            AND fb_message_id NOT LIKE \'sidebar_preview_%\'\r\n          ORDER BY COALESCE(timestamp_ms, 0) DESC, id DESC LIMIT 1\r\n        `).get(noticeThreadId);\r\n        if (remaining) {\r\n          db.prepare(\'UPDATE threads SET last_message = ?, last_activity = ? WHERE id = ?\')\r\n            .run(remaining.content, new Date(remaining.ts).toISOString(), noticeThreadId);\r\n        } else {\r\n          db.prepare(\'UPDATE threads SET last_message = NULL WHERE id = ?\').run(noticeThreadId);\r\n        }\r\n      }\r\n    };\r\n\r\n    // (1) Notice E2EE bị bắt nhầm thành tin nhắn của khách.\r\n    healTouchedThreads(noticeThreadIds);\r\n\r\n    // (2) Bubble nhân đôi từ đợt hydrate khi mở thread: row dom_ (mất native\r\n    // id) trùng nội dung với một row mid thật trong cùng thread là bản render\r\n    // lại của tin cũ, không phải tin mới (reproduce 2026-10-07 "Khi nào bạn\r\n    // muốn ăn" x2). Guard runtime chặn từ nay về sau, ở đây dọn row cũ.\r\n    const dupDomRows = db.prepare(`\r\n      SELECT m.id, m.thread_id FROM messages m\r\n      WHERE m.is_outgoing = 0\r\n        AND m.fb_message_id LIKE \'dom_%\'\r\n        AND (m.media_type IS NULL OR m.media_type = \'text\')\r\n        AND EXISTS (\r\n          SELECT 1 FROM messages twin\r\n          WHERE twin.thread_id = m.thread_id\r\n            AND twin.is_outgoing = 0\r\n            AND twin.id != m.id\r\n            AND COALESCE(twin.content, \'\') = COALESCE(m.content, \'\')\r\n            AND twin.fb_message_id NOT LIKE \'dom_%\'\r\n            AND twin.fb_message_id NOT LIKE \'sidebar_preview_%\'\r\n        )\r\n    `).all();\r\n    const deleteDupRow = db.prepare(\'DELETE FROM messages WHERE id = ?\');\r\n    const dupThreadIds = new Set();\r\n    for (const row of dupDomRows) {\r\n      deleteDupRow.run(row.id);\r\n      dupThreadIds.add(row.thread_id);\r\n    }\r\n    healTouchedThreads(dupThreadIds);\r\n\r\n    // (2b) Cặp nhân đôi preview ↔ tin thật: bong bóng provisional\r\n    // (sidebar_preview_, giờ quan sát) chưa được claim vì operator click trễ\r\n    // hoặc preview bị Messenger cắt ngắn, rồi history sync chèn thêm row thật\r\n    // cùng nội dung. Heal (2) chỉ dọn cặp dom_ ↔ tin thật, không đụng preview.\r\n    // Row thật (mid/dom) là bản chính thức - xóa preview mồ côi.\r\n    const previewRows = db.prepare(`\r\n      SELECT p.id, p.thread_id, p.content,\r\n        (SELECT COUNT(*) FROM messages real\r\n          WHERE real.thread_id = p.thread_id AND real.is_outgoing = 0\r\n            AND real.id != p.id AND real.fb_message_id NOT LIKE \'sidebar_preview_%\'\r\n            AND COALESCE(real.content, \'\') != \'\') AS realIncomingCount\r\n      FROM messages p\r\n      WHERE p.is_outgoing = 0 AND p.fb_message_id LIKE \'sidebar_preview_%\'\r\n    `).all();\r\n    const realIncomingByThread = new Map();\r\n    const deleteOrphanPreview = db.prepare(\'DELETE FROM messages WHERE id = ?\');\r\n    const orphanPreviewThreadIds = new Set();\r\n    for (const preview of previewRows) {\r\n      if (!Number(preview.realIncomingCount)) continue;\r\n      if (!realIncomingByThread.has(preview.thread_id)) {\r\n        realIncomingByThread.set(preview.thread_id, db.prepare(`\r\n          SELECT content FROM messages\r\n          WHERE thread_id = ? AND is_outgoing = 0\r\n            AND fb_message_id NOT LIKE \'sidebar_preview_%\'\r\n            AND COALESCE(content, \'\') != \'\'\r\n        `).all(preview.thread_id));\r\n      }\r\n      const previewText = String(preview.content || \'\').trim();\r\n      if (!previewText) continue;\r\n      const truncated = previewText.replace(/(?:\\u2026|\\.{3})$/, \'\').trimEnd();\r\n      const isPrefixTwin = truncated.length >= 24;\r\n      const matched = realIncomingByThread.get(preview.thread_id).some((row) => {\r\n        const realText = String(row.content || \'\');\r\n        return realText === previewText || (isPrefixTwin && realText.startsWith(truncated));\r\n      });\r\n      if (matched) {\r\n        deleteOrphanPreview.run(preview.id);\r\n        orphanPreviewThreadIds.add(preview.thread_id);\r\n      }\r\n    }\r\n  '... 30375 more characters,
+    expected: /forceExtensionReload|recoverExtensionConnection|probeExtensionConnection/,
+    operator: 'doesNotMatch',
+    diff: 'simple'
+  }
+
+test at tests\unit\inboxSourceOwnerBinding.test.js:32:1
+✖ ensurePageSource binds owner to a pre-existing owner-less row (auto-discovered page) (44.3343ms)
+  { code: 'SQLITE_ERROR' }
+
+test at tests\unit\initialMessageSweepService.test.js:7:1
+✖ initial sweep queues each unsynced thread once and remembers completion (110.6351ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+  + []
+  - [
+  -   'a',
+  -   'b'
+  - ]
+  
+      at TestContext.<anonymous> (C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\unit\initialMessageSweepService.test.js:19:10)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [],
+    expected: [ 'a', 'b' ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests\unit\initialMessageSweepService.test.js:25:1
+✖ forced initial sweep can run again after completion (189.0688ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  0 !== 2
+  
+      at TestContext.<anonymous> (C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\unit\initialMessageSweepService.test.js:38:10)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 0,
+    expected: 2,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests\unit\initialMessageSweepService.test.js:42:1
+✖ initial sweep partitions threads into page and personal lanes with priority sorting (68.5472ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+  
+    [
+      'p1_unread',
+      'p1_empty_msg',
+  -   'p1_read_with_msg'
+    ]
+  
+      at TestContext.<anonymous> (C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\unit\initialMessageSweepService.test.js:67:10)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [ 'p1_unread', 'p1_empty_msg' ],
+    expected: [ 'p1_unread', 'p1_empty_msg', 'p1_read_with_msg' ],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests\unit\sidebarActivityFallback.test.js:24:1
+✖ background reuses the existing sidebar parser for a non-terminal partial result (8.7123ms)
+  AssertionError [ERR_ASSERTION]: The input did not match the regular expression /parsedThreads\.length[\s\S]+?observedThreads/. Input:
+  
+  '// AutoChatbot FB Engine - Service Worker Background Script\r\n' +
+    "importScripts('tabCreationCoordinator.js', 'queueEnvelopeValidation.js', 'callTabDeduplicator.js', 'messengerTabDeduplicator.js', 'messengerTabRoles.js', 'pageVideoUploader.js', 'pageNameExtractor.js', 'pageDiscovery.js', 'pageIdentityGate.js', 'tabAudit.js');\r\n" +
+    'const tabCreationCoordinator = self.FbCrmTabCreationCoordinator.createTabCreationCoordinator();\r\n' +
+    '\r\n' +
+    'async function blockFacebookNativeNotifications() {\r\n' +
+    '  if (!chrome?.contentSettings?.notifications) return;\r\n' +
+    '  const patterns = [\r\n' +
+    "    'https://[*.]facebook.com/*',\r\n" +
+    "    'https://[*.]messenger.com/*'\r\n" +
+    '  ];\r\n' +
+    '  for (const primaryPattern of patterns) {\r\n' +
+    '    try {\r\n' +
+    '      await chrome.contentSettings.notifications.set({\r\n' +
+    '        primaryPattern,\r\n' +
+    "        setting: 'block',\r\n" +
+    "        scope: 'regular'\r\n" +
+    '      });\r\n' +
+    '    } catch (_) {}\r\n' +
+    '  }\r\n' +
+    '}\r\n' +
+    '\r\n' +
+    'blockFacebookNativeNotifications();\r\n' +
+    'let ws = null;\r\n' +
+    "const BACKEND_OUTBOX_STORAGE_KEY = 'fb_engine_realtime_outbox_v1';\r\n" +
+    "const QUEUED_BACKEND_TYPES = new Set(['NEW_MESSAGE_RECEIVED', 'PAGE_NAME_DETECTED', 'PAGE_EXTENSION_READY']);\r\n" +
+    'let backendOutbox = [];\r\n' +
+    'let backendOutboxLoaded = null;\r\n' +
+    'let backendOutboxFlushInFlight = false;\r\n' +
+    'let backendAccountRegistered = false;\r\n' +
+    'let backendOutboxAckTimer = null;\r\n' +
+    '\r\n' +
+    'function backendOutboxIdentity(entry) {\r\n' +
+    '  const data = entry?.data || {};\r\n' +
+    '  return [\r\n' +
+    "    entry?.type || '', data.account_id || '', data.thread_id || '',\r\n" +
+    "    data.fb_message_id || data.client_message_id || '', data.source || '',\r\n" +
+    "    data.media_type || 'text', data.timestamp_ms || data.created_at || '',\r\n" +
+    "    data.content || ''\r\n" +
+    "  ].join('|');\r\n" +
+    '}\r\n' +
+    '\r\n' +
+    'function loadBackendOutbox() {\r\n' +
+    '  if (!backendOutboxLoaded) {\r\n' +
+    '    backendOutboxLoaded = chrome.storage.local.get([BACKEND_OUTBOX_STORAGE_KEY])\r\n' +
+    '      .then((stored) => {\r\n' +
+    '        const persisted = Array.isArray(stored?.[BACKEND_OUTBOX_STORAGE_KEY])\r\n' +
+    '          ? stored[BACKEND_OUTBOX_STORAGE_KEY]\r\n' +
+    '          : [];\r\n' +
+    '        const combined = [...persisted, ...backendOutbox];\r\n' +
+    '        const seen = new Set();\r\n' +
+    '        backendOutbox = combined.filter((entry) => {\r\n' +
+    '          const identity = backendOutboxIdentity(entry);\r\n' +
+    '          if (seen.has(identity)) return false;\r\n' +
+    '          seen.add(identity);\r\n' +
+    '          return true;\r\n' +
+    '        }).slice(-500);\r\n' +
+    '        return backendOutbox;\r\n' +
+    '      })\r\n' +
+    '      .catch(() => backendOutbox);\r\n' +
+    '  }\r\n' +
+    '  return backendOutboxLoaded;\r\n' +
+    '}\r\n' +
+    '\r\n' +
+    'function persistBackendOutbox() {\r\n' +
+    '  return chrome.storage.local.set({ [BACKEND_OUTBOX_STORAGE_KEY]: backendOutbox.slice(-500) }).catch(() => {});\r\n' +
+    '}\r\n' +
+    '\r\n' +
+    'function enqueueBackendPayload(type, data) {\r\n' +
+    '  const entry = {\r\n' +
+    '    type, data, queued_at: Date.now(),\r\n' +
+    '    outbox_id: (globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`)\r\n' +
+    '  };\r\n' +
+    '  loadBackendOutbox().then(() => {\r\n' +
+    '    const identity = backendOutboxIdentity(entry);\r\n' +
+    '    if (!backendOutbox.some((candidate) => backendOutboxIdentity(candidate) === identity)) {\r\n' +
+    '      backendOutbox.push(entry);\r\n' +
+    '      if (backendOutbox.length > 500) backendOutbox.splice(0, backendOutbox.length - 500);\r\n' +
+    '    }\r\n' +
+    '    return persistBackendOutbox();\r\n' +
+    '  }).catch(() => {});\r\n' +
+    '}\r\n' +
+    '\r\n' +
+    'async function flushBackendOutbox() {\r\n' +
+    '  // Keep queued incoming messages until the server has bound this socket to\r\n' +
+    '  // the Facebook account. A socket can be open before registration is ready.\r\n' +
+    '  if (backendOutboxFlushInFlight || !backendAccountRegistered || !ws || ws.readyState !== WebSocket.OPEN) return;\r\n' +
+    '  backendOutboxFlushInFlight = true;\r\n' +
+    '  try {\r\n' +
+    '    await loadBackendOutbox();\r\n' +
+    '    const entry = backendOutbox[0];\r\n' +
+    '    if (!entry) return;\r\n' +
+    '    const data = entry?.data || {};\r\n' +
+    '    if (!data.account_id && !user_id) return;\r\n' +
+    '    if (!entry.outbox_id) {\r\n' +
+    '      entry.outbox_id = (globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`);\r\n' +
+    '      await persistBackendOutbox();\r\n' +
+    '    }\r\n' +
+    '    ws.send(JSON.stringify({\r\n' +
+    '      type: entry.type,\r\n' +
+    '      outbox_id: entry.outbox_id,\r\n' +
+    '      data: { ...data, account_id: data.account_id || user_id }\r\n' +
+    '    }));\r\n' +
+    '    clearTimeout(backendOutboxAckTimer);\r\n' +
+    '    backendOutboxAckTimer = setTimeout(() => {\r\n' +
+    '      backendOutboxFlushInFlight = false;\r\n' +
+    '      flushBackendOutbox().catch(() => {});\r\n' +
+    '    }, 5000);\r\n' +
+    '  } catch (error) {\r\n' +
+    "    console.warn('[FB Engine] Không thể phát lại realtime outbox:', error?.message || error);\r\n" +
+    '  } finally {\r\n' +
+    '    if (!backendOutbox.length) backendOutboxFlushInFlight = false;\r\n' +
+    '  }\r\n' +
+    '}\r\n' +
+    'const pendingSetupRegistrationAccounts = new Set();\r\n' +
+    '\r\n' +
+    'function waitForPendingSetupCompletion(accountId, attempt = 0) {\r\n' +
+    "  const accountKey = String(accountId || '');\r\n" +
+    '  if (!accountKey || pendingSetupRegistrationAccounts.has(accountKey)) return;\r\n' +
+    '  pendingSetupRegistrationAccounts.add(accountKey);\r\n' +
+    '\r\n' +
+    '  const check = async () => {\r\n' +
+    '    try {\r\n' +
+    '      const tab = await getFacebookTab(accountKey);\r\n' +
+    "      if (!tab?.id) throw new Error('MESSENGER_TAB_NOT_READY');\r\n" +
+    '      await assertMessengerRecoveryDialogResolved(tab.id);\r\n' +
+    '      await chrome.scripting.executeScript({\r\n' +
+    '        target: { tabId: tab.id },\r\n' +
+    "        func: () => sessionStorage.removeItem('crm_pending_account_setup')\r\n" +
+    '      }).catch(() => {});\r\n' +
+    '      const reloadComplete = waitForTabComplete(tab.id, 15000);\r\n' +
+    '      await chrome.tabs.reload(tab.id);\r\n' +
+    '      await Promise.race([reloadComplete, delay(5000)]);\r\n' +
+    '      await delay(1000);\r\n' +
+    '      pendingSetupRegistrationAccounts.delete(accountKey);\r\n' +
+    "      sendToBackend('REGISTER_ACCOUNT', {\r\n" +
+    '        account_id: accountKey,\r\n' +
+    "        fb_dtsg: fb_dtsg || '',\r\n" +
+    '        pending_key: null,\r\n' +
+    '        name: account_name || null, avatar_url: account_avatar_url || null\r\n' +
+    '      });\r\n' +
+    '      console.log(`[FB Engine] Setup/PIN completed; normal sync enabled for account=${accountKey}`);\r\n' +
+    '    } catch (_) {\r\n' +
+    '      pendingSetupRegistrationAccounts.delete(accountKey);\r\n' +
+    '      if (attempt < 120) {\r\n' +
+    '        setTimeout(() => waitForPendingSetupCompletion(accountKey, attempt + 1), 5000);\r\n' +
+    '      }\r\n' +
+    '    }\r\n' +
+    '  };\r\n' +
+    '\r\n' +
+    '  setTimeout(check, attempt === 0 ? 8000 : 0);\r\n' +
+    '}\r\n' +
+    'let fb_dtsg = null;\r\n' +
+    'const TRUSTED_SEND_ADAPTER_VERSION = "trusted-send-v1";\r\n' +
+    '\r\n' +
+    '// ── GraphQL template replay: bắt tin nhắn thread không cần mở tab ──\r\n' +
+    '// Messenger trang đẩy delta tin nhắn xuống transport không thấy được từ\r\n' +
+    '// trang, nên intercept WebSocket luôn cụt. Thay vào đó ghi lại body query\r\n' +
+    '// GraphQL messenger.com dùng khi mở thread (CRM_QUERY_TEMPLATE từ injected),\r\n' +
+    '// rồi phát lại cho thread sidebar vừa báo có tin mới — tin + URL media về\r\n' +
+    '// trong ~1s, không điều hướng, server dedup theo mid + promote preview.\r\n' +
+    'let crmGraphqlTemplate = null;\r\n' +
+    'const crmFastFetchLastAt = new Map();\r\n' +
+    '\r\n' +
+    'function bgDebug(data) {\r\n' +
+    "  try { sendToBackend('CONTENT_DEBUG', { kind: 'bg', ...data }); } catch (_) {}\r\n" +
+    '}\r\n' +
+    '\r\n' +
+    'function handleCrmQueryTemplate(data) {\r\n' +
+    '  if (!data || !data.doc_id || !data.variables || !Array.isArray(data.slots) || !data.slots.length) return;\r\n' +
+    '  crmGraphqlTemplate = data;\r\n' +
+    '  try { chrome.storage.session.set({ crmGraphqlTemplate: data }).catch(() => {}); } catch (_) {}\r\n' +
+    "  console.log(`[FB Engine] 🧩 Bắt được GraphQL thread-messages template: doc_id=${data.doc_id} slots=${data.slots.join(',')}`);\r\n" +
+    "  bgDebug({ stage: 'TEMPLATE_CAPTURED', doc_id: data.doc_id, slots: data.slots, page: data.page || '' });\r\n" +
+    '}\r\n' +
+    '\r\n' +
+    'function triggerGraphqlFastFetch(tabId, threads, senderUrl) {\r\n' +
+    '  const list = (Array.isArray(threads) ? threads : []).filter((t) => t && t.thread_id);\r\n' +
+    "  bgDebug({ stage: 'HINT', tab: tabId != null ? String(tabId) : null, url: String(senderUrl || '').substring(0, 80), template: Boolean(crmGraphqlTemplate), threads: list.slice(0, 8).map((t) => ({ id: String(t.thread_id).substring(0, 20), unread: Boolean(t.is_unread), out: Boolean(t.preview_is_outgoing), e2ee: Boolean(t.is_e2ee) })) });\r\n" +
+    '  if (!crmGraphqlTemplate || !tabId) return;\r\n' +
+    '  const now = Date.now();\r\n' +
+    '  if (crmFastFetchLastAt.size > 400) crmFastFetchLastAt.clear();\r\n' +
+    '  for (const t of list) {\r\n' +
+    '    const key = String(t.thread_id);\r\n' +
+    '    const last = crmFastFetchLastAt.get(key) || 0;\r\n' +
+    '    if (now - last < 4000) continue;\r\n' +
+    '    crmFastFetchLastAt.set(key, now);\r\n' +
+    "    bgDebug({ stage: 'FAST_FETCH_DISPATCH', thread_id: key.substring(0, 20) });\r\n" +
+    "    chrome.tabs.sendMessage(tabId, { type: 'CRM_FETCH_THREAD', data: { thread_id: key } }).catch(() => {});\r\n" +
+    '  }\r\n' +
+    '}\r\n' +
+    '\r\n' +
+    '// Phát lại query thread-messages trên tab chat đang có sẵn thay vì navigate\r\n' +
+    '// tab để scrape DOM: tin + URL ảnh/video về trong ~1s kể cả khi tab nền.\r\n' +
+    '// Server giao SYNC_THREAD_MESSAGES (preview đổi / media hint) là bắn ngay;\r\n' +
+    '// pass DOM history vẫn chạy sau như nguồn chuẩn, mid trùng bị dedupe.\r\n' +
+    'function dispatchPersonalGraphqlFastFetch(threadId) {\r\n' +
+    '  if (!crmGraphqlTemplate) return;\r\n' +
+    '  const bare = extractBareThreadId(threadId);\r\n' +
+    '  if (!bare) return;\r\n' +
+    '  const now = Date.now();\r\n' +
+    '  const last = crmFastFetchLastAt.get(bare) || 0;\r\n' +
+    '  if (now - last < 4000) return;\r\n' +
+    '  crmFastFetchLastAt.set(bare, now);\r\n' +
+    '  (async () => {\r\n' +
+    '    try {\r\n' +
+    "      const accId = String(user_id || '');\r\n" +
+    '      if (!accId) return;\r\n' +
+    "      const chatTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(accId, 'chat'))\r\n" +
+    "        || await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(accId, 'interaction'));\r\n" +
+    '      if (!chatTab?.id) return;\r\n' +
+    '      // Bộ nhớ trang mất template sau mỗi lần navigate; trả lại trước khi\r\n' +
+    '      // giao việc để fetch đầu tiên sau reload vẫn chạy được.\r\n' +
+    "      chrome.tabs.sendMessage(chatTab.id, { type: 'CRM_QUERY_TEMPLATE_RESTORE', data: crmGraphqlTemplate }).catch(() => {});\r\n" +
+    "      bgDebug({ stage: 'FAST_FETCH_DISPATCH', thread_id: bare.substring(0, 24), tab: String(chatTab.id) });\r\n" +
+    "      chrome.tabs.sendMessage(chatTab.id, { type: 'CRM_FETCH_THREAD', data: { thread_id: bare } }).catch(() => {});\r\n" +
+    '    } catch (_) {}\r\n' +
+    '  })();\r\n' +
+    '}\r\n' +
+    '\r\n' +
+    'try {\r\n' +
+    "  chrome.storage.session.get('crmGraphqlTemplate').then((res) => {\r\n" +
+    '    if (res?.crmGraphqlTemplate) crmGraphqlTemplate = res.crmGraphqlTemplate;\r\n' +
+    '  }).catch(() => {});\r\n' +
+    '} catch (_) {}\r\n' +
+    'let user_id = null;\r\n' +
+    'let account_name = null;\r\n' +
+    'let account_avatar_url = null;\r\n' +
+    'let lastMessengerTabDedup'... 458130 more characters
+  
+      at TestContext.<anonymous> (C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\unit\sidebarActivityFallback.test.js:28:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1382:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:960:18)
+      at Test.postRun (node:internal/test_runner/test:1522:19)
+      at Test.run (node:internal/test_runner/test:1447:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: '// AutoChatbot FB Engine - Service Worker Background Script\r\nimportScripts(\'tabCreationCoordinator.js\', \'queueEnvelopeValidation.js\', \'callTabDeduplicator.js\', \'messengerTabDeduplicator.js\', \'messengerTabRoles.js\', \'pageVideoUploader.js\', \'pageNameExtractor.js\', \'pageDiscovery.js\', \'pageIdentityGate.js\', \'tabAudit.js\');\r\nconst tabCreationCoordinator = self.FbCrmTabCreationCoordinator.createTabCreationCoordinator();\r\n\r\nasync function blockFacebookNativeNotifications() {\r\n  if (!chrome?.contentSettings?.notifications) return;\r\n  const patterns = [\r\n    \'https://[*.]facebook.com/*\',\r\n    \'https://[*.]messenger.com/*\'\r\n  ];\r\n  for (const primaryPattern of patterns) {\r\n    try {\r\n      await chrome.contentSettings.notifications.set({\r\n        primaryPattern,\r\n        setting: \'block\',\r\n        scope: \'regular\'\r\n      });\r\n    } catch (_) {}\r\n  }\r\n}\r\n\r\nblockFacebookNativeNotifications();\r\nlet ws = null;\r\nconst BACKEND_OUTBOX_STORAGE_KEY = \'fb_engine_realtime_outbox_v1\';\r\nconst QUEUED_BACKEND_TYPES = new Set([\'NEW_MESSAGE_RECEIVED\', \'PAGE_NAME_DETECTED\', \'PAGE_EXTENSION_READY\']);\r\nlet backendOutbox = [];\r\nlet backendOutboxLoaded = null;\r\nlet backendOutboxFlushInFlight = false;\r\nlet backendAccountRegistered = false;\r\nlet backendOutboxAckTimer = null;\r\n\r\nfunction backendOutboxIdentity(entry) {\r\n  const data = entry?.data || {};\r\n  return [\r\n    entry?.type || \'\', data.account_id || \'\', data.thread_id || \'\',\r\n    data.fb_message_id || data.client_message_id || \'\', data.source || \'\',\r\n    data.media_type || \'text\', data.timestamp_ms || data.created_at || \'\',\r\n    data.content || \'\'\r\n  ].join(\'|\');\r\n}\r\n\r\nfunction loadBackendOutbox() {\r\n  if (!backendOutboxLoaded) {\r\n    backendOutboxLoaded = chrome.storage.local.get([BACKEND_OUTBOX_STORAGE_KEY])\r\n      .then((stored) => {\r\n        const persisted = Array.isArray(stored?.[BACKEND_OUTBOX_STORAGE_KEY])\r\n          ? stored[BACKEND_OUTBOX_STORAGE_KEY]\r\n          : [];\r\n        const combined = [...persisted, ...backendOutbox];\r\n        const seen = new Set();\r\n        backendOutbox = combined.filter((entry) => {\r\n          const identity = backendOutboxIdentity(entry);\r\n          if (seen.has(identity)) return false;\r\n          seen.add(identity);\r\n          return true;\r\n        }).slice(-500);\r\n        return backendOutbox;\r\n      })\r\n      .catch(() => backendOutbox);\r\n  }\r\n  return backendOutboxLoaded;\r\n}\r\n\r\nfunction persistBackendOutbox() {\r\n  return chrome.storage.local.set({ [BACKEND_OUTBOX_STORAGE_KEY]: backendOutbox.slice(-500) }).catch(() => {});\r\n}\r\n\r\nfunction enqueueBackendPayload(type, data) {\r\n  const entry = {\r\n    type, data, queued_at: Date.now(),\r\n    outbox_id: (globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`)\r\n  };\r\n  loadBackendOutbox().then(() => {\r\n    const identity = backendOutboxIdentity(entry);\r\n    if (!backendOutbox.some((candidate) => backendOutboxIdentity(candidate) === identity)) {\r\n      backendOutbox.push(entry);\r\n      if (backendOutbox.length > 500) backendOutbox.splice(0, backendOutbox.length - 500);\r\n    }\r\n    return persistBackendOutbox();\r\n  }).catch(() => {});\r\n}\r\n\r\nasync function flushBackendOutbox() {\r\n  // Keep queued incoming messages until the server has bound this socket to\r\n  // the Facebook account. A socket can be open before registration is ready.\r\n  if (backendOutboxFlushInFlight || !backendAccountRegistered || !ws || ws.readyState !== WebSocket.OPEN) return;\r\n  backendOutboxFlushInFlight = true;\r\n  try {\r\n    await loadBackendOutbox();\r\n    const entry = backendOutbox[0];\r\n    if (!entry) return;\r\n    const data = entry?.data || {};\r\n    if (!data.account_id && !user_id) return;\r\n    if (!entry.outbox_id) {\r\n      entry.outbox_id = (globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}`);\r\n      await persistBackendOutbox();\r\n    }\r\n    ws.send(JSON.stringify({\r\n      type: entry.type,\r\n      outbox_id: entry.outbox_id,\r\n      data: { ...data, account_id: data.account_id || user_id }\r\n    }));\r\n    clearTimeout(backendOutboxAckTimer);\r\n    backendOutboxAckTimer = setTimeout(() => {\r\n      backendOutboxFlushInFlight = false;\r\n      flushBackendOutbox().catch(() => {});\r\n    }, 5000);\r\n  } catch (error) {\r\n    console.warn(\'[FB Engine] Không thể phát lại realtime outbox:\', error?.message || error);\r\n  } finally {\r\n    if (!backendOutbox.length) backendOutboxFlushInFlight = false;\r\n  }\r\n}\r\nconst pendingSetupRegistrationAccounts = new Set();\r\n\r\nfunction waitForPendingSetupCompletion(accountId, attempt = 0) {\r\n  const accountKey = String(accountId || \'\');\r\n  if (!accountKey || pendingSetupRegistrationAccounts.has(accountKey)) return;\r\n  pendingSetupRegistrationAccounts.add(accountKey);\r\n\r\n  const check = async () => {\r\n    try {\r\n      const tab = await getFacebookTab(accountKey);\r\n      if (!tab?.id) throw new Error(\'MESSENGER_TAB_NOT_READY\');\r\n      await assertMessengerRecoveryDialogResolved(tab.id);\r\n      await chrome.scripting.executeScript({\r\n        target: { tabId: tab.id },\r\n        func: () => sessionStorage.removeItem(\'crm_pending_account_setup\')\r\n      }).catch(() => {});\r\n      const reloadComplete = waitForTabComplete(tab.id, 15000);\r\n      await chrome.tabs.reload(tab.id);\r\n      await Promise.race([reloadComplete, delay(5000)]);\r\n      await delay(1000);\r\n      pendingSetupRegistrationAccounts.delete(accountKey);\r\n      sendToBackend(\'REGISTER_ACCOUNT\', {\r\n        account_id: accountKey,\r\n        fb_dtsg: fb_dtsg || \'\',\r\n        pending_key: null,\r\n        name: account_name || null, avatar_url: account_avatar_url || null\r\n      });\r\n      console.log(`[FB Engine] Setup/PIN completed; normal sync enabled for account=${accountKey}`);\r\n    } catch (_) {\r\n      pendingSetupRegistrationAccounts.delete(accountKey);\r\n      if (attempt < 120) {\r\n        setTimeout(() => waitForPendingSetupCompletion(accountKey, attempt + 1), 5000);\r\n      }\r\n    }\r\n  };\r\n\r\n  setTimeout(check, attempt === 0 ? 8000 : 0);\r\n}\r\nlet fb_dtsg = null;\r\nconst TRUSTED_SEND_ADAPTER_VERSION = "trusted-send-v1";\r\n\r\n// ── GraphQL template replay: bắt tin nhắn thread không cần mở tab ──\r\n// Messenger trang đẩy delta tin nhắn xuống transport không thấy được từ\r\n// trang, nên intercept WebSocket luôn cụt. Thay vào đó ghi lại body query\r\n// GraphQL messenger.com dùng khi mở thread (CRM_QUERY_TEMPLATE từ injected),\r\n// rồi phát lại cho thread sidebar vừa báo có tin mới — tin + URL media về\r\n// trong ~1s, không điều hướng, server dedup theo mid + promote preview.\r\nlet crmGraphqlTemplate = null;\r\nconst crmFastFetchLastAt = new Map();\r\n\r\nfunction bgDebug(data) {\r\n  try { sendToBackend(\'CONTENT_DEBUG\', { kind: \'bg\', ...data }); } catch (_) {}\r\n}\r\n\r\nfunction handleCrmQueryTemplate(data) {\r\n  if (!data || !data.doc_id || !data.variables || !Array.isArray(data.slots) || !data.slots.length) return;\r\n  crmGraphqlTemplate = data;\r\n  try { chrome.storage.session.set({ crmGraphqlTemplate: data }).catch(() => {}); } catch (_) {}\r\n  console.log(`[FB Engine] 🧩 Bắt được GraphQL thread-messages template: doc_id=${data.doc_id} slots=${data.slots.join(\',\')}`);\r\n  bgDebug({ stage: \'TEMPLATE_CAPTURED\', doc_id: data.doc_id, slots: data.slots, page: data.page || \'\' });\r\n}\r\n\r\nfunction triggerGraphqlFastFetch(tabId, threads, senderUrl) {\r\n  const list = (Array.isArray(threads) ? threads : []).filter((t) => t && t.thread_id);\r\n  bgDebug({ stage: \'HINT\', tab: tabId != null ? String(tabId) : null, url: String(senderUrl || \'\').substring(0, 80), template: Boolean(crmGraphqlTemplate), threads: list.slice(0, 8).map((t) => ({ id: String(t.thread_id).substring(0, 20), unread: Boolean(t.is_unread), out: Boolean(t.preview_is_outgoing), e2ee: Boolean(t.is_e2ee) })) });\r\n  if (!crmGraphqlTemplate || !tabId) return;\r\n  const now = Date.now();\r\n  if (crmFastFetchLastAt.size > 400) crmFastFetchLastAt.clear();\r\n  for (const t of list) {\r\n    const key = String(t.thread_id);\r\n    const last = crmFastFetchLastAt.get(key) || 0;\r\n    if (now - last < 4000) continue;\r\n    crmFastFetchLastAt.set(key, now);\r\n    bgDebug({ stage: \'FAST_FETCH_DISPATCH\', thread_id: key.substring(0, 20) });\r\n    chrome.tabs.sendMessage(tabId, { type: \'CRM_FETCH_THREAD\', data: { thread_id: key } }).catch(() => {});\r\n  }\r\n}\r\n\r\n// Phát lại query thread-messages trên tab chat đang có sẵn thay vì navigate\r\n// tab để scrape DOM: tin + URL ảnh/video về trong ~1s kể cả khi tab nền.\r\n// Server giao SYNC_THREAD_MESSAGES (preview đổi / media hint) là bắn ngay;\r\n// pass DOM history vẫn chạy sau như nguồn chuẩn, mid trùng bị dedupe.\r\nfunction dispatchPersonalGraphqlFastFetch(threadId) {\r\n  if (!crmGraphqlTemplate) return;\r\n  const bare = extractBareThreadId(threadId);\r\n  if (!bare) return;\r\n  const now = Date.now();\r\n  const last = crmFastFetchLastAt.get(bare) || 0;\r\n  if (now - last < 4000) return;\r\n  crmFastFetchLastAt.set(bare, now);\r\n  (async () => {\r\n    try {\r\n      const accId = String(user_id || \'\');\r\n      if (!accId) return;\r\n      const chatTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(accId, \'chat\'))\r\n        || await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(accId, \'interaction\'));\r\n      if (!chatTab?.id) return;\r\n      // Bộ nhớ trang mất template sau mỗi lần navigate; trả lại trước khi\r\n      // giao việc để fetch đầu tiên sau reload vẫn chạy được.\r\n      chrome.tabs.sendMessage(chatTab.id, { type: \'CRM_QUERY_TEMPLATE_RESTORE\', data: crmGraphqlTemplate }).catch(() => {});\r\n      bgDebug({ stage: \'FAST_FETCH_DISPATCH\', thread_id: bare.substring(0, 24), tab: String(chatTab.id) });\r\n      chrome.tabs.sendMessage(chatTab.id, { type: \'CRM_FETCH_THREAD\', data: { thread_id: bare } }).catch(() => {});\r\n    } catch (_) {}\r\n  })();\r\n}\r\n\r\ntry {\r\n  chrome.storage.session.get(\'crmGraphqlTemplate\').then((res) => {\r\n    if (res?.crmGraphqlTemplate) crmGraphqlTemplate = res.crmGraphqlTemplate;\r\n  }).catch(() => {});\r\n} catch (_) {}\r\nlet user_id = null;\r\nlet account_name = null;\r\nlet account_avatar_url = null;\r\nlet lastMessengerTabDedup'... 458130 more characters,
+    expected: /parsedThreads\.length[\s\S]+?observedThreads/,
+    operator: 'match',
+    diff: 'simple'
+  }
+
+test at tests\unit\timestampOverwriteProtection.test.js:33:1
+✖ quét lại có thời gian hợp lệ + source xịn hơn thì được cập nhật (10.0834ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  1000 !== 2000
+  
+      at TestContext.<anonymous> (C:\Users\Admin\Downloads\Duan\CRM_FB1\tests\unit\timestampOverwriteProtection.test.js:46:12)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1382:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:960:18)
+      at Test.postRun (node:internal/test_runner/test:1522:19)
+      at Test.run (node:internal/test_runner/test:1447:12)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 1000,
+    expected: 2000,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

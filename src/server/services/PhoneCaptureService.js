@@ -13,7 +13,7 @@ function getDefaultDb() {
   return defaultDb;
 }
 
-const { findPhoneNumbers, RULE_VERSION } = require('../utils/vietnamPhone');
+const { findPhoneNumbers, RULE_VERSION, INTL_RULE_VERSION } = require('../utils/vietnamPhone');
 const { resolveInternalThreadId } = require('../utils/threadIdResolver');
 const ContactPhoneCaptureRepository = require('../repositories/ContactPhoneCaptureRepository');
 
@@ -56,7 +56,7 @@ class PhoneCaptureService {
           rawPhone: candidate.raw,
           messageId,
           messageTimestampMs: Number(messageTimestampMs) || 0,
-          ruleVersion: RULE_VERSION
+          ruleVersion: candidate.country ? INTL_RULE_VERSION : RULE_VERSION
         }, database);
 
         if (!created) {

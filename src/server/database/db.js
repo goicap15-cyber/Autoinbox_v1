@@ -1387,6 +1387,313 @@ const migrations = [
       }
       console.log(`[DB] Migration v20261019001: Purged ${purged} fabricated page profile_url(s).`);
     }
+  },
+  {
+    version: 20261011001,
+    name: 'add_messages_sender_name_and_member_avatars',
+    up: (db) => {
+      try {
+        db.exec('ALTER TABLE messages ADD COLUMN sender_name TEXT;');
+      } catch (e) {
+        console.log('[DB] Migration v20261011001: messages.sender_name already exists, skipped.');
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS message_sender_avatars (
+          thread_id TEXT NOT NULL,
+          sender_name TEXT NOT NULL,
+          avatar_url TEXT,
+          updated_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (thread_id, sender_name)
+        );
+      `);
+      console.log('[DB] Migration v20261011001: Added messages.sender_name + message_sender_avatars.');
+    }
+  },
+  {
+    // 2026-10-13: khách bình luận bài viết (quét qua API Viet Seeding) —
+    // lead nhận tin nhắn chờ đầu tiên qua queue personal Messenger, theo dõi
+    // trạng thái chờ gửi / đã gửi / khách đã trả lời.
+    version: 20261013001,
+    name: 'add_comment_leads',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS comment_leads (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          post_url TEXT NOT NULL,
+          author_uid TEXT NOT NULL,
+          author_name TEXT,
+          author_profile_url TEXT,
+          account_id TEXT,
+          thread_id TEXT,
+          queue_id TEXT,
+          status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','queued','sent','failed','replied')),
+          message_content TEXT,
+          error TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          queued_at DATETIME,
+          sent_at DATETIME,
+          replied_at DATETIME,
+          UNIQUE(post_url, author_uid)
+        );
+        CREATE INDEX IF NOT EXISTS idx_comment_leads_status ON comment_leads(status);
+        CREATE INDEX IF NOT EXISTS idx_comment_leads_thread ON comment_leads(thread_id);
+      `);
+      console.log('[DB] Migration v20261013001: Added comment_leads.');
+    }
+  },
+  {
+    // 2026-10-13: ghim CỐ ĐỊNH vị trí — nhóm ghim xếp theo thời điểm ghim
+    // (pinned_at DESC) thay vì theo tin nhắn mới, nên hội thoại ghim không
+    // trôi xuống khi activity thay đổi; chỉ tụt xuống nhóm thường khi bỏ ghim.
+    // %f cho precision millisecond để ghim hàng loạt (enqueue nhiều lead cùng
+    // lúc) vẫn có thứ tự ổn định, không rơi vào tie-break theo activity.
+    version: 20261013002,
+    name: 'add_threads_pinned_at',
+    up: (db) => {
+      db.exec('ALTER TABLE threads ADD COLUMN pinned_at TEXT;');
+      // Backfill: giữ nguyên thứ tự hiện tại của nhóm ghim (activity mới nhất
+      // đứng trước) bằng cách cấp pinned_at cách nhau 1ms giảm dần.
+      const pinnedRows = db.prepare(`
+        SELECT t.id FROM threads t
+        LEFT JOIN (
+          SELECT thread_id, MAX(timestamp_ms) AS max_ts
+          FROM messages WHERE timestamp_ms > 0 GROUP BY thread_id
+        ) lm ON lm.thread_id = t.id
+        WHERE COALESCE(t.pinned, 0) = 1
+        ORDER BY
+          CASE WHEN COALESCE(t.is_unread, 0) = 1 OR COALESCE(t.unread_manual, 0) = 1 THEN 0 ELSE 1 END ASC,
+          COALESCE(NULLIF(lm.max_ts, 0), CAST(strftime('%s', t.last_activity) AS INTEGER) * 1000) DESC,
+          t.id DESC
+      `).all();
+      const now = Date.now();
+      const fmt = (ms) => new Date(ms).toISOString().slice(0, 23).replace('T', ' ');
+      for (let i = 0; i < pinnedRows.length; i += 1) {
+        db.prepare('UPDATE threads SET pinned_at = ? WHERE id = ?').run(fmt(now - i), pinnedRows[i].id);
+      }
+      console.log(`[DB] Migration v20261013002: Added threads.pinned_at + backfilled ${pinnedRows.length} pinned thread(s).`);
+    }
+  },
+  {
+    // 2026-10-14: hội thoại comment-lead chỉ được nằm trong danh sách chính
+    // SAU khi tin gửi THÀNH CÔNG (markQueueSent đẩy INBOX + ghim). Dọn dữ liệu
+    // cũ: lead 'queued' -> thread hạ về tab "Tin nhắn chờ" (folder
+    // MESSAGE_REQUEST_*), lead 'failed' -> xóa thread nếu chưa có tin incoming
+    // nào (khách từng nhắn thật thì giữ nguyên hội thoại).
+    version: 20261014001,
+    name: 'comment_lead_thread_after_send_only',
+    // Chủ ý xóa thread lead lỗi (chưa từng có hội thoại thật) — không được
+    // để guard "reduced persisted row counts" chặn startup.
+    allowsRowCountReduction: true,
+    up: (db) => {
+      const leads = db.prepare(`
+        SELECT id, thread_id, status, queue_id FROM comment_leads
+        WHERE status IN ('failed', 'queued') AND thread_id IS NOT NULL
+      `).all();
+      let demoted = 0;
+      let removed = 0;
+      for (const lead of leads) {
+        const tid = String(lead.thread_id);
+        const incoming = db.prepare('SELECT 1 FROM messages WHERE thread_id = ? AND is_outgoing = 0 LIMIT 1').get(tid);
+        if (incoming) {
+          db.prepare('UPDATE comment_leads SET thread_id = NULL WHERE id = ? AND status = \'failed\'').run(lead.id);
+          continue;
+        }
+        if (lead.status === 'queued') {
+          db.prepare("UPDATE threads SET inbox_folder = 'MESSAGE_REQUEST_POSSIBLE', pinned = 0, pinned_at = NULL WHERE id = ?").run(tid);
+          db.prepare('UPDATE comment_leads SET thread_id = NULL WHERE id = ?').run(lead.id);
+          demoted += 1;
+          continue;
+        }
+        // failed: dọn thread chưa từng có hội thoại thật
+        if (lead.queue_id) {
+          db.prepare("DELETE FROM messages WHERE thread_id = ? AND client_message_id = ? AND delivery_status = 'pending'").run(tid, `queue_${lead.queue_id}`);
+        }
+        const remaining = db.prepare('SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?').get(tid);
+        if (Number(remaining?.n) > 0) {
+          db.prepare('UPDATE comment_leads SET thread_id = NULL WHERE id = ?').run(lead.id);
+          continue;
+        }
+        db.prepare('DELETE FROM contacts WHERE thread_id = ?').run(tid);
+        db.prepare('DELETE FROM threads WHERE id = ?').run(tid);
+        db.prepare('UPDATE comment_leads SET thread_id = NULL WHERE id = ?').run(lead.id);
+        removed += 1;
+      }
+      console.log(`[DB] Migration v20261014001: hội thoại lead chỉ hiện sau khi gửi — ${demoted} lead chờ về tab Tin nhắn chờ, ${removed} thread lead lỗi bị dọn.`);
+    }
+  },
+  {
+    // 2026-10-14 (lần 2): lead gửi LỖI DỨT ĐIỂM bị XÓA khỏi comment_leads
+    // (markQueueFailed) thay vì giữ trạng thái 'failed' — user: "nếu lỗi thì
+    // tự xóa đi không để ở danh sách". Quét lại bài sẽ trả lead về 'new'.
+    // Lỗi môi trường (EXTENSION_NOT_CONNECTED / EXTENSION_DISPATCH_FAILED)
+    // vẫn giữ lead 'queued' để gửi lại khi Chrome kết nối.
+    version: 20261014002,
+    name: 'delete_failed_comment_leads',
+    // Xóa thread rỗng của lead lỗi → số row giảm chủ ý, không được để guard chặn startup.
+    allowsRowCountReduction: true,
+    up: (db) => {
+      const stale = db.prepare("SELECT id, thread_id, queue_id FROM comment_leads WHERE status = 'failed'").all();
+      let removedThreads = 0;
+      for (const lead of stale) {
+        if (lead.thread_id) {
+          const tid = String(lead.thread_id);
+          const incoming = db.prepare('SELECT 1 FROM messages WHERE thread_id = ? AND is_outgoing = 0 LIMIT 1').get(tid);
+          if (!incoming) {
+            if (lead.queue_id) {
+              db.prepare("DELETE FROM messages WHERE thread_id = ? AND client_message_id = ? AND delivery_status = 'pending'").run(tid, `queue_${lead.queue_id}`);
+            }
+            const remaining = db.prepare('SELECT COUNT(*) AS n FROM messages WHERE thread_id = ?').get(tid);
+            if (Number(remaining?.n) === 0) {
+              db.prepare('DELETE FROM contacts WHERE thread_id = ?').run(tid);
+              db.prepare('DELETE FROM threads WHERE id = ?').run(tid);
+              removedThreads += 1;
+            }
+          }
+        }
+      }
+      const gone = db.prepare("DELETE FROM comment_leads WHERE status = 'failed'").run().changes;
+      console.log(`[DB] Migration v20261014002: xóa ${gone} lead gửi lỗi (kèm ${removedThreads} hội thoại rỗng) — lỗi thì tự khỏi danh sách.`);
+    }
+  },
+  {
+    // 2026-10-15: đồng bộ tin nhắn TRẢ LỜI — cột messages.reply_to_text giữ
+    // nội dung khối quote ("Tin nhắn gốc: X") để CRM render như Messenger.
+    // Kèm heal thread Hai Anh (61590887756824): xóa row ma trùng do
+    // bubble_idx trôi (jGrG__bubble_2/__bubble_3) và xếp lại 4 tin catch-up
+    // bị chèn sai vị trí (thế là/lộn/1 năm/Nói chung) theo đúng thứ tự đọc
+    // từ DOM Facebook (CDP peek 2026-10-15) + trả timestamp về phút thật.
+    version: 20261015001,
+    name: 'messages_reply_to_text_heal_hai_anh',
+    allowsRowCountReduction: true,
+    up: (db) => {
+      try { db.exec('ALTER TABLE messages ADD COLUMN reply_to_text TEXT;'); } catch (e) { }
+      const THREAD = '61590887756824';
+      const rows = db.prepare('SELECT id, fb_message_id, content, is_outgoing, rowid AS rid FROM messages WHERE thread_id = ?').all(THREAD);
+      const byKey = new Map();
+      const ghostIds = [];
+      for (const r of rows) {
+        const base = String(r.fb_message_id || '').replace(/__bubble_\d+$/, '');
+        const key = `${base}|${String(r.content || '').trim()}|${r.is_outgoing ? 1 : 0}`;
+        const kept = byKey.get(key);
+        if (!kept) { byKey.set(key, r); continue; }
+        const drop = r.rid > kept.rid ? r : kept;
+        byKey.set(key, drop === r ? kept : r);
+        ghostIds.push(drop.id);
+      }
+      let ghosts = 0;
+      for (const gid of ghostIds) {
+        db.prepare('DELETE FROM messages WHERE id = ?').run(gid);
+        ghosts += 1;
+      }
+      const targetOrder = [
+        'mid.$cAABi8CdLrnGnbqZ_gGhPWEykO-MS',
+        'mid.$cAABi8CdLrnGnbqaXYGhPWFN2TEWe',
+        'mid.$cAABi8CdLrnGnbqa5RWhPWFvt9eQn',
+        'mid.$cAABi8CdLrnGnbqbLPmhPWF84NAry__bubble_2',
+        'mid.$cAABi8CdLrnGnbqbfrGhPWGSeS2H1',
+        'mid.$cAABi8CdLrnGnbqbqV2hPWGdfzhcR',
+        'mid.$cAABi8CdLrnGnbqcgO2hPWHWxAD1S',
+        'mid.$cAABi8CdLrnGnbqc4fWhPWHu_sqgE',
+        'mid.$cAABi8CdLrnGnbqf8g2hPWKzAy6As',
+        'mid.$cAABi8CdLrnGnbqgUrGhPWLLN5nMf',
+        'mid.$cAABi8CdLrnGnbqhCK2hPWL4pbdDh',
+        'mid.$cAABi8CdLrnGnbqhOyWhPWMFSAiWY',
+        'mid.$cAABi8CdLrnGnbqhYsWhPWMPK1icn',
+        'mid.$cAABi8CdLrnGnbqh-OWhPWMxHs6T5',
+        'mid.$cAABi8CdLrnGnbqjGrGhPWN5pizZX__bubble_3',
+        'mid.$cAABi8CdLrnGnbqtVBGhPWYOQBh3D',
+        'mid.$cAABi8CdLrnGnbqxHYGhPWcBBNH2f'
+      ];
+      const tsFixes = {
+        'mid.$cAABi8CdLrnGnbqbLPmhPWF84NAry__bubble_2': '2026-10-15T02:26:00.000Z',
+        'mid.$cAABi8CdLrnGnbqbfrGhPWGSeS2H1': '2026-10-15T02:26:00.001Z',
+        'mid.$cAABi8CdLrnGnbqbqV2hPWGdfzhcR': '2026-10-15T02:26:00.002Z',
+        'mid.$cAABi8CdLrnGnbqf8g2hPWKzAy6As': '2026-10-15T02:27:00.000Z',
+        'mid.$cAABi8CdLrnGnbqgUrGhPWLLN5nMf': '2026-10-15T02:27:00.001Z',
+        'mid.$cAABi8CdLrnGnbqhCK2hPWL4pbdDh': '2026-10-15T02:27:00.002Z',
+        'mid.$cAABi8CdLrnGnbqhOyWhPWMFSAiWY': '2026-10-15T02:27:00.003Z',
+        'mid.$cAABi8CdLrnGnbqhYsWhPWMPK1icn': '2026-10-15T02:27:00.004Z',
+        'mid.$cAABi8CdLrnGnbqh-OWhPWMxHs6T5': '2026-10-15T02:27:00.005Z'
+      };
+      let resequenced = 0;
+      if (targetOrder.length) {
+        const first = db.prepare('SELECT sequence_order FROM messages WHERE thread_id = ? AND fb_message_id = ?').get(THREAD, targetOrder[0]);
+        const startSeq = Number(first?.sequence_order);
+        if (Number.isFinite(startSeq) && startSeq > 0) {
+          for (let i = 0; i < targetOrder.length; i++) {
+            const fix = tsFixes[targetOrder[i]];
+            const ts = fix ? Date.parse(fix) : null;
+            db.prepare('UPDATE messages SET sequence_order = ?, timestamp_ms = COALESCE(?, timestamp_ms), created_at = COALESCE(?, created_at) WHERE thread_id = ? AND fb_message_id = ?')
+              .run(startSeq + i, ts, ts ? new Date(ts).toISOString() : null, THREAD, targetOrder[i]);
+            resequenced += 1;
+          }
+        }
+      }
+      console.log(`[DB] Migration v20261015001: thêm reply_to_text, xóa ${ghosts} tin ma trùng, xếp lại ${resequenced} tin thread Hai Anh theo thứ tự thật.`);
+    }
+  },
+  {
+    // 2026-10-15: header reply "X đã trả lời Y" có pass hydration render bằng
+    // div thay vì h3 -> extractor cũ nhặt thành tin thật (kèm mid gốc, không
+    // __bubble) và CRM hiện 2 bubble song song: header ghost + tin reply thật
+    // (có quote). Extractor đã chặn header; migration này dọn các row ghost đã
+    // lưu. Chỉ đụng row do extension ingest (mid.$ / @msgr); row Graph watcher
+    // (m_...) như "X đã trả lời về một bài viết" là event page inbox, giữ.
+    version: 20261015002,
+    name: 'delete_reply_header_ghost_rows',
+    allowsRowCountReduction: true,
+    up: (db) => {
+      const HEADER_RE = /^[^?！?\n]{1,48}\s(?:đã trả lời|replied to)\s(?!(?:.*\s)?(?:chưa|rồi|xong|sao|đâu|gì|à|hả|nhỉ|nha|nhé|thôi|luôn|vậy|đấy|đó|ạ|nhá|rùi|nè|được|yet|already|right|now|ok|okay)\s*[?！?.!…]*$)[^?！?\n]{1,60}$/iu;
+      const rows = db.prepare(`
+        SELECT id, content, fb_message_id FROM messages
+        WHERE content LIKE '% đã trả lời %' OR content LIKE '% replied to %'
+      `).all();
+      let removed = 0;
+      for (const r of rows) {
+        const mid = String(r.fb_message_id || '');
+        if (!/^mid\.\$/.test(mid) && !/@msgr\./.test(mid)) continue;
+        const text = String(r.content || '').trim();
+        if (/quảng cáo|replied to (?:an |your )?ad/i.test(text)) continue;
+        if (/bài viết|story/i.test(text)) continue;
+        if (!HEADER_RE.test(text)) continue;
+        db.prepare('DELETE FROM messages WHERE id = ?').run(r.id);
+        removed += 1;
+      }
+      console.log(`[DB] Migration v20261015002: xóa ${removed} row header reply ghost ("X đã trả lời Y").`);
+    }
+  },
+  {
+    // 2026-10-15: quote reply cần TÊN người bị trả lời + neo click-lướt tới
+    // tin gốc trong CRM. reply_to_id = messages.id của tin gốc (khớp theo nội
+    // dung reply_to_text trong cùng thread, ưu tiên tin đứng TRƯỚC theo thời
+    // gian); reply_to_sender_name giải lúc lưu: outgoing -> "Bạn", incoming ->
+    // sender_name (nhóm) / contact_name (1-1). Row cũ được backfill ở heal.
+    version: 20261015003,
+    name: 'messages_reply_to_target_columns',
+    up: (db) => {
+      try { db.exec('ALTER TABLE messages ADD COLUMN reply_to_id INTEGER;'); } catch (e) { }
+      try { db.exec('ALTER TABLE messages ADD COLUMN reply_to_sender_name TEXT;'); } catch (e) { }
+      console.log('[DB] Migration v20261015003: thêm reply_to_id + reply_to_sender_name.');
+    }
+  },
+  {
+    // 2026-10-15: mention nhóm đầy đủ — extension quét panel "Thành viên trong
+    // đoạn chat" của Messenger rồi đẩy list member thật về server; composer @
+    // dùng list này thay vì chỉ dựng từ tên người đã nhắn tin trong thread.
+    version: 20261015004,
+    name: 'add_group_members_table',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS group_members (
+          thread_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          avatar_url TEXT,
+          updated_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (thread_id, name)
+        );
+      `);
+      console.log('[DB] Migration v20261015004: thêm bảng group_members.');
+    }
   }
 ];
 

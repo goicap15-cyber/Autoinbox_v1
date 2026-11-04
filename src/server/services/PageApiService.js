@@ -18,6 +18,11 @@ const PhoneCaptureService = require('./PhoneCaptureService');
 const { extractLeadInfo } = require('../utils/leadExtractor');
 const { saveAvatarFromBase64OrUrl } = require('../utils/avatarManager');
 const { isKnownPageSystemNotice } = require('../utils/pageSystemNotice');
+const GlobalPhoneAutomationService = require('./GlobalPhoneAutomationService');
+const CampaignPhoneCaptureService = require('./CampaignPhoneCaptureService');
+const CampaignResponseStatsService = require('./CampaignResponseStatsService');
+const CampaignEventService = require('./CampaignEventService');
+const CampaignRepository = require('../repositories/CampaignRepository');
 
 const GRAPH_VERSION = 'v21.0';
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
@@ -126,6 +131,45 @@ function appRemove(accountId, appId, database = getDb()) {
 function appList(accountId, database = getDb()) {
   const cur = readConfig(accountKey(accountId), database);
   return Array.isArray(cur.apps) ? cur.apps : [];
+}
+
+// Gộp app quét được từ trang developers.facebook.com/apps/ vào danh sách app
+// của account: đã có → cập nhật tên/chế độ; chưa có → thêm vào CUỐI (app đầu
+// mảng phải giữ là app đang dùng — appGetLatest/appAdd dựa vào thứ tự này).
+function appMergeScanned(accountId, scanned, database = getDb()) {
+  const cur = readConfig(accountKey(accountId), database);
+  const apps = Array.isArray(cur.apps) ? cur.apps.slice() : [];
+  let added = 0;
+  let updated = 0;
+  for (const s of Array.isArray(scanned) ? scanned : []) {
+    if (!s || !/^\d+$/.test(String(s.appId || ''))) continue;
+    const i = apps.findIndex((x) => x.appId === String(s.appId));
+    if (i >= 0) {
+      apps[i] = {
+        ...apps[i],
+        name: s.name || apps[i].name,
+        mode: s.mode || apps[i].mode || null,
+        type: s.type || apps[i].type || null,
+        lastSeenAt: new Date().toISOString(),
+      };
+      updated++;
+    } else {
+      apps.push({
+        appId: String(s.appId),
+        name: s.name || ('App ' + s.appId),
+        status: 'scanned',
+        source: 'scan',
+        mode: s.mode || null,
+        type: s.type || null,
+        note: 'Quét từ developers.facebook.com',
+        createdAt: new Date().toISOString(),
+        pages: [],
+      });
+      added++;
+    }
+  }
+  if (added || updated) writeConfig(accountKey(accountId), { apps: apps.slice(0, 50) }, database);
+  return { added, updated, total: apps.length };
 }
 
 // ── Page sources: upsert khi automation cào được danh sách trang ──
@@ -494,6 +538,25 @@ function knownPageIds(database = getDb()) {
   ).all().map((r) => String(r.external_id));
 }
 
+// Gắn lại page ĐÃ CÓ về account đang chạy Đồng bộ. Xóa account cũ làm page bị
+// chuyển cho account khác hoặc mồ côi (removeAccount) — nếu Đồng bộ bỏ qua page
+// đã known thì page cũ mãi không hiện lại trong popup của account login lại.
+// Trả về số page thực sự đổi chủ.
+function reclaimPages(accountId, pageIds, database = getDb()) {
+  if (!accountId) return 0;
+  let changed = 0;
+  for (const pageId of pageIds || []) {
+    if (!pageId) continue;
+    const existing = database.prepare(
+      "SELECT id, owner_account_id FROM inbox_sources WHERE source_type = 'page_messenger' AND external_id = ?"
+    ).get(String(pageId));
+    if (!existing || existing.owner_account_id === String(accountId)) continue;
+    upsertPages(accountId, [{ pageId: String(pageId) }], database);
+    changed++;
+  }
+  return changed;
+}
+
 // ── Backfill hội thoại của 1 page từ Graph API ──
 // Đồng bộ N hội thoại gần nhất + tin nhắn của từng hội thoại vào CRM.
 async function backfillConversations(sourceId, io, options = {}, database = getDb()) {
@@ -665,6 +728,110 @@ function captureContactLeads({ threadId, accountId, messageId, content, timestam
   }
   return results;
 }
+// Bắt sdt/email từ tin khách đến Page — cùng hành vi pipeline Messenger cá
+// nhân (server.js chạy PhoneCaptureService + extractLeadInfo cho từng tin
+// incoming): lấp phone/email TRỐNG của contact, không ghi đè giá trị đã có,
+// rồi chạy tiếp global automation + campaign policy và bắn event cho UI.
+function captureLeadInfoFromGraph(threadId, source, messageId, text, tsMs, database, io) {
+  let emails = [];
+  let createdCaptures = [];
+  try {
+    ({ emails } = extractLeadInfo(text));
+    ({ createdCaptures } = PhoneCaptureService.processIncomingMessage({
+      threadId,
+      accountId: source.owner_account_id || null,
+      messageId,
+      content: text,
+      messageTimestampMs: tsMs
+    }, { database }));
+    if (emails.length > 0) {
+      database.prepare(`
+        INSERT INTO contacts (thread_id, name, email)
+        VALUES (?, ?, ?)
+        ON CONFLICT(thread_id) DO UPDATE SET
+          email = COALESCE(NULLIF(excluded.email,''), contacts.email)
+      `).run(threadId, 'Khách hàng', emails[0] || null);
+    }
+  } catch (err) {
+    console.warn('[PageApi] Bắt sdt/email lỗi:', err.message);
+    return;
+  }
+  if (!emails.length && !createdCaptures.length) return;
+
+  if (io) {
+    io.emit('LEAD_EXTRACTED', {
+      thread_id: threadId,
+      phones: createdCaptures.map((c) => c.normalized_phone),
+      emails
+    });
+  }
+
+  // Global CRM rule (opt-in) + policy campaign — copy khối xử lý sau-bắt-được
+  // của pipeline Messenger cá nhân (server.js) để Page hành xử y hệt.
+  try {
+    const globalPhoneAutomation = GlobalPhoneAutomationService.applyCaptures(threadId, createdCaptures, database);
+    if (globalPhoneAutomation.applied) {
+      console.log(`[PageApi] Global automation áp status ${globalPhoneAutomation.settings.status_id} cho ${threadId}`);
+    }
+  } catch (err) {
+    console.warn('[PageApi] Global phone automation lỗi:', err.message);
+  }
+
+  if (createdCaptures.length && io) {
+    const phoneView = PhoneCaptureService.getContactPhoneView(threadId, database);
+    io.emit('PHONE_CAPTURED', {
+      thread_id: threadId,
+      captures: createdCaptures.map((c) => ({
+        id: c.id,
+        normalized_phone: c.normalized_phone,
+        raw_phone: c.raw_phone,
+        message_id: c.message_id,
+        message_timestamp_ms: c.message_timestamp_ms,
+        selection_state: c.selection_state
+      })),
+      phone: phoneView.phone,
+      phone_source: phoneView.phone_source,
+      phone_captured_at: phoneView.phone_captured_at,
+      phone_capture: phoneView.phone_capture,
+      phone_candidates: phoneView.phone_candidates
+    });
+    io.emit('CONTACT_UPDATED', { thread_id: threadId });
+
+    // Thống kê campaign trả lời (tin có bắt được sdt tính là phản hồi).
+    try {
+      const capturedMessage = database.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(messageId);
+      if (capturedMessage?.id) {
+        const immediateCampaignResponse = CampaignResponseStatsService.recordIncomingResponse({
+          messageId: capturedMessage.id,
+          threadId,
+          accountId: source.owner_account_id || null,
+          observedAtMs: tsMs || Date.now()
+        }, database);
+        if (immediateCampaignResponse) {
+          io.emit('CAMPAIGN_RESPONSE_UPDATED', { ...immediateCampaignResponse, thread_id: threadId, phone_captured: true });
+        }
+      }
+    } catch (err) {
+      console.warn('[PageApi] Campaign response stats lỗi:', err.message);
+    }
+  }
+
+  // Campaign phone-capture policy (stop_remaining / thank_then_stop) — bất
+  // đồng bộ, không chặn webhook; queue gửi tự route Page qua Graph API.
+  if (createdCaptures.length) {
+    CampaignPhoneCaptureService.handleCaptures(threadId, createdCaptures, {
+      database,
+      capabilityOptions: { database, getConnection: () => null }
+    }).then((affectedCampaignIds) => {
+      if (!io) return;
+      for (const campaignId of affectedCampaignIds) {
+        CampaignEventService.emit(io, CampaignRepository.getCampaign(campaignId, database));
+      }
+    }).catch((err) => {
+      console.error('[PageApi] Campaign policy sau khi bắt sdt lỗi:', err.message);
+    });
+  }
+}
 
 // Ranh giới "hôm nay" giờ máy (server và app chạy cùng máy). Tính lúc gọi —
 // tiến trình chạy dài qua nửa đêm vẫn đúng ngày.
@@ -731,6 +898,11 @@ function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}
   // "hoạt động hôm nay" + nhặt lại cờ chưa đọc (2026-10-21). align tự tiến
   // khi tin mới hơn, tự kéo lùi khi lệch quá 5 phút.
   ConversationRepository.alignThreadActivity(threadId, null, ts, database);
+
+  // Tin khách đến có text: bắt sdt/email (parity Messenger cá nhân).
+  if (!isOutgoing && text) {
+    captureLeadInfoFromGraph(threadId, source, messageId, text, ts, database, opts.io || null);
+  }
 
   // Tin khách đến REALTIME (watcher/webhook): đánh dấu chưa đọc để hội thoại
   // đẩy lên đầu danh sách (sort unread-first phía client). Backfill lịch sử
@@ -1435,6 +1607,7 @@ module.exports = {
   appUpdate,
   appRemove,
   appList,
+  appMergeScanned,
   upsertPages,
   listPages,
   savePages,
@@ -1452,6 +1625,7 @@ module.exports = {
   clearPageTokens,
   removeAccountPages,
   knownPageIds,
+  reclaimPages,
   backfillConversations,
   handleWebhookBody,
   buildAdPostLink,

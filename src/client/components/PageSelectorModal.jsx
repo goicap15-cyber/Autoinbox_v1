@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   X, RefreshCw, Check, Search, Layers, AlertCircle, CheckCircle2,
-  Rocket, KeyRound, Database, Lock, Send, Trash2, Copy, ClipboardPaste
+  Rocket, KeyRound, Database, Lock, Send, Trash2, Copy, ClipboardPaste, FolderSync
 } from 'lucide-react';
 import ConfirmModal from './ConfirmModal';
 
@@ -41,6 +41,10 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [createName, setCreateName] = useState('CRM Page');
   const [createEmail, setCreateEmail] = useState('');
+
+  // Popup chọn app trước khi đồng bộ page — bấm Đồng ý mới chạy với app đã chọn
+  const [showAppPicker, setShowAppPicker] = useState(false);
+  const [pickerAppId, setPickerAppId] = useState('');
 
   // Xóa app Facebook (kèm dọn token page của account) — lưu cả OBJECT app đang
   // chọn xóa vì giờ popup liệt kê ĐỦ các app, không chỉ app mới nhất
@@ -223,19 +227,49 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
     }
   };
 
-  // "Đồng bộ" — quét danh sách page của account, chỉ thêm page mới
-  const handleSyncPages = async () => {
+  // "Đồng bộ" — mở popup chọn app muốn dùng để đồng bộ page (mặc định chọn sẵn
+  // app đang dùng). Chốt chọn rồi mới gọi backend quét page trong ĐÚNG app đó.
+  const handleSyncPages = () => {
+    setErrorMsg(''); setSuccessMsg('');
+    setPickerAppId(app?.app_id ? String(app.app_id) : '');
+    setShowAppPicker(true);
+  };
+
+  const confirmSyncPages = async () => {
+    if (!pickerAppId) { setErrorMsg('Hãy chọn một app trước.'); return; }
     setErrorMsg(''); setSuccessMsg('');
     setBusy(true);
     try {
       const res = await fetch(`/api/page-api/accounts/${encodeURIComponent(accountId)}/sync-pages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({})
+        body: JSON.stringify({ appId: pickerAppId })
       });
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Không thể bắt đầu đồng bộ page');
+      setShowAppPicker(false);
       setJob({ sync_id: data.sync_id, kind: 'sync-pages', status: 'starting', message: 'Đang mở Chrome quét danh sách page (chạy ngầm)…' });
+    } catch (err) {
+      setErrorMsg(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // "Đồng bộ app": mở developers.facebook.com/apps/ quét MỌI app của tài khoản
+  // (kể cả app tạo ngoài CRM) → gộp vào box "App đã tạo" của modal
+  const handleSyncApps = async () => {
+    setErrorMsg(''); setSuccessMsg('');
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/page-api/accounts/${encodeURIComponent(accountId)}/sync-apps`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Không thể bắt đầu đồng bộ app');
+      setJob({ sync_id: data.sync_id, kind: 'sync-apps', status: 'starting', message: 'Đang mở Chrome quét danh sách app (chạy ngầm)…' });
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -391,9 +425,21 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
   // Click nền đen ngoài modal: chỉ cho đóng khi KHÔNG có popup/job đang chạy
   // (trước đây bấm nhầm là tắt mất popup tạo app giữa chừng — báo lỗi 2026-10-05)
   const handleBackdrop = () => {
-    if (jobRunning || showCreateForm || busy) return;
+    if (jobRunning || showCreateForm || showAppPicker || busy) return;
     onClose();
   };
+
+  // App được chọn để đồng bộ page lần gần nhất (lastPageSyncAt mới nhất) —
+  // vẽ viền nhận biết trong box "App đã tạo"
+  const pageSyncAppId = useMemo(() => {
+    let best = null;
+    let bestT = '';
+    for (const a of apps) {
+      const t = String(a.last_page_sync_at || '');
+      if (t && t > bestT) { bestT = t; best = String(a.app_id); }
+    }
+    return best;
+  }, [apps]);
 
   const jobRunning = job && !['success', 'error'].includes(job.status);
   const tokenedCount = pages.filter((p) => p.has_token).length;
@@ -489,6 +535,13 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
             <RefreshCw size={13} className={jobRunning && job?.kind === 'sync-pages' ? 'animate-spin' : ''} />
             <span>Đồng bộ</span>
           </button>
+
+          <button type="button" onClick={handleSyncApps} disabled={busy || jobRunning}
+            className="px-3 py-1.5 bg-[var(--color-bg-surface,#132235)] hover:bg-[var(--color-bg-elevated,#172b42)] disabled:opacity-50 text-xs font-medium text-[var(--color-text-primary,#f8fafc)] border border-[var(--color-border,#284057)] rounded-xl flex items-center gap-1.5 transition-colors shrink-0"
+            title="Mở developers.facebook.com/apps/ và quét MỌI ứng dụng của tài khoản vào danh sách (kể cả app tạo ngoài CRM)">
+            <FolderSync size={13} className={jobRunning && job?.kind === 'sync-apps' ? 'animate-spin' : ''} />
+            <span>Đồng bộ app</span>
+          </button>
         </div>
 
         {/* Trạng thái job đang chạy */}
@@ -548,6 +601,50 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
               <button type="button" onClick={submitCreateApp} disabled={busy || !createName.trim()}
                 className="px-3 py-1.5 bg-[var(--color-accent,#0ea5e9)] hover:bg-[var(--color-accent-hover,#38bdf8)] disabled:opacity-50 text-white text-xs font-bold rounded-xl flex items-center gap-1.5">
                 <Rocket size={12} /> Bắt đầu tạo
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Popup chọn app để đồng bộ page — chọn xong bấm Đồng ý mới chạy */}
+        {showAppPicker && !jobRunning && (
+          <div className="mx-5 mt-3 p-3 bg-[var(--color-accent,#0ea5e9)]/10 border border-[var(--color-accent,#0ea5e9)]/30 rounded-xl space-y-2">
+            <p className="text-xs font-semibold text-[var(--color-text-primary,#f8fafc)]">Chọn app để đồng bộ page</p>
+            <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
+              {apps.length === 0 ? (
+                <p className="text-[11px] text-[var(--color-text-muted,#7f95aa)]">
+                  Chưa có app nào. Hãy bấm "Tạo app &amp; Webhook" hoặc "Đồng bộ app" trước.
+                </p>
+              ) : apps.map((a) => {
+                const picked = String(a.app_id) === pickerAppId;
+                return (
+                  <div key={a.app_id} onClick={() => setPickerAppId(String(a.app_id))}
+                    className={`px-2.5 py-2 rounded-xl border cursor-pointer flex items-center gap-2 transition-all select-none ${
+                      picked
+                        ? 'bg-[var(--color-accent-subtle,rgba(14,165,233,0.12))] border-[var(--color-accent,#0ea5e9)]'
+                        : 'bg-[var(--color-bg-surface,#132235)] border-[var(--color-border,#284057)] hover:border-[var(--color-border,#284057)]'
+                    }`}>
+                    <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 ${picked ? 'border-[var(--color-accent,#0ea5e9)] bg-[var(--color-accent,#0ea5e9)]' : 'border-[var(--color-border,#284057)]'}`}>
+                      {picked && <Check size={10} strokeWidth={3} className="text-white" />}
+                    </div>
+                    <span className="text-[11px] truncate min-w-0">
+                      <strong className="text-[var(--color-text-primary,#f8fafc)]">{a.name || 'CRM'}</strong>
+                      {' '}• App ID <span className="font-mono">{a.app_id}</span>
+                      {a.mode ? ` • ${a.mode}` : ''}
+                      {a.source === 'scan' ? ' • Quét từ FB' : ''}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button type="button" onClick={() => setShowAppPicker(false)}
+                className="px-3 py-1.5 bg-[var(--color-bg-surface,#132235)] border border-[var(--color-border,#284057)] text-xs font-medium text-[var(--color-text-secondary,#cbd5e1)] rounded-xl">
+                Không
+              </button>
+              <button type="button" onClick={confirmSyncPages} disabled={busy || !pickerAppId || apps.length === 0}
+                className="px-3 py-1.5 bg-[var(--color-accent,#0ea5e9)] hover:bg-[var(--color-accent-hover,#38bdf8)] disabled:opacity-50 text-white text-xs font-bold rounded-xl flex items-center gap-1.5">
+                <RefreshCw size={12} /> Đồng ý
               </button>
             </div>
           </div>
@@ -707,18 +804,28 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
             <div className="flex items-center gap-2 mb-1.5">
               <Database size={13} className="shrink-0 text-[var(--color-accent,#0ea5e9)]" />
               <span className="font-semibold text-[var(--color-text-secondary,#cbd5e1)]">
-                App đã tạo ({apps.length}) — app đầu là app đang dùng
+                App đã tạo ({apps.length}) — app đầu là app đang dùng, viền xanh = app vừa dùng đồng bộ page
               </span>
             </div>
             <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
               {apps.map((a, i) => (
-                <div key={a.app_id || i} className="flex items-center gap-2 min-w-0">
+                <div key={a.app_id || i}
+                  className={`flex items-center gap-2 min-w-0 rounded-lg px-1.5 -mx-1.5 transition-all ${
+                    String(a.app_id) === pageSyncAppId ? 'ring-1 ring-emerald-400/70 bg-emerald-500/10' : ''
+                  }`}>
                   <span className="shrink-0 w-4 text-center font-mono text-[10px] opacity-70">{i + 1}</span>
                   <span className="truncate flex-1 min-w-0">
                     <strong className="text-[var(--color-text-primary,#f8fafc)]">{a.name || 'CRM'}</strong>
                     {' '}• App ID <span className="font-mono">{a.app_id}</span>
+                    {a.mode ? ` • ${a.mode}` : ''}
                     {a.status === 'error' ? ' • Lần tạo cuối lỗi' : ''}
+                    {a.source === 'scan' ? ' • Quét từ FB' : ''}
                   </span>
+                  {String(a.app_id) === pageSyncAppId && (
+                    <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded-full font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                      Đang dùng đồng bộ
+                    </span>
+                  )}
                   <button type="button" onClick={() => setAppToDelete(a)} disabled={jobRunning}
                     className="shrink-0 p-1.5 rounded-lg text-red-400 hover:bg-red-500/10 border border-transparent hover:border-red-500/30 transition-colors disabled:opacity-40"
                     title={`Xóa app "${a.name || a.app_id}" trên Facebook (Chrome tự động hóa) và dọn token page trong CRM`}>

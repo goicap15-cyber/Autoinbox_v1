@@ -1,0 +1,11 @@
+const asar = require('@electron/asar');
+const BS = String.fromCharCode(92);
+const list = asar.listPackage('release/win-unpacked/resources/app.asar');
+const hit = list.filter((p) => p.replaceAll(BS, '/').endsWith('/dist/server/server.js'));
+console.log('hit:', JSON.stringify(hit));
+if (!hit.length) process.exit(1);
+const p = hit[0].replaceAll(BS, '/').replace(/^\/+/, '');
+const buf = asar.extractFile('release/win-unpacked/resources/app.asar', p);
+const s = buf.toString('utf8');
+console.log('bridge 2500:', s.includes('startBridgePolling(io, db, 2500)'));
+console.log('watcher 6000:', s.includes('startPageConversationWatcher(io, db, 6000)'));

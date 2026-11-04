@@ -353,6 +353,12 @@ class QueueWorker {
       }
     })();
 
+    // Cold outreach (khách cmt bài viết): gửi lần đầu qua trang profile —
+    // /messages/t/<uid> không mở được composer cho hội thoại chưa tồn tại.
+    const isColdOutreach = String(message.idempotency_key || '').startsWith('comment_lead_');
+    const coldProfileUid = isColdOutreach
+      ? String(message.recipient_thread_id || message.thread_id || '').split(':').pop()
+      : null;
     const envelope = {
       type: 'SEND_QUEUED_MESSAGE',
       data: {
@@ -374,7 +380,8 @@ class QueueWorker {
         campaign_id: message.campaign_id || null,
         campaign_recipient_id: message.campaign_recipient_id || null,
         campaign_attempt_id: message.campaign_attempt_id || null,
-        idempotency_key: message.idempotency_key || null
+        idempotency_key: message.idempotency_key || null,
+        ...(isColdOutreach && coldProfileUid ? { send_via_profile: true, profile_uid: coldProfileUid } : {})
       }
     };
 

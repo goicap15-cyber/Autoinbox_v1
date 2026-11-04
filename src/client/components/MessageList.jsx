@@ -382,7 +382,7 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
                       <div className="flex-1 h-px bg-[var(--color-border)]/60" />
                     </div>
                   )}
-                  <div data-anchor-key={messageIdentity(msg, index)} data-msg-date={getMessageDateKey(msg) || ''}>
+                  <div data-msg-key={msg.id} data-anchor-key={messageIdentity(msg, index)} data-msg-date={getMessageDateKey(msg) || ''}>
                     <MessageBubble msg={msg} activeThread={activeThread} onRetry={onRetryMessage} />
                   </div>
                 </React.Fragment>

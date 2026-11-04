@@ -1,0 +1,1 @@
+Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Select-Object ProcessId, CreationDate, @{N='Cmd';E={$_.CommandLine.Substring(0, [Math]::Min(160, $_.CommandLine.Length))}} | Format-Table -AutoSize -Wrap
