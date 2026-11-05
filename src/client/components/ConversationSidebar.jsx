@@ -19,7 +19,8 @@ const THREAD_RENDER_BATCH_SIZE = 80;
 const ConversationThreadList = React.memo(function ConversationThreadList({
   threads, resetKey, activeThreadId, onSelectThread, accounts, inboxSources,
   campaignSelectionMode, selectedCampaignThreadIds, onToggleCampaignThread,
-  onToggleUnread, onTogglePin
+  onToggleUnread, onTogglePin, reminderBellMuted, onToggleReminderBell,
+  onCompleteReminder, onCancelReminder
 }) {
   const [renderedThreadCount, setRenderedThreadCount] = useState(THREAD_RENDER_BATCH_SIZE);
   const threadListRef = useRef(null);
@@ -56,6 +57,10 @@ const ConversationThreadList = React.memo(function ConversationThreadList({
           onToggle={onToggleCampaignThread}
           onToggleUnread={onToggleUnread}
           onTogglePin={onTogglePin}
+          reminderBellMuted={reminderBellMuted}
+          onToggleReminderBell={onToggleReminderBell}
+          onCompleteReminder={onCompleteReminder}
+          onCancelReminder={onCancelReminder}
         />
       ))}
     </div>
@@ -63,7 +68,8 @@ const ConversationThreadList = React.memo(function ConversationThreadList({
 });
 
 export default function ConversationSidebar({
-  threads = [], activeThreadId, onSelectThread,
+  threads = [], activeThreadId, onSelectThread, reminderBellMuted, onToggleReminderBell,
+  onCompleteReminder, onCancelReminder,
   activeTab, onTabChange, searchQuery, onSearchChange, isConnected, onOpenSearch,
   sidebarSyncActive = false, sidebarSyncSecondsRemaining = 0, onToggleSidebarSync,
   waitingCount = 0,
@@ -266,6 +272,10 @@ export default function ConversationSidebar({
         onToggleCampaignThread={onToggleCampaignThread}
         onToggleUnread={onToggleUnread}
         onTogglePin={onTogglePin}
+        reminderBellMuted={reminderBellMuted}
+        onToggleReminderBell={onToggleReminderBell}
+        onCompleteReminder={onCompleteReminder}
+        onCancelReminder={onCancelReminder}
       />
       {campaignSelectionMode && (
         <div className="flex shrink-0 items-center gap-2 border-t border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3">

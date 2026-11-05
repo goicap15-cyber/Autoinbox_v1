@@ -110,6 +110,7 @@ export default function AppSidebar({ activeView, onSelectView, onOpenModal, them
           <div className="app-sidebar-logo">FB</div>
           <div className="app-sidebar-label app-sidebar-brand-copy" aria-hidden={!isExpanded}>
             <strong>AdsupCRM</strong>
+            <span>Phiên bản {__APP_VERSION__}</span>
             <span>Facebook workspace</span>
           </div>
         </div>

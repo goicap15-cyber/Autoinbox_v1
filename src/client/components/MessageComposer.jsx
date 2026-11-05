@@ -381,6 +381,30 @@ export default function MessageComposer({
     });
   };
 
+  // Gợi ý mẫu nhanh khi đang gõ: đếm số từ (>=3 ký tự, bỏ dấu) của draft
+  // xuất hiện trong nội dung mẫu. Chỉ gợi ý — không chiếm phím nào (Enter
+  // vẫn gửi); chọn bằng chuột thì thay toàn bộ draft bằng mẫu.
+  const templateSuggestions = useMemo(() => {
+    if (!inputText.trim() || templates.length === 0) return [];
+    const words = new Set(normVi(inputText).match(/[a-z0-9]{3,}/g) || []);
+    if (words.size === 0) return [];
+    const scored = [];
+    for (const tpl of templates) {
+      const content = typeof tpl === 'string' ? tpl : (tpl?.content || '');
+      if (!content) continue;
+      const hay = normVi(content);
+      let score = 0;
+      for (const word of words) {
+        if (hay.includes(word)) score += 1;
+      }
+      if (score > 0) scored.push({ id: typeof tpl === 'string' ? tpl : tpl.id, content, score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, 3);
+  }, [inputText, templates]);
+
+  const showTemplateSuggestions = !mention && !showTemplates && !disabled && templateSuggestions.length > 0;
+
   const selectAttachment = async (file, kind) => {
     if (!file || attachment || uploadingAttachment || disabled) return;
     const capability = capabilities?.[kind];
@@ -708,6 +732,28 @@ export default function MessageComposer({
                     <span className="block truncate text-[11px] text-[var(--color-text-muted)]">{row.subtitle || 'Nhắc đến mọi người trong cuộc trò chuyện này'}</span>
                   )}
                 </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {showTemplateSuggestions && (
+        <div className="absolute bottom-full left-4 right-4 z-40 mb-1.5 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-panel)] shadow-2xl">
+          <div className="border-b border-[var(--color-border)] px-3 py-1.5 text-[11px] font-medium text-[var(--color-text-muted)]">
+            Gợi ý mẫu nhanh — bấm để chèn
+          </div>
+          <div className="py-1">
+            {templateSuggestions.map((suggestion, idx) => (
+              <button
+                key={suggestion.id ?? idx}
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => chooseTemplate(suggestion.content)}
+                className="flex w-full items-start gap-2.5 px-3 py-2 text-left hover:bg-[var(--color-bg-hover)] transition-colors"
+              >
+                <FileText size={15} strokeWidth={1.75} className="mt-0.5 shrink-0 text-[var(--color-accent)]" />
+                <span className="min-w-0 flex-1 line-clamp-2 text-xs leading-relaxed text-[var(--color-text-secondary)]">{suggestion.content}</span>
               </button>
             ))}
           </div>

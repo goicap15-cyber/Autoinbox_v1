@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { BellRing, Clock3, Archive, Mail, MailOpen, Pin, PinOff } from 'lucide-react';
+import { BellRing, BellOff, Clock3, Archive, Check, Mail, MailOpen, Pin, PinOff, X } from 'lucide-react';
 import { getStatusBadgeStyle } from '../utils/color.js';
-import { getReminderDueAriaLabel, getReminderDueState } from '../utils/reminderPresentation.js';
+import { getReminderDueAriaLabel, getReminderDueState, reminderBellKey } from '../utils/reminderPresentation.js';
 import { isThreadActiveToday, normalizeThreadTimestamp } from '../utils/threadActivity.js';
 
 const AVATAR_COLORS = ['#2684ff', '#a855f7', '#0fbd74', '#ec4899', '#ff6b2c', '#00b8a9', '#6366f1', '#ff3b4f', '#f5b51b', '#06b6d4'];
@@ -19,7 +19,7 @@ function formatTime(value) {
   return parsed.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
 }
 
-function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSources = [], selectionMode = false, isChecked = false, onToggle, onToggleUnread, onTogglePin }) {
+function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSources = [], selectionMode = false, isChecked = false, onToggle, onToggleUnread, onTogglePin, reminderBellMuted, onToggleReminderBell, onCompleteReminder, onCancelReminder }) {
   const account = accounts.find((item) => String(item.id) === String(thread.account_id));
   const source = inboxSources.find((item) => String(item.id) === String(thread.source_id));
   const isOnline = account ? account.is_extension_connected !== false : true;
@@ -32,10 +32,32 @@ function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSo
   const isThreadUnreadRow = unreadCount > 0 || Number(thread.unread_manual) === 1;
   const isPinned = Number(thread.pinned) === 1;
   const [ctxMenu, setCtxMenu] = useState(null);
+  const [bellMenu, setBellMenu] = useState(null);
   const handleContextMenu = (event) => {
     event.preventDefault();
     event.stopPropagation();
+    setBellMenu(null);
     setCtxMenu({ x: Math.min(event.clientX, window.innerWidth - 190), y: Math.min(event.clientY, window.innerHeight - 90) });
+  };
+  // Bấm chuông đỏ = mở menu (tắt chuông / hoàn thành / hủy nhắc) thay vì tắt
+  // miệng — tránh bấm nhầm hành động mất ghi chú trên icon nhỏ.
+  const handleOpenBellMenu = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setCtxMenu(null);
+    const rect = event.currentTarget.getBoundingClientRect();
+    setBellMenu({
+      x: Math.min(rect.right + 8, window.innerWidth - 190),
+      y: Math.min(rect.top, window.innerHeight - 130)
+    });
+  };
+  const handleBellMenuAction = (action) => (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    setBellMenu(null);
+    if (action === 'mute') { onToggleReminderBell?.(thread); return; }
+    if (action === 'complete') { Promise.resolve(onCompleteReminder?.(thread.id)).catch(() => {}); return; }
+    if (action === 'cancel') Promise.resolve(onCancelReminder?.(thread.id)).catch(() => {});
   };
   const handlePinFromMenu = (event) => {
     event.stopPropagation();
@@ -116,9 +138,24 @@ function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSo
             {title.charAt(0).toUpperCase()}
           </div>
         )}
-        {isReminderDue && (
-          <span className="reminder-due-pulse absolute -left-1.5 -top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-full border-2 border-[var(--color-bg-panel)] bg-[var(--color-danger)] text-[var(--color-text-on-accent)] shadow-sm" title={reminderAriaLabel} aria-hidden="true"><BellRing size={12} strokeWidth={2.4} /></span>
-        )}
+        {isReminderDue && (() => {
+          const bellMuted = reminderBellMuted?.has(reminderBellKey(thread)) ?? false;
+          return (
+            <span
+              role="button"
+              tabIndex={-1}
+              aria-label="Tuỳ chọn lời nhắc"
+              title="Chuông lời nhắc — bấm để tắt chuông, hoàn thành hoặc hủy nhắc"
+              onClick={handleOpenBellMenu}
+              className={
+                'absolute -left-1.5 -top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-full border-2 border-[var(--color-bg-panel)] bg-[var(--color-danger)] text-[var(--color-text-on-accent)] shadow-sm cursor-pointer '
+                + (bellMuted ? 'opacity-55' : 'reminder-due-pulse')
+              }
+            >
+              <BellRing size={12} strokeWidth={2.4} />
+            </span>
+          );
+        })()}
         {unreadVisible && !isReminderDue && (
           <span className="absolute -left-1 -top-1 flex h-4 w-4" title="Tin nhắn mới">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--color-accent)] opacity-75"></span>
@@ -218,6 +255,54 @@ function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSo
           </span>
         </div>
       </div>
+
+      {bellMenu && (() => {
+        const bellMuted = reminderBellMuted?.has(reminderBellKey(thread)) ?? false;
+        return (
+          <React.Fragment>
+            <span
+              aria-hidden="true"
+              className="fixed inset-0"
+              style={{ zIndex: 9998 }}
+              onMouseDown={() => setBellMenu(null)}
+              onContextMenu={(event) => { event.preventDefault(); setBellMenu(null); }}
+            />
+            <span
+              role="menu"
+              aria-label="Tuỳ chọn lời nhắc"
+              className="fixed w-44 py-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] shadow-lg"
+              style={{ left: bellMenu.x, top: bellMenu.y, zIndex: 9999 }}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                onClick={handleBellMenuAction('mute')}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-left text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] cursor-pointer"
+              >
+                {bellMuted ? <BellRing size={13} strokeWidth={2.2} /> : <BellOff size={13} strokeWidth={2.2} />}
+                {bellMuted ? 'Bật lại chuông' : 'Tắt chuông'}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={handleBellMenuAction('complete')}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-left text-[var(--color-success)] hover:bg-[var(--color-bg-hover)] cursor-pointer"
+              >
+                <Check size={13} strokeWidth={2.4} /> Hoàn thành
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={handleBellMenuAction('cancel')}
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-left text-[var(--color-danger)] hover:bg-[var(--color-bg-hover)] cursor-pointer"
+              >
+                <X size={13} strokeWidth={2.4} /> Hủy nhắc
+              </button>
+            </span>
+          </React.Fragment>
+        );
+      })()}
 
       {ctxMenu && (
         <React.Fragment>

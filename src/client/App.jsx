@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { getReminderDueState, reminderBellKey } from './utils/reminderPresentation.js';
+import { playReminderSound } from './utils/notificationSound.js';
 import AppSidebar from './components/AppSidebar.jsx';
 import ConversationSidebar from './components/ConversationSidebar.jsx';
 import ChatHeader from './components/ChatHeader.jsx';
@@ -19,6 +21,7 @@ import IncomingCallModal from './components/IncomingCallModal.jsx';
 import PaymentModal from './components/PaymentModal.jsx';
 import LicenseManagerModal from './components/LicenseManagerModal.jsx';
 import LicenseLockScreen from './components/LicenseLockScreen.jsx';
+import LicenseExpiryBanner, { computeLicenseDaysLeft, formatLicenseExpiryDate } from './components/LicenseExpiryBanner.jsx';
 import AuthScreen from './components/AuthScreen.jsx';
 import EmployeeManagementModal from './components/EmployeeManagementModal.jsx';
 import { useSocket } from './hooks/useSocket.js';
@@ -453,6 +456,7 @@ export default function App() {
   const [campaignRefreshVersion, setCampaignRefreshVersion] = useState(0);
   const [incomingCallInfo, setIncomingCallInfo] = useState(null);
   const [licenseStatus, setLicenseStatus] = useState(null);
+  const [licenseBannerDismissed, setLicenseBannerDismissed] = useState(false);
   const [sessionUser, setSessionUser] = useState(null);
   const sessionUserIdRef = useRef(null);
   const accountsRef = useRef([]);
@@ -637,6 +641,61 @@ export default function App() {
 
   const loadThreadsRef = useRef(loadThreads);
   useEffect(() => { loadThreadsRef.current = loadThreads; }, [loadThreads]);
+
+  // Chuông lời nhắc: hội thoại chuyển sang "đến hạn" (kể cả phát hiện bằng
+  // timer khi danh sách không đổi) thì kêu chime 3 nốt riêng (2 cụm liên tiếp),
+  // lặp lại mỗi 1 phút đến khi khách bấm chuông đỏ trên row (menu: tắt chuông /
+  // hoàn thành / hủy nhắc). Nhắc đã quá hạn TRƯỚC khi mở app chỉ ghi nhận,
+  // không dội.
+  const reminderBellRungRef = useRef(new Set());
+  const reminderBellFirstPassRef = useRef(true);
+  const [reminderBellMuted, setReminderBellMuted] = useState(() => new Set());
+  const reminderBellMutedRef = useRef(reminderBellMuted);
+  useEffect(() => { reminderBellMutedRef.current = reminderBellMuted; }, [reminderBellMuted]);
+
+  const evaluateReminderBells = useCallback(() => {
+    if (!reminderBellFirstPassRef.current && threadsRef.current.length === 0) return;
+    const now = Date.now();
+    const dueKeys = [];
+    for (const thread of threadsRef.current) {
+      if (getReminderDueState(thread, now).isDue) dueKeys.push(reminderBellKey(thread));
+    }
+    if (reminderBellFirstPassRef.current) {
+      for (const key of dueKeys) reminderBellRungRef.current.add(key);
+      reminderBellFirstPassRef.current = false;
+      return;
+    }
+    let hasNewDue = false;
+    for (const key of dueKeys) {
+      if (reminderBellMutedRef.current.has(key) || reminderBellRungRef.current.has(key)) continue;
+      reminderBellRungRef.current.add(key);
+      hasNewDue = true;
+    }
+    if (hasNewDue) playReminderSound();
+  }, []);
+
+  useEffect(() => { evaluateReminderBells(); }, [threads, evaluateReminderBells]);
+  useEffect(() => {
+    const detectTimer = setInterval(evaluateReminderBells, 30000);
+    const repeatTimer = setInterval(() => {
+      const now = Date.now();
+      const hasUrgent = threadsRef.current.some((thread) =>
+        getReminderDueState(thread, now).isDue
+        && !reminderBellMutedRef.current.has(reminderBellKey(thread)));
+      if (hasUrgent) playReminderSound();
+    }, 60000);
+    return () => { clearInterval(detectTimer); clearInterval(repeatTimer); };
+  }, [evaluateReminderBells]);
+
+  const handleToggleReminderBell = useCallback((thread) => {
+    const key = reminderBellKey(thread);
+    setReminderBellMuted((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   // Page API tự đồng bộ (auto-backfill): server bắn THREAD_LIST_UPDATED khi có
   // tin mới được kéo về — refresh danh sách hội thoại, chat đang mở tự cập nhật
@@ -2102,6 +2161,24 @@ export default function App() {
     return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Äang kiểm tra phiên đăng nhập...</div>;
   }
 
+  // Preview banner hết hạn license (?_licensePreviewDays=3) — chỉ có hiệu lực trên Vite dev
+  // server (import.meta.env.DEV); build production không chứa nhánh này.
+  const licensePreviewDays = import.meta.env.DEV
+    ? Number.parseInt(new URLSearchParams(window.location.search).get('_licensePreviewDays') || '', 10)
+    : null;
+  if (Number.isFinite(licensePreviewDays)) {
+    return (
+      <div className="min-h-screen bg-slate-950">
+        <LicenseExpiryBanner
+          daysLeft={licensePreviewDays}
+          expiresAtLabel={formatLicenseExpiryDate(new Date(Date.now() + licensePreviewDays * 86400000).toISOString())}
+          onOpenPayment={() => {}}
+          onDismiss={() => {}}
+        />
+      </div>
+    );
+  }
+
   if (!sessionUser) {
     return <AuthScreen onAuthenticated={setSessionUser} />;
   }
@@ -2110,8 +2187,19 @@ export default function App() {
     return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Äang kiá»ƒm tra báº£n quyá»n...</div>;
   }
 
+  const licenseDaysLeft = licenseStatus?.isLicensed ? computeLicenseDaysLeft(licenseStatus.expiresAt) : null;
+  const licenseExpiryLabel = formatLicenseExpiryDate(licenseStatus?.expiresAt);
+
   return (
     <div className={gridClass}>
+      {!licenseBannerDismissed && licenseDaysLeft !== null && licenseExpiryLabel && (
+        <LicenseExpiryBanner
+          daysLeft={licenseDaysLeft}
+          expiresAtLabel={licenseExpiryLabel}
+          onOpenPayment={() => setActiveModal('payment')}
+          onDismiss={() => setLicenseBannerDismissed(true)}
+        />
+      )}
       {/* Column 1: Sidebar Navigation - 48px */}
       <AppSidebar
         activeView={activeView}
@@ -2134,6 +2222,8 @@ export default function App() {
         dateFilterIds={dateFilterIds}
         onDateRangeChange={handleDateRangeChange}
         threads={threads} activeThreadId={activeThreadId}
+        reminderBellMuted={reminderBellMuted} onToggleReminderBell={handleToggleReminderBell}
+        onCompleteReminder={handleCompleteReminder} onCancelReminder={handleCancelReminder}
         onSelectThread={handleSelectThread}
         activeTab={activeTab} onTabChange={handleConversationTabChange}
         waitingCount={waitingCount}

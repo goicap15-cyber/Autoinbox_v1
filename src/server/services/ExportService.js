@@ -9,12 +9,12 @@ if (!fs.existsSync(EXPORT_DIR)) {
   fs.mkdirSync(EXPORT_DIR, { recursive: true });
 }
 
-// 2026-10-22: Excel và CSV dùng chung một nguồn dữ liệu để không còn lệch dòng
-// (trước đây Excel bắt buộc có SĐT/email, CSV thì không). Phạm vi phương án B:
-// mọi contact có bằng chứng lead - được đánh dấu thủ công, có SĐT/email, hoặc
-// đã gán trạng thái (bắt số tự động/campaign chỉ set status_id, không bật
-// lead_captured nên phải tính riêng). Tên khách: bắt số tự động chỉ lưu SĐT
-// vào contacts, tên hiển thị nằm ở threads.contact_name nên fallback sang đó.
+// 2026-11-05: xuất TOÀN BỘ hội thoại (1 dòng = 1 hội thoại/khách hàng) — bỏ
+// hẳn bộ lọc SĐT/email/trạng thái cũ. Nguồn là threads LEFT JOIN contacts:
+// hội thoại chưa từng tạo row contact vẫn vào file, các cột thông tin phụ
+// (SĐT, email, ghi chú, thẻ...) để trống. Excel và CSV dùng chung một nguồn
+// để không còn lệch dòng. Tên khách fallback sang threads.contact_name khi
+// contacts.name trống (bắt số tự động chỉ lưu SĐT vào contacts).
 const LEADS_QUERY = `
   SELECT
     COALESCE(NULLIF(c.name, ''), t.contact_name) AS name,
@@ -30,15 +30,11 @@ const LEADS_QUERY = `
     src.display_name AS page_name,
     c.profile_url,
     t.last_activity
-  FROM contacts c
-  JOIN threads t ON c.thread_id = t.id
+  FROM threads t
+  LEFT JOIN contacts c ON c.thread_id = t.id
   LEFT JOIN lead_statuses ls ON ls.id = c.status_id
   LEFT JOIN accounts a ON a.id = t.account_id
   LEFT JOIN inbox_sources src ON src.id = t.source_id
-  WHERE c.lead_captured = 1
-    OR (c.phone IS NOT NULL AND TRIM(c.phone) != '')
-    OR (c.email IS NOT NULL AND TRIM(c.email) != '')
-    OR c.status_id IS NOT NULL
   ORDER BY t.last_activity DESC
 `;
 
