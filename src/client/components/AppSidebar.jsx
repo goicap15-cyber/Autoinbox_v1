@@ -155,13 +155,13 @@ export default function AppSidebar({ activeView, onSelectView, onOpenModal, them
             title={isExpanded ? undefined : (updateStatus?.updateAvailable ? `🔴 Có bản cập nhật mới v${updateStatus.latestVersion}` : `Cập nhật ứng dụng (v${updateStatus?.currentVersion || '1.0.0'})`)}
             aria-label="Cập nhật ứng dụng"
             style={{ minWidth: BTN_SIZE, minHeight: BTN_SIZE }}
-            className={'app-sidebar-control relative ' + (updateStatus?.updateAvailable ? '!text-red-500 !bg-red-500/15 ring-1 ring-red-500/40' : '')}
+            className={'app-sidebar-control relative ' + (updateStatus?.updateAvailable ? '!text-blue-400 !bg-blue-500/10 ring-1 ring-blue-500/30' : '')}
           >
-            <DownloadCloud size={ICON_SIZE} strokeWidth={ICON_STROKE} className={'shrink-0 ' + (updateStatus?.updateAvailable ? 'text-red-500 animate-bounce' : '')} />
+            <DownloadCloud size={ICON_SIZE} strokeWidth={ICON_STROKE} className={'shrink-0 ' + (updateStatus?.updateAvailable ? 'text-blue-400' : '')} />
             <span className="app-sidebar-label flex items-center gap-1.5" aria-hidden={!isExpanded}>
               {updateStatus?.updateAvailable ? `Cập nhật v${updateStatus.latestVersion}` : `Cập nhật (v${updateStatus?.currentVersion || '1.0.0'})`}
               {updateStatus?.updateAvailable && (
-                <span className="inline-flex items-center rounded-full bg-red-600 px-1.5 py-0.2 text-[10px] font-bold text-white">
+                <span className="inline-flex items-center rounded-full bg-blue-500/20 border border-blue-500/40 px-1.5 py-0.2 text-[10px] font-bold text-blue-300">
                   MỚI
                 </span>
               )}

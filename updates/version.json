@@ -1,7 +1,7 @@
 {
-  "version": "1.0.2",
-  "releasedAt": "2026-11-05T09:34:21.524Z",
-  "notes": "Bản cập nhật v1.0.2: Kiểm tra tính năng cập nhật tự động (Hot-Update)",
-  "sizeBytes": 1943577,
-  "sha256": "d6aac3c7ff96fed937cb465498e12ad552604d85872f8b0e8534e8887c77ca93"
+  "version": "1.0.3",
+  "releasedAt": "2026-11-05T09:47:50.646Z",
+  "notes": "Giao diện thông báo cập nhật hiện đại & Tự động cập nhật ngay không cần đóng ứng dụng",
+  "sizeBytes": 1944881,
+  "sha256": "aaa8eae619c1c1029c835abf0d0c725cdea6c46050b5bcef7bd23cbbfdeadfe3"
 }

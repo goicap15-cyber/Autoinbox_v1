@@ -62,15 +62,21 @@ export default function AppUpdateModal({
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
           <div className="flex items-center gap-2.5">
-            <div className={`flex h-9 w-9 items-center justify-center rounded-xl ${updateAvailable ? 'bg-red-500/15 text-red-500' : 'bg-blue-500/15 text-blue-400'}`}>
+            <div className="relative flex h-9 w-9 items-center justify-center rounded-xl bg-blue-500/15 text-blue-400">
               <DownloadCloud size={20} />
+              {updateAvailable && (
+                <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500" />
+                </span>
+              )}
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-semibold">Cập nhật ứng dụng</h3>
                 {updateAvailable && (
-                  <span className="inline-flex items-center rounded-full bg-red-500 px-2 py-0.5 text-[10px] font-bold text-white animate-pulse">
-                    MỚI
+                  <span className="inline-flex items-center rounded-full bg-blue-500/15 border border-blue-500/30 px-2 py-0.5 text-[10px] font-bold text-blue-400">
+                    BẢN MỚI
                   </span>
                 )}
               </div>
@@ -90,11 +96,11 @@ export default function AppUpdateModal({
         </div>
 
         <div className="p-5 space-y-4">
-          <div className={`rounded-xl border p-4 space-y-2.5 ${updateAvailable ? 'border-red-500/40 bg-red-500/5' : 'border-[var(--color-border)] bg-[var(--color-bg-secondary)]'}`}>
+          <div className={`rounded-xl border p-4 space-y-2.5 ${updateAvailable ? 'border-blue-500/35 bg-blue-500/5' : 'border-[var(--color-border)] bg-[var(--color-bg-secondary)]'}`}>
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium text-[var(--color-text-secondary)]">Trạng thái phiên bản</span>
               {updateAvailable ? (
-                <span className="inline-flex items-center gap-1 rounded-full bg-red-500 px-2.5 py-0.5 text-xs font-semibold text-white shadow-xs">
+                <span className="inline-flex items-center gap-1 rounded-full bg-blue-600 px-2.5 py-0.5 text-xs font-semibold text-white shadow-xs">
                   <Sparkles size={12} /> Có bản mới v{latestVersion}
                 </span>
               ) : (
@@ -124,7 +130,7 @@ export default function AppUpdateModal({
                   />
                 </div>
                 <div className="flex justify-between text-[11px] text-[var(--color-text-secondary)]">
-                  <span>{state === 'restarting' ? 'Đang khởi động lại...' : 'Đang cập nhật...'}</span>
+                  <span>{state === 'restarting' ? 'Đang áp dụng giao diện mới...' : 'Đang tải bản cập nhật...'}</span>
                   <span>{Number(updateStatus?.progress) || 0}%</span>
                 </div>
               </div>
@@ -146,9 +152,7 @@ export default function AppUpdateModal({
               type="button"
               disabled={isBusy || !updateAvailable}
               onClick={handleApplyUpdate}
-              className={`flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-40 cursor-pointer shadow-sm ${
-                updateAvailable ? 'bg-red-600 hover:bg-red-500 animate-pulse' : 'bg-blue-600 hover:bg-blue-500'
-              }`}
+              className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-40 cursor-pointer shadow-md"
             >
               <DownloadCloud size={15} />
               {updateAvailable ? `Cập nhật ngay (v${latestVersion})` : 'Đã ở bản mới nhất'}

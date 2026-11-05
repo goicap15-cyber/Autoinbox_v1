@@ -111,6 +111,14 @@ class AppUpdaterService {
       error: null,
       checkedAt: null,
     };
+
+    // Tự động kiểm tra bản cập nhật ngầm mỗi 25 giây để app đang mở tự nhận thông báo ngay
+    this.pollTimer = setInterval(() => {
+      if (!['checking', 'downloading', 'applying', 'restarting'].includes(this.status.state)) {
+        this.checkForUpdates().catch(() => {});
+      }
+    }, 25000);
+    if (this.pollTimer.unref) this.pollTimer.unref();
   }
 
   getConfig() {
@@ -492,20 +500,20 @@ class AppUpdaterService {
         latestVersion: newVer,
         updateAvailable: false,
         progress: 100,
-        message: `Đã cập nhật thành công lên v${newVer}! Ứng dụng đang tự khởi động lại...`,
+        message: `Đã cập nhật thành công lên v${newVer}! Đang làm mới giao diện ngay lập tức...`,
       });
 
+      // Chuyển lại về trạng thái idle sau khi giao diện đã tự reload tại chỗ (không đóng cửa sổ app)
       setTimeout(() => {
-        try {
-          const electron = require('electron');
-          if (electron && electron.app && typeof electron.app.relaunch === 'function') {
-            electron.app.relaunch();
-            electron.app.exit(0);
-            return;
-          }
-        } catch (_) {}
-        process.exit(0);
-      }, 1200);
+        this.emitStatus({
+          state: 'up_to_date',
+          currentVersion: newVer,
+          latestVersion: newVer,
+          updateAvailable: false,
+          progress: 100,
+          message: `Bạn đang sử dụng phiên bản mới nhất (v${newVer}).`,
+        });
+      }, 2500);
 
       return this.status;
     } catch (err) {

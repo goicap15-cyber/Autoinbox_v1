@@ -41,7 +41,7 @@ function addDirToZip(zip, fsDir, zipPrefix) {
   console.log(`=== Đóng gói bản cập nhật v${nextVersion} ===`);
 
   console.log('1. Đang build Client UI, Server và Chrome Extension...');
-  execSync('npx vite build', { cwd: ROOT, stdio: 'inherit' });
+  execSync('node node_modules/vite/bin/vite.js build', { cwd: ROOT, stdio: 'inherit' });
   execSync('node scripts/build-bytecode.js', { cwd: ROOT, stdio: 'inherit' });
   execSync('node scripts/obfuscate-extension.js', { cwd: ROOT, stdio: 'inherit' });
 

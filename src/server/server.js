@@ -506,16 +506,28 @@ app.post('/api/payment/sepay-webhook', async (req, res) => {
 // Áp dụng Middleware Bảo Vệ Khóa Backend cho tất cả các API CRM
 app.use('/api', licenseChecker.middleware());
 
-// Static: React Dashboard UI & Media files
+// Static: React Dashboard UI & Media files (Ưu tiên bản hot-update để áp dụng ngay không cần đóng app)
 const clientDistPath = path.join(__dirname, '../../dist/client');
+const getHotUpdateClientPath = () => {
+  const resRoot = process.resourcesPath || path.resolve(__dirname, '../../updates');
+  return path.join(resRoot, 'hot-update', 'dist', 'client');
+};
+const staticCacheHeaders = (res, filePath) => {
+  if (filePath.endsWith('index.html') || filePath.endsWith('.js') || filePath.endsWith('.css')) {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  } else if (filePath.endsWith('.jpg') || filePath.endsWith('.jpeg') || filePath.endsWith('.png')) {
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+  }
+};
+app.use((req, res, next) => {
+  const hotClient = getHotUpdateClientPath();
+  if (fs.existsSync(hotClient)) {
+    return express.static(hotClient, { setHeaders: staticCacheHeaders })(req, res, next);
+  }
+  return next();
+});
 app.use(express.static(clientDistPath, {
-  setHeaders: (res, filePath) => {
-    if (filePath.endsWith('index.html') || filePath.endsWith('.js') || filePath.endsWith('.css')) {
-      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    } else if (filePath.endsWith('.jpg') || filePath.endsWith('.jpeg') || filePath.endsWith('.png')) {
-      res.set('Cache-Control', 'public, max-age=31536000, immutable');
-    }
-  } 
+  setHeaders: staticCacheHeaders
 }));
 app.use('/data/media', express.static(path.join(APP_DATA_ROOT, 'media')));
 app.use('/data/exports', express.static(path.join(APP_DATA_ROOT, 'exports')));
