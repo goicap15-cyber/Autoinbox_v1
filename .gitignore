@@ -30,4 +30,5 @@ scratch/
 *.exe
 *.dll
 *.zip
+!updates/crm-update.zip
 
