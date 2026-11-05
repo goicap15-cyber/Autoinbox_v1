@@ -21,6 +21,7 @@ import LicenseManagerModal from './components/LicenseManagerModal.jsx';
 import LicenseLockScreen from './components/LicenseLockScreen.jsx';
 import AuthScreen from './components/AuthScreen.jsx';
 import EmployeeManagementModal from './components/EmployeeManagementModal.jsx';
+import AppUpdateModal from './components/AppUpdateModal.jsx';
 import { useSocket } from './hooks/useSocket.js';
 import { MessageSquare } from 'lucide-react';
 import { sortThreadsByActivity } from './utils/threadActivity.js';
@@ -275,7 +276,7 @@ const isSyntheticId = (messageOrId) => {
   const id = typeof messageOrId === 'string'
     ? messageOrId
     : String(messageOrId?.fb_message_id || messageOrId?.id || '');
-  return !id || /^(?:dom_|history_|sidebar_preview_|pending_|network_|websocket_|mercury_|xhr_)/i.test(id) || !id.startsWith('mid.');
+  return !id || /^(?:dom_|history_|sidebar_preview_|pending_|network_|websocket_|mercury_|xhr_)/i.test(id) || (!id.startsWith('mid.') && !id.startsWith('m_'));
 };
 
 // A CRM text send can briefly arrive twice: once as the local/client row and
@@ -526,6 +527,38 @@ export default function App() {
     if (sessionUser) checkLicenseStatus();
     else setLicenseStatus(null);
   }, [checkLicenseStatus, sessionUser]);
+
+  const [appUpdateStatus, setAppUpdateStatus] = useState(null);
+  const [updateBannerDismissedVersion, setUpdateBannerDismissedVersion] = useState(null);
+
+  useEffect(() => {
+    if (!sessionUser) return;
+    const runCheck = () => {
+      fetch('/api/app-update/check', { method: 'POST' })
+        .then((r) => r.json())
+        .then((d) => { if (d?.status) setAppUpdateStatus(d.status); })
+        .catch(() => {});
+    };
+    fetch('/api/app-update/status')
+      .then((r) => r.json())
+      .then((d) => { if (d?.status) setAppUpdateStatus(d.status); })
+      .catch(() => {});
+    const timer = setTimeout(runCheck, 4000);
+    const interval = setInterval(runCheck, 10 * 60 * 1000);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+    };
+  }, [sessionUser]);
+
+  useEffect(() => {
+    if (!socket) return;
+    const onUpdateStatus = (st) => {
+      if (st) setAppUpdateStatus(st);
+    };
+    socket.on?.('app_update_status', onUpdateStatus);
+    return () => socket.off?.('app_update_status', onUpdateStatus);
+  }, [socket]);
 
   const loadInboxSources = useCallback(async () => {
     try {
@@ -841,7 +874,7 @@ export default function App() {
         .catch(() => {})
         .finally(() => { requestPending = false; });
     };
-    const timer = setInterval(reconcileFromDatabase, 15000);
+    const timer = setInterval(reconcileFromDatabase, 4000);
     return () => { stopped = true; clearInterval(timer); controller.abort(); };
   }, [activeThreadId]);
 
@@ -918,11 +951,25 @@ export default function App() {
     if (!socket) return;
     socket.on('THREAD_LIST_UPDATED', (data) => {
       // Page API auto-backfill: có tin mới được kéo về → refresh danh sách
-      if (data?.account_id && accountsRef.current.length > 0) {
+      if (data?.account_id && !data?.page_id && !data?.thread_id && accountsRef.current.length > 0) {
         const matches = accountsRef.current.some((account) => String(account.id) === String(data.account_id));
         if (!matches) return;
       }
       refreshThreadListThrottled();
+      const openTid = String(activeThreadIdRef.current || '');
+      if (openTid && (!data?.thread_id || String(data.thread_id) === openTid || String(openTid).endsWith(':' + String(data.thread_id)))) {
+        fetch(`/api/threads/${encodeURIComponent(openTid)}/messages`)
+          .then((r) => r.json())
+          .then((msgs) => {
+            if (!Array.isArray(msgs)) return;
+            setMessages((prev) => {
+              const existing = prev[openTid] || [];
+              const merged = reconcileOutgoingTextEchoes(mergeSnapshotSelfHealing(existing, preserveOrderAnchors(msgs, existing)));
+              return messageSnapshotSignature(existing) === messageSnapshotSignature(merged) ? prev : { ...prev, [openTid]: merged };
+            });
+          })
+          .catch(() => {});
+      }
     });
     socket.on('THREAD_MEMBERS', (payload) => {
       const tid = String(payload?.thread_id || '');
@@ -939,7 +986,7 @@ export default function App() {
         const total = t_ui - t_dom;
         console.log(`%c[TELEMETRY] ⚡ E2E Latency: ${total}ms (dom->sw: ${domToSw}ms, sw->srv: ${swToSrv}ms, srv->ui: ${srvToUi}ms)`, 'color: #10b981; font-weight: bold;');
       }
-      if (newMsg.account_id && accountsRef.current.length > 0) {
+      if (newMsg.account_id && newMsg.source_type !== 'page_messenger' && String(activeThreadIdRef.current || '') !== String(newMsg.thread_id || '') && accountsRef.current.length > 0) {
         const matchesAccount = accountsRef.current.some((account) =>
           String(account.id) === String(newMsg.account_id) ||
           String(account.account_id || '') === String(newMsg.account_id)
@@ -2117,6 +2164,7 @@ export default function App() {
         hasCheckpoint={hasCheckpoint} collapsed={leadPanelCollapsed}
         onToggleCollapse={() => setLeadPanelCollapsed(!leadPanelCollapsed)}
         sessionUser={sessionUser} onLogout={handleLogout}
+        updateStatus={appUpdateStatus}
       />
 
       {activeView === 'employees' && <EmployeeManagementModal />}
@@ -2291,6 +2339,39 @@ export default function App() {
           onClose={() => setActiveModal(null)}
           onOpenPayment={() => setActiveModal('payment')}
         />
+      )}
+      {activeModal === 'appUpdate' && (
+        <AppUpdateModal
+          isOpen={true}
+          onClose={() => setActiveModal(null)}
+          updateStatus={appUpdateStatus}
+          onStatusChange={setAppUpdateStatus}
+        />
+      )}
+
+      {appUpdateStatus?.updateAvailable && activeModal !== 'appUpdate' && updateBannerDismissedVersion !== appUpdateStatus?.latestVersion && (
+        <div className="fixed bottom-4 right-4 z-[110] flex items-center gap-3 rounded-2xl border border-red-500/50 bg-red-600 px-4 py-3 text-white shadow-2xl">
+          <span className="flex h-2.5 w-2.5 rounded-full bg-white animate-ping" />
+          <div className="text-xs">
+            <strong className="block font-bold">Có bản cập nhật mới v{appUpdateStatus.latestVersion}!</strong>
+            <span className="opacity-90">Bấm cập nhật ngay để sử dụng bản mới nhất.</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActiveModal('appUpdate')}
+            className="rounded-xl bg-white px-3 py-1.5 text-xs font-bold text-red-600 hover:bg-red-50 cursor-pointer shadow-xs"
+          >
+            Cập nhật ngay
+          </button>
+          <button
+            type="button"
+            onClick={() => setUpdateBannerDismissedVersion(appUpdateStatus.latestVersion)}
+            className="ml-1 rounded-lg px-1.5 py-0.5 text-xs text-white/80 hover:text-white cursor-pointer"
+            aria-label="Ẩn thông báo"
+          >
+            ✕
+          </button>
+        </div>
       )}
 
       {/* Real-time Incoming Call Overlay */}

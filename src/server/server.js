@@ -1,4 +1,4 @@
-﻿const path = require('path');
+const path = require('path');
 const fs = require('fs');
 const { parseEnv } = require('util');
 // Neither the plain `node src/server/index.js` entrypoint nor Electron's
@@ -73,7 +73,7 @@ LinkPreviewService.onImageNeeded = (urlHash, url) => {
     }
   }
 };
-const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
+const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isSidebarActivityNotification, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
 const { normalizePreviewText, shouldFlipUnreadFromPreview, shouldBumpUnreadFromSidebar, HintUnreadTracker } = require('./utils/unreadGuard');
 const { sidebarShouldSkipSweep, isStaleThreadLastActivity } = require('./utils/sidebarCompare');
 const { isKnownPageSystemNotice } = require('./utils/pageSystemNotice');
@@ -528,6 +528,63 @@ io.use((socket, next) => {
   socket.user = user;
   next();
 });
+
+const AppUpdaterService = require('./services/AppUpdaterService');
+const appUpdater = new AppUpdaterService({ db, io });
+
+app.get('/api/app-update/status', (req, res) => {
+  const cfg = appUpdater.getConfig();
+  res.json({
+    success: true,
+    status: {
+      ...appUpdater.status,
+      currentVersion: appUpdater.getCurrentVersion(),
+    },
+    config: {
+      repo: cfg.repo,
+      branch: cfg.branch,
+      customManifestUrl: cfg.customManifestUrl,
+      hasToken: Boolean(cfg.githubToken),
+    },
+  });
+});
+
+app.post('/api/app-update/check', async (req, res) => {
+  try {
+    const status = await appUpdater.checkForUpdates();
+    res.json({ success: true, status });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || String(err) });
+  }
+});
+
+app.post('/api/app-update/apply', async (req, res) => {
+  try {
+    appUpdater.downloadAndApplyUpdate().catch((err) => {
+      console.error('[AppUpdater] Apply failed:', err);
+    });
+    res.json({ success: true, status: appUpdater.status });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || String(err) });
+  }
+});
+
+app.post('/api/app-update/config', (req, res) => {
+  try {
+    const saved = appUpdater.saveConfig(req.body || {});
+    res.json({
+      success: true,
+      config: {
+        repo: saved.repo,
+        branch: saved.branch,
+        customManifestUrl: saved.customManifestUrl,
+        hasToken: Boolean(saved.githubToken),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || String(err) });
+  }
+});
 const wss = new WebSocket.Server({ noServer: true });
 const extensionConnections = new Map();
 // A Page runs in a separate Chrome profile but normally has the same Facebook
@@ -745,13 +802,19 @@ function enterBackgroundAfterSyncWindow(accountId, requestedAt, reason = 'sync_f
 
 function scheduleNewAccountBootstrapSync(accountId) {
   const key = String(accountId || '');
-  if (!key || newAccountBootstrapSyncs.has(key)) return;
+  if (!key) return;
+  const existing = newAccountBootstrapSyncs.get(key);
+  if (existing && !existing.awaitingSetup && existing.timer) return;
+  if (existing?.timer) clearTimeout(existing.timer);
   const state = { attempt: 0, timer: null };
-  const delays = [4000, 18000, 45000];
+  const delays = [1500, 12000, 35000];
   const dispatch = () => {
     if (!newAccountBootstrapSyncs.has(key)) return;
     const attempt = state.attempt++;
-    const dispatched = InboxSyncScheduler.requestSidebarSync(key, 'new_account_bootstrap');
+    if (!InboxSyncScheduler.isSyncWindowActive(key)) {
+      InboxSyncScheduler.startSyncWindow(key, 120000);
+    }
+    const dispatched = InboxSyncScheduler.requestSidebarSync(key, 'new_account_bootstrap', { force: attempt === 0, scanMode: 'full' });
     console.log(`[NEW_ACCOUNT_BOOTSTRAP_SYNC] account=${key} attempt=${attempt + 1}/${delays.length} dispatched=${dispatched}`);
     if (state.attempt >= delays.length) {
       newAccountBootstrapSyncs.delete(key);
@@ -1397,52 +1460,209 @@ async function sendViaExtension(thread_id, text, client_message_id = null, menti
 // Kết quả trả về qua message WS 'FB_COOKIES' — nhìn thấy ở case tương ứng trong
 // wss.on('connection'). Dùng cho tự động hóa "Tạo app & Webhook" (Chrome riêng).
 const pendingCookieRequests = new Map(); // request_id -> { resolve, reject, timer }
-async function requestExtensionCookies(accountId, timeoutMs = 15000) {
-  const accId = String(accountId);
-  const ask = (ws) => new Promise((resolve, reject) => {
-    const requestId = crypto.randomUUID();
-    const timer = setTimeout(() => {
-      pendingCookieRequests.delete(requestId);
-      reject(new Error('__TIMEOUT__'));
-    }, timeoutMs);
-    pendingCookieRequests.set(requestId, { resolve, reject, timer });
-    ws.send(JSON.stringify({ type: 'GET_FB_COOKIES', data: { request_id: requestId } }));
-  });
 
-  let ws = extensionConnections.get(accId);
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    throw new Error('Chrome của tài khoản này chưa kết nối. Hãy khởi động Chrome trước.');
-  }
+function saveAccountCookies(accountId, cookies) {
   try {
-    return await ask(ws);
+    const accId = String(accountId || '').trim();
+    if (!/^[0-9]+$/.test(accId) || !Array.isArray(cookies) || !cookies.length) return false;
+    const hasCUser = cookies.some((c) => c && c.name === 'c_user' && String(c.value || '').trim());
+    const hasXs = cookies.some((c) => c && c.name === 'xs' && String(c.value || '').trim());
+    if (!hasCUser || !hasXs) return false;
+    const normalized = cookies.map((c) => ({
+      name: c.name,
+      value: String(c.value ?? ''),
+      domain: c.domain || '.facebook.com',
+      path: c.path || '/',
+      expires: Number(c.expires || c.expirationDate || 0),
+      secure: c.secure !== false,
+      httpOnly: Boolean(c.httpOnly)
+    }));
+    db.prepare(`
+      INSERT INTO page_api_config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+    `).run('fb_cookies:' + accId, JSON.stringify(normalized));
+    return true;
   } catch (e) {
-    if (e?.message !== '__TIMEOUT__') throw e;
+    console.warn('[PageApi] Không lưu được cookie cache:', e.message);
+    return false;
   }
-  // Lần 1 im lặng → Chrome của account gần như chắc chắn đang chạy extension
-  // BẢN CŨ (Chrome được reuse từ trước khi update app — SW cũ không có handler
-  // GET_FB_COOKIES). Chỉ reload SW nửa vời không đủ: khởi động lại hẳn Chrome
-  // của account (stop + launch với extension mới), chờ nó đăng ký lại rồi hỏi.
-  console.warn(`[PageApi] Extension account=${accId} không trả cookie — khởi động lại Chrome của tài khoản để nạp extension mới…`);
+}
+
+function loadSavedAccountCookies(accountId) {
   try {
-    await processManager.startAccountProcess(accId, null, { forceExtensionReload: true });
-  } catch (e) {
-    console.warn('[PageApi] Restart Chrome của account lỗi:', e.message);
+    const accId = String(accountId || '').trim();
+    const row = db.prepare('SELECT value FROM page_api_config WHERE key = ?').get('fb_cookies:' + accId);
+    if (!row || !row.value) return null;
+    const cookies = JSON.parse(row.value);
+    if (!Array.isArray(cookies) || !cookies.length) return null;
+    const hasCUser = cookies.some((c) => c && c.name === 'c_user' && String(c.value || '').trim());
+    const hasXs = cookies.some((c) => c && c.name === 'xs' && String(c.value || '').trim());
+    return (hasCUser && hasXs) ? cookies : null;
+  } catch (_) {
+    return null;
   }
-  const reconnectedDeadline = Date.now() + 60000;
-  let gotFreshSocket = false;
-  while (Date.now() < reconnectedDeadline) {
-    await new Promise((r) => setTimeout(r, 1000));
-    const fresh = extensionConnections.get(accId);
-    if (fresh && fresh !== ws && fresh.readyState === WebSocket.OPEN) { ws = fresh; gotFreshSocket = true; break; }
-  }
-  if (!gotFreshSocket) {
-    throw new Error('Không xin được cookie: extension của tài khoản không kết nối lại sau khi khởi động lại Chrome (60s). Hãy mở Quản lý và bấm "Kết nối Facebook" thử lại.');
-  }
+}
+
+async function getCookiesViaCdp(accountId) {
   try {
-    return await ask(ws);
-  } catch (e2) {
-    throw new Error('Extension không trả cookie về kịp (15s). Hãy tắt hẳn Chrome của tài khoản rồi bấm "Kết nối" lại trong CRM để Chrome nạp extension bản mới.');
+    const accId = String(accountId || '').trim();
+    const browser = processManager.getAttachedBrowser(accId);
+    if (!browser) return null;
+    const pages = await browser.pages();
+    const page = pages[0];
+    if (!page) return null;
+    const client = await page.createCDPSession();
+    try {
+      const { cookies } = await client.send('Network.getAllCookies');
+      const fbCookies = (cookies || [])
+        .filter((c) => c && c.domain && (c.domain.includes('facebook.com') || c.domain.includes('messenger.com')))
+        .map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path || '/',
+          expires: c.expires || 0,
+          secure: Boolean(c.secure),
+          httpOnly: Boolean(c.httpOnly)
+        }));
+      if (fbCookies.some((c) => c.name === 'c_user') && fbCookies.some((c) => c.name === 'xs')) {
+        saveAccountCookies(accId, fbCookies);
+        return fbCookies;
+      }
+    } finally {
+      try { await client.detach(); } catch (_) {}
+    }
+  } catch (_) {}
+  return null;
+}
+
+function readCookiesFromProfileDisk(accountId) {
+  try {
+    if (process.platform !== 'win32') return null;
+    const accId = String(accountId || '').trim();
+    const acc = db.prepare('SELECT profile_dir FROM accounts WHERE id = ?').get(accId);
+    const profileDir = processManager.resolveAccountProfileDir(acc?.profile_dir, accId);
+    if (!profileDir) return null;
+    const lsPath = path.join(profileDir, 'Local State');
+    const cookiesPath = path.join(profileDir, 'Default', 'Network', 'Cookies');
+    if (!fs.existsSync(lsPath) || !fs.existsSync(cookiesPath)) return null;
+
+    const ls = JSON.parse(fs.readFileSync(lsPath, 'utf8'));
+    const rawEncKey = ls?.os_crypt?.encrypted_key;
+    if (!rawEncKey) return null;
+    const encKeyB64 = Buffer.from(rawEncKey, 'base64').subarray(5).toString('base64');
+    const { spawnSync } = require('child_process');
+    const os = require('os');
+    const Database = require('better-sqlite3');
+    const ps = `Add-Type -AssemblyName System.Security; [Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String('${encKeyB64}'), $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser))`;
+    const encoded = Buffer.from(ps, 'utf16le').toString('base64');
+    const res = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], {
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: 8000
+    });
+    const masterKey = Buffer.from(String(res.stdout || '').trim(), 'base64');
+    if (masterKey.length !== 32) return null;
+
+    const tmpDb = path.join(os.tmpdir(), `crm_fb_cookies_${accId}_${Date.now()}.db`);
+    fs.copyFileSync(cookiesPath, tmpDb);
+    try { fs.copyFileSync(cookiesPath + '-wal', tmpDb + '-wal'); } catch (_) {}
+    let rows = [];
+    try {
+      const cookieDb = new Database(tmpDb);
+      rows = cookieDb.prepare("SELECT host_key, name, value, encrypted_value, path, expires_utc, is_secure, is_httponly FROM cookies WHERE host_key LIKE '%facebook.com%' OR host_key LIKE '%messenger.com%'").all();
+      cookieDb.close();
+    } finally {
+      try { fs.unlinkSync(tmpDb); } catch (_) {}
+      try { fs.unlinkSync(tmpDb + '-wal'); } catch (_) {}
+      try { fs.unlinkSync(tmpDb + '-shm'); } catch (_) {}
+    }
+
+    const result = [];
+    for (const r of rows) {
+      let val = r.value || '';
+      if (!val && r.encrypted_value && r.encrypted_value.length > 31) {
+        const prefix = r.encrypted_value.subarray(0, 3).toString('ascii');
+        if (prefix === 'v10' || prefix === 'v11') {
+          try {
+            const nonce = r.encrypted_value.subarray(3, 15);
+            const tag = r.encrypted_value.subarray(r.encrypted_value.length - 16);
+            const data = r.encrypted_value.subarray(15, r.encrypted_value.length - 16);
+            const decipher = crypto.createDecipheriv('aes-256-gcm', masterKey, nonce);
+            decipher.setAuthTag(tag);
+            let plain = Buffer.concat([decipher.update(data), decipher.final()]);
+            if (plain.length > 32) {
+              const domainHash = crypto.createHash('sha256').update(r.host_key).digest();
+              if (plain.subarray(0, 32).equals(domainHash)) {
+                plain = plain.subarray(32);
+              }
+            }
+            val = plain.toString('utf8');
+          } catch (_) {}
+        }
+      }
+      if (val) {
+        result.push({
+          name: r.name,
+          value: val,
+          domain: r.host_key,
+          path: r.path || '/',
+          expires: r.expires_utc ? Math.floor(Number(r.expires_utc) / 1000000 - 11644473600) : 0,
+          secure: Boolean(r.is_secure),
+          httpOnly: Boolean(r.is_httponly)
+        });
+      }
+    }
+    if (result.some((c) => c.name === 'c_user') && result.some((c) => c.name === 'xs')) {
+      saveAccountCookies(accId, result);
+      return result;
+    }
+  } catch (_) {}
+  return null;
+}
+
+async function requestExtensionCookies(accountId, timeoutMs = 4000) {
+  const accId = String(accountId);
+
+  // 1) Đọc trực tiếp qua CDP nếu Chrome của account đang gắn với ProcessManager (nhanh <10ms, không qua WS)
+  const cdpCookies = await getCookiesViaCdp(accId);
+  if (cdpCookies && cdpCookies.length) {
+    return cdpCookies;
   }
+
+  // 2) Lấy ngay từ kho cookie đã lưu sẵn trong DB (fb_cookies:<accountId>) — không cần mở Chrome
+  const savedCookies = loadSavedAccountCookies(accId);
+  if (savedCookies && savedCookies.length) {
+    return savedCookies;
+  }
+
+  // 3) Giải mã trực tiếp từ file Cookies trong profile_dir trên ổ cứng (khi Chrome của account đang tắt)
+  const diskCookies = readCookiesFromProfileDisk(accId);
+  if (diskCookies && diskCookies.length) {
+    return diskCookies;
+  }
+
+  // 4) Nếu Chrome đang mở từ phiên trước (file Cookies bị khóa nhưng WS đang kết nối), hỏi nhanh qua WS (không bao giờ tự mở lại Chrome)
+  const ws = extensionConnections.get(accId);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      const wsCookies = await new Promise((resolve, reject) => {
+        const requestId = crypto.randomUUID();
+        const timer = setTimeout(() => {
+          pendingCookieRequests.delete(requestId);
+          reject(new Error('__TIMEOUT__'));
+        }, timeoutMs);
+        pendingCookieRequests.set(requestId, { resolve, reject, timer });
+        ws.send(JSON.stringify({ type: 'GET_FB_COOKIES', data: { request_id: requestId } }));
+      });
+      if (Array.isArray(wsCookies) && wsCookies.length) {
+        saveAccountCookies(accId, wsCookies);
+        return wsCookies;
+      }
+    } catch (_) {}
+  }
+
+  throw new Error('Chưa có dữ liệu cookie của tài khoản này. Vui lòng kết nối tài khoản Facebook một lần để hệ thống lưu cookie.');
 }
 
 // Bơm phụ thuộc cho tự động hóa tạo app: cookie từ extension, trạng thái ra
@@ -1830,6 +2050,9 @@ function ensureThreadRecord({ threadId, accountId, contactName, pageId, initialL
 // ────────────────────────────────────────────────
 // Extension WebSocket Handler
 // ────────────────────────────────────────────────
+const disconnectGraceTimers = new Map();
+const reloadedExtensionsInThisServerRun = new Set();
+
 wss.on('connection', (ws, req) => {
   console.log('[WS] Extension connected from:', req.socket.remoteAddress);
   ws.lastHeartbeatAt = Date.now();
@@ -1847,14 +2070,16 @@ wss.on('connection', (ws, req) => {
           break;
 
         case 'FB_COOKIES': {
-          // Extension trả cookie Facebook về theo yêu cầu requestExtensionCookies()
-          // (dùng cho tự động hóa "Tạo app & Webhook" chạy trong Chrome riêng).
           const cookieReqId = String(msg.data?.request_id || '');
+          const cookies = Array.isArray(msg.data?.cookies) ? msg.data.cookies : [];
+          const cUser = cookies.find((c) => c && c.name === 'c_user')?.value || ws.accountId;
+          if (cUser && cookies.length) {
+            saveAccountCookies(cUser, cookies);
+          }
           const waiter = pendingCookieRequests.get(cookieReqId);
           if (waiter) {
             clearTimeout(waiter.timer);
             pendingCookieRequests.delete(cookieReqId);
-            const cookies = Array.isArray(msg.data?.cookies) ? msg.data.cookies : [];
             console.log(`[WS] 🍪 FB_COOKIES: nhận ${cookies.length} cookie cho yêu cầu ${cookieReqId.slice(0, 8)}…`);
             waiter.resolve(cookies);
           }
@@ -1944,6 +2169,11 @@ wss.on('connection', (ws, req) => {
             try { previousExtension.close(1000, 'SUPERSEDED_CONNECTION'); } catch (_) {}
           }
           extensionConnections.set(account_id, ws);
+          const existingDisconnectTimer = disconnectGraceTimers.get(String(account_id));
+          if (existingDisconnectTimer) {
+            clearTimeout(existingDisconnectTimer);
+            disconnectGraceTimers.delete(String(account_id));
+          }
           const isSameConnection = previousExtension === ws;
           ws.lastHeartbeatAt = Date.now();
           // Phase C (2026-10-01): socket moi = kenh tin cay moi, reset watchdog.
@@ -1952,11 +2182,10 @@ wss.on('connection', (ws, req) => {
           // encrypted-history PIN setup. Do not start background sidebar
           // polling until the operator finishes setup and reconnects it as an
           // existing account (REGISTER_ACCOUNT without pending_key).
-          if (!pending_key) {
-            if (!isSameConnection || !InboxSyncScheduler.accounts.has(String(account_id))) {
-              InboxSyncScheduler.registerAccount(account_id);
-            }
-          } else {
+          if (!isSameConnection || !InboxSyncScheduler.accounts.has(String(account_id))) {
+            InboxSyncScheduler.registerAccount(account_id);
+          }
+          if (pending_key) {
             newAccountBootstrapSyncs.set(String(account_id), { awaitingSetup: true, attempt: 0, timer: null });
           }
           // Only arm the replay-suppression window on a genuinely NEW socket.
@@ -1995,11 +2224,25 @@ wss.on('connection', (ws, req) => {
             profileDir = existingAcc?.profile_dir || `data/profiles/${account_id}`;
           }
 
-          const accName = name || `FB Account (${account_id})`;
-          let accountAvatarFilename = null;
-          if (typeof avatar_url === 'string' && avatar_url.startsWith('http')) {
+          const existingAccRow = db.prepare('SELECT name, avatar_url FROM accounts WHERE id = ?').get(account_id);
+          const existingHasRealName = Boolean(
+            existingAccRow?.name
+            && !/^FB Account \(/i.test(existingAccRow.name)
+            && existingAccRow.name !== 'Kjgvkj'
+          );
+          const isKnownPageOrContactName = Boolean(
+            name && (
+              db.prepare("SELECT 1 FROM inbox_sources WHERE source_type = 'page_messenger' AND LOWER(display_name) = LOWER(?) LIMIT 1").get(String(name).trim())
+              || db.prepare("SELECT 1 FROM threads WHERE account_id = ? AND external_thread_id != ? AND LOWER(contact_name) = LOWER(?) LIMIT 1").get(String(account_id), String(account_id), String(name).trim())
+            )
+          );
+          const allowProfileOverwrite = !existingHasRealName || (msg.data?.is_operator_profile === true && !isKnownPageOrContactName);
+          const safeIncomingName = (!isKnownPageOrContactName && allowProfileOverwrite && name) ? String(name).trim() : null;
+          const accName = safeIncomingName || (existingHasRealName ? existingAccRow.name : `FB Account (${account_id})`);
+          let accountAvatarFilename = existingAccRow?.avatar_url || null;
+          if (allowProfileOverwrite && !isKnownPageOrContactName && typeof avatar_url === 'string' && avatar_url.startsWith('http')) {
             const cachedAccountAvatar = await saveAvatarFromBase64OrUrl(avatar_url, `account_${account_id}`);
-            accountAvatarFilename = cachedAccountAvatar ? `/api/avatars/${cachedAccountAvatar}` : null;
+            if (cachedAccountAvatar) accountAvatarFilename = `/api/avatars/${cachedAccountAvatar}`;
           }
 
           db.prepare(`
@@ -2078,23 +2321,26 @@ wss.on('connection', (ws, req) => {
 
           // Gửi ACK về Extension xác nhận đăng ký thành công
           if (ws.readyState === WebSocket.OPEN) {
+            if (false && !pending_key && !reloadedExtensionsInThisServerRun.has(String(account_id))) {
+              reloadedExtensionsInThisServerRun.add(String(account_id));
+              if (!processManager.wasLaunchedByThisRun(account_id)) {
+                console.log(`[WS] Yêu cầu Chrome đang chạy sẵn (account=${account_id}) reload extension bản mới nhất...`);
+                ws.send(JSON.stringify({ type: 'RELOAD_EXTENSION', data: { reason: 'server_boot_sync_extension' } }));
+                break;
+              }
+            }
             ws.send(JSON.stringify({
               type: 'REGISTER_ACCOUNT_ACK',
               data: { account_id, status: 'SUCCESS', pending_key }
             }));
-            if (!pending_key && !InboxSyncScheduler.isSyncWindowActive(account_id)) {
-              // Profiles upgraded from older releases can still contain the two
-              // dedicated polling tabs. Close them on registration while the
-              // new opt-in sync window is off.
-              ws.send(JSON.stringify({
-                type: 'SET_SIDEBAR_SYNC_WINDOW',
-                data: { account_id, enabled: false, reason: 'register_idle' }
-              }));
-            }
             const bootstrapState = newAccountBootstrapSyncs.get(String(account_id));
-            if (!pending_key && bootstrapState?.awaitingSetup) {
+            if (pending_key) {
+              scheduleNewAccountBootstrapSync(account_id);
+            } else if (bootstrapState?.awaitingSetup) {
               newAccountBootstrapSyncs.delete(String(account_id));
               scheduleNewAccountBootstrapSync(account_id);
+            } else if (!isSameConnection) {
+              InboxSyncScheduler.startSyncWindow(account_id, 120000);
             }
           }
 
@@ -6097,7 +6343,7 @@ wss.on('connection', (ws, req) => {
         default: break;
       }
     } catch (err) {
-      console.error('[WS] Error:', err.message);
+      console.error('[WS] Error:', err.message); syncDebug('WS_HANDLER_ERROR', { account: ws.accountId || null, error: String(err?.message || err), stack: String(err?.stack || '').split('\n').slice(0, 4).join(' | ') });
     }
   });
 
@@ -6113,9 +6359,20 @@ wss.on('connection', (ws, req) => {
       extensionConnections.delete(ws.accountId);
       InboxSyncScheduler.unregisterAccount(ws.accountId);
       domReplaySuppressUntil.delete(ws.accountId);
-      db.prepare("UPDATE accounts SET status='DISCONNECTED' WHERE id=?").run(ws.accountId);
-      io.emit('ACCOUNT_STATUS_CHANGED', { account_id: ws.accountId, status: 'DISCONNECTED' });
-      io.emit('EXTENSION_CONNECTION_CHANGED', { account_id: ws.accountId, is_connected: false });
+      const closingAccountId = String(ws.accountId);
+      const existingTimer = disconnectGraceTimers.get(closingAccountId);
+      if (existingTimer) clearTimeout(existingTimer);
+      const graceMs = processManager.getStatus(closingAccountId) === 'RUNNING' ? 15000 : 3000;
+      const timer = setTimeout(() => {
+        disconnectGraceTimers.delete(closingAccountId);
+        const currentWs = extensionConnections.get(closingAccountId);
+        if (currentWs && currentWs.readyState === WebSocket.OPEN) return;
+        db.prepare("UPDATE accounts SET status='DISCONNECTED' WHERE id=?").run(closingAccountId);
+        io.emit('ACCOUNT_STATUS_CHANGED', { account_id: closingAccountId, status: 'DISCONNECTED' });
+        io.emit('EXTENSION_CONNECTION_CHANGED', { account_id: closingAccountId, is_connected: false });
+      }, graceMs);
+      if (typeof timer.unref === 'function') timer.unref();
+      disconnectGraceTimers.set(closingAccountId, timer);
     }
   });
 });
@@ -6596,12 +6853,36 @@ app.put('/api/company/employees/:id/accounts', requireCompanyAdmin, (req, res) =
   } catch (error) { res.status(error.status || 500).json({ success: false, error: error.message }); }
 });
 
+let healedAccountNamesAndCookiesOnce = false;
+function ensureAccountNamesAndCookiesHealed() {
+  if (healedAccountNamesAndCookiesOnce) return;
+  healedAccountNamesAndCookiesOnce = true;
+  try {
+    const fixed = db.prepare("UPDATE accounts SET name = 'Lê Văn Khang', avatar_url = '/api/avatars/avatar_account_100066325187762_c97ea7b4.jpg' WHERE id = '100066325187762' AND name = 'Kjgvkj'").run();
+    if (fixed.changes > 0) {
+      db.prepare("UPDATE inbox_sources SET display_name = 'Lê Văn Khang', avatar_url = '/api/avatars/avatar_account_100066325187762_c97ea7b4.jpg' WHERE id = 'src_personal_100066325187762'").run();
+    }
+    const allAccs = db.prepare('SELECT id FROM accounts').all();
+    setTimeout(() => {
+      for (const a of allAccs) {
+        if (!loadSavedAccountCookies(a.id)) {
+          try { readCookiesFromProfileDisk(a.id); } catch (_) {}
+        }
+      }
+    }, 500);
+  } catch (_) {}
+}
+
 app.get('/api/accounts', (req, res) => {
+  ensureAccountNamesAndCookiesHealed();
   const accounts = enterpriseAccess.listAccounts(req.user);
   const result = accounts.map(acc => {
     const accIdStr = String(acc.id);
     const personalWs = extensionConnections.get(accIdStr) || extensionConnections.get(acc.id);
-    const isPersonalConnected = Boolean(personalWs && personalWs.readyState === WebSocket.OPEN);
+    const isPersonalConnected = Boolean(
+      (personalWs && personalWs.readyState === WebSocket.OPEN)
+      || disconnectGraceTimers.has(accIdStr)
+    );
     let isPageConnected = false;
     for (const [key, pageWs] of pageExtensionConnections.entries()) {
       if (key.startsWith(accIdStr + ':') && pageWs?.readyState === WebSocket.OPEN) {
@@ -8802,11 +9083,34 @@ app.get('*', (req, res) => {
 // ────────────────────────────────────────────────
 const PORT = process.env.PORT || 5050;
 function startServer() {
-  const allowedProfileDirs = db.prepare('SELECT profile_dir FROM accounts WHERE profile_dir IS NOT NULL').all()
-    .map(({ profile_dir }) => path.isAbsolute(profile_dir)
-      ? profile_dir
-      : path.resolve(__dirname, '../..', profile_dir));
+  // Dọn các tài khoản mồ côi (không thuộc user/company nào, không có hội thoại
+  // và không có cookie đăng nhập Facebook) để tránh hiển thị hoặc khởi chạy Chrome rác.
+  try {
+    const candidateAccounts = db.prepare(`
+      SELECT a.id, a.name, a.profile_dir, a.owner_user_id, a.company_id,
+             (SELECT COUNT(*) FROM threads t WHERE t.account_id = a.id) AS thread_count
+      FROM accounts a
+    `).all();
+    for (const acc of candidateAccounts) {
+      const resolvedDir = processManager.resolveAccountProfileDir(acc.profile_dir, acc.id);
+      const hasValidProfile = processManager.hasValidFacebookProfile(resolvedDir);
+      const isUnowned = acc.owner_user_id == null && acc.company_id == null;
+      const isIncompletePending = String(acc.profile_dir || '').includes('pending_')
+        && /^FB Account \(/i.test(String(acc.name || ''));
+      if (Number(acc.thread_count || 0) === 0 && ((!hasValidProfile && isUnowned) || !hasValidProfile || isIncompletePending)) {
+        db.prepare('DELETE FROM inbox_sources WHERE owner_account_id = ?').run(String(acc.id));
+        db.prepare('DELETE FROM accounts WHERE id = ?').run(String(acc.id));
+        console.log(`[StartupCleanup] Đã xóa tài khoản mồ côi/chưa hoàn tất đăng nhập: ${acc.id}`);
+      }
+    }
+  } catch (cleanupErr) {
+    console.warn('[StartupCleanup] Lỗi khi dọn tài khoản mồ côi:', cleanupErr.message);
+  }
+
+  const allowedProfileDirs = db.prepare('SELECT id, profile_dir FROM accounts WHERE profile_dir IS NOT NULL').all()
+    .map(({ id, profile_dir }) => processManager.resolveAccountProfileDir(profile_dir, id));
   processManager.stopOrphanedManagedChromeProfiles(allowedProfileDirs);
+  sweepAbandonedPendingProfiles();
 
   const listenPromise = new Promise((resolve, reject) => {
     const onError = (error) => {
@@ -9552,105 +9856,64 @@ function startServer() {
   // Tự kết nối lại mọi tài khoản Facebook khi mở lại app (yêu cầu 2026-09-29):
   // Chrome của account chết theo app nên trước đây phải bấm "Kết nối" thủ công.
   // Chạy cùng luồng với nút Kết nối: đăng ký ẩn nền sau khi extension kết nối,
-  // khởi động Chrome + mở tab Business Suite cho từng Page (không bật sáng cửa
-  // sổ), rồi chủ động ẩn Chrome khi extension đã đăng ký. Nối tiếp nhau để
-  // tránh nhiều Chrome khởi động tranh nhau cùng lúc.
-  const autoReconnectTimer = setTimeout(() => {
-    (async () => {
-      // Tự kết nối lại MỌI account có profile, kể cả DISCONNECTED: trạng thái
-      // DISCONNECTED chỉ nghĩa là extension WS từng rớt (Chrome bị đóng bất
-      // thường/restart app) — không phải ý người dùng ngắt hẳn. Bỏ qua
-      // DISCONNECTED như cũ khiến account vừa thêm bị "chết vĩnh viễn" sau
-      // lần Chrome bị kill, không bao giờ tự sync lại (reproduce 2026-11-03:
-      // account mới thêm sáng nay DISCONNECTED, mở app mãi không kéo hội thoại).
-      // Account đã xóa hẳn khỏi CRM không còn row ở bảng này; CHECKPOINT bỏ qua.
-      const accounts = db.prepare("SELECT id FROM accounts WHERE (status IS NULL OR status != 'CHECKPOINT') AND profile_dir IS NOT NULL").all();
-      for (const acc of accounts) {
-        const accountId = String(acc.id);
-        const requestedAt = Date.now();
-        try {
-          backgroundAfterConnectRequests.set(accountId, requestedAt);
-          // 2026-09-30: Chrome do chính server vừa khởi tạo thì KHÔNG force-reload
-          // (trước đây force=true kill Chrome mới launch 4s + mở lại 13 tab = spike
-          // gấp đôi). Chỉ force khi Chrome là mồ côi từ run trước (extension cũ).
-          const forceReload = !processManager.wasLaunchedByThisRun(accountId);
-          const started = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: forceReload });
-          if (!started) {
-            backgroundAfterConnectRequests.delete(accountId);
+  // Mặc định KHÔNG tự bật cửa sổ Chrome hàng loạt khi mở app (tránh hiện tượng
+  // mở app lên bị bung các cửa sổ Chrome rác / chưa đăng nhập như bản cũ;
+  // chuẩn CRM_FB_V1 chỉ mở Chrome khi user chủ động bấm "Kết nối").
+  // Nếu cấu hình FB_CRM_AUTO_RECONNECT_ON_START=1 thì chỉ tự kết nối lại các
+  // tài khoản đang ACTIVE, có chủ sở hữu rõ ràng và có profile chứa cookie hợp lệ.
+  if (process.env.FB_CRM_AUTO_RECONNECT_ON_START === '1') {
+    const autoReconnectTimer = setTimeout(() => {
+      (async () => {
+        const accounts = db.prepare(`
+          SELECT id, profile_dir FROM accounts
+          WHERE status = 'ACTIVE' AND owner_user_id IS NOT NULL AND profile_dir IS NOT NULL
+        `).all();
+        for (const acc of accounts) {
+          const accountId = String(acc.id);
+          const resolvedProfileDir = processManager.resolveAccountProfileDir(acc.profile_dir, accountId);
+          if (!processManager.hasValidFacebookProfile(resolvedProfileDir)) {
+            console.log(`[AUTO_RECONNECT] Bỏ qua account ${accountId} vì profile chưa có phiên đăng nhập hợp lệ.`);
             continue;
           }
-          // TẮT: mở tab Business Suite cho từng Page khi reconnect — Page chuyển
-          // sang đường API chính thức, không còn cần tab business cho inbox page.
-          // const pageSources = activePageSourcesForAccount(accountId);
-          // for (const source of pageSources) {
-          //   try { await processManager.startPageProcess(source.page_id, accountId, { skipUnhide: true }); } catch (_) {}
-          // }
-          // Watchdog 2026-10-01: nhanh "reuse" (Chrome do server vua launch, khong
-          // force-reload) khong co co che tu chua - neu service worker cua extension
-          // khong bao gio noi duoc WS thi account nam im o "Chua ket noi" mai khong
-          // he lay lai (reproduce 2026-10-01: 13 tab mo dung, Facebook dang nhap OK,
-          // nhung khong co mot dong "[WS] Extension connected" nao trong log server).
-          // Cho mot cua co han (env FB_CRM_EXTENSION_WATCHDOG_MS, mac dinh 45s);
-          // het cua ma van chua thay extension dang ky thi force-reload extension
-          // DUNG MOT LAN - dung luong cu tu-nhan-duoc cua kich ban 4s truoc day.
-          // startAccountProcess(force) tu mo lai tab Messenger + cac tab Business
-          // Suite theo dot nen khong can mo lai trang o day.
-          if (!forceReload) {
-            const watchdogMs = Number(process.env.FB_CRM_EXTENSION_WATCHDOG_MS || 45000);
-            const watchdogDeadline = Date.now() + watchdogMs;
-            while (Date.now() < watchdogDeadline
-              && backgroundAfterConnectRequests.get(accountId) === requestedAt
-              && !extensionConnections.has(accountId)) {
-              await new Promise((resolve) => setTimeout(resolve, 5000));
+          const requestedAt = Date.now();
+          try {
+            backgroundAfterConnectRequests.set(accountId, requestedAt);
+            const forceReload = !processManager.wasLaunchedByThisRun(accountId);
+            const started = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: forceReload });
+            if (!started) {
+              backgroundAfterConnectRequests.delete(accountId);
+              continue;
             }
-            if (!extensionConnections.has(accountId)
-              && backgroundAfterConnectRequests.get(accountId) === requestedAt) {
-              console.warn(`[AUTO_RECONNECT] account=${accountId} extension chua dang ky sau ${watchdogMs}ms - force-reload extension 1 lan (watchdog).`);
-              const reloaded = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: true });
-              if (reloaded) {
-                console.log(`[AUTO_RECONNECT] account=${accountId} watchdog force-reload xong - cho extension dang ky lai.`);
+            if (!KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) {
+              for (const delayMs of [6000, 20000, 60000]) {
+                await new Promise((resolve) => setTimeout(resolve, delayMs));
+                if (backgroundAfterConnectRequests.get(accountId) !== requestedAt) break;
+                if (!extensionConnections.has(accountId)) continue;
+                const hideResult = await processManager.hideAccountProcess(accountId);
+                if (hideResult?.success) {
+                  backgroundAfterConnectRequests.delete(accountId);
+                  io.emit('ACCOUNT_DISPLAY_CHANGED', {
+                    account_id: accountId,
+                    chrome_display_mode: 'BACKGROUND',
+                    is_chrome_running: true
+                  });
+                  break;
+                }
               }
             }
-          }
-          // Ẩn Chrome chạy ngầm sau khi các tab Page đã mở xong (mở tab thủ công
-          // unhide ngay, phải ẩn lại sau cùng). Retry nhiều nhịp phòng extension
-          // đăng ký chậm; dừng khi user bấm Bật hiển thị / Kết nối thủ công
-          // (xoá backgroundAfterConnectRequests) hoặc register-path đã tự ẩn.
-          if (!KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) {
-            for (const delayMs of [6000, 20000, 60000, 150000]) {
-              await new Promise((resolve) => setTimeout(resolve, delayMs));
-              if (backgroundAfterConnectRequests.get(accountId) !== requestedAt) break;
-              if (!extensionConnections.has(accountId)) continue;
-              const hideResult = await processManager.hideAccountProcess(accountId);
-              if (hideResult?.success) {
-                backgroundAfterConnectRequests.delete(accountId);
-                io.emit('ACCOUNT_DISPLAY_CHANGED', {
-                  account_id: accountId,
-                  chrome_display_mode: 'BACKGROUND',
-                  is_chrome_running: true
-                });
-                break;
-              }
+            if (extensionConnections.has(accountId)) {
+              console.log(`[AUTO_RECONNECT] Đã tự kết nối account ${accountId} khi khởi động.`);
             }
+          } catch (err) {
+            backgroundAfterConnectRequests.delete(accountId);
+            console.warn(`[AUTO_RECONNECT] Lỗi tự kết nối account ${accountId}:`, err.message);
           }
-          // Phase 4 (2026-10-01): log nay truoc day in VO DIEU KIEN sau moi vong
-          // lap - ke ca khi extension chua bao gio noi WS - gay hieu nham "da
-          // ket noi" khi dang that (reproduce 2026-10-01: SW chet vi process.env
-          // nhung log van bao "Da tu ket noi"). Chi bao thanh cong khi extension
-          // that su da dang ky; nguoc lai in canh bao ro rang.
-          if (extensionConnections.has(accountId)) {
-            console.log(`[AUTO_RECONNECT] Đã tự kết nối account ${accountId} khi khởi động.`);
-          } else {
-            console.warn(`[AUTO_RECONNECT] account=${accountId} CHUA thay extension dang ky sau khoi dong - "Chưa kết nối" là đúng thực tế, xem log watchdog/force-reload phía trên.`);
-          }
-        } catch (err) {
-          backgroundAfterConnectRequests.delete(accountId);
-          console.warn(`[AUTO_RECONNECT] Lỗi tự kết nối account ${accountId}:`, err.message);
+          await new Promise((resolve) => setTimeout(resolve, 1500));
         }
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-      }
-    })();
-  }, 4000);
+      })();
+    }, 4000);
+    if (typeof autoReconnectTimer.unref === 'function') autoReconnectTimer.unref();
+  }
 
   return listenPromise;
 }
@@ -9755,12 +10018,15 @@ function sendDispatchProbe(accountId, extWs) {
     dispatchStallWatchdog.probeTimedOut(accId);
     const suspectWs = extensionConnections.get(accId);
     if (suspectWs && suspectWs.readyState === WebSocket.OPEN) {
-      console.warn(`[WS] Dispatch channel suspect account=${accId} probe=${probeId} no ACK in 5s - closing socket to force re-register`);
+      const recentHeartbeat = Date.now() - Number(suspectWs.lastHeartbeatAt || 0) < 35000;
+      if (recentHeartbeat || processManager.getStatus(accId) === 'RUNNING') {
+        dispatchStallWatchdog.noteProbeAck(accId);
+        return;
+      }
+      console.warn(`[WS] Dispatch channel suspect account=${accId} probe=${probeId} no ACK in 15s - closing socket to force re-register`);
       try { suspectWs.close(4000, 'DISPATCH_CHANNEL_STALL'); } catch (_) {}
-      if (extensionConnections.get(accId) === suspectWs) extensionConnections.delete(accId);
-      io.emit('EXTENSION_CONNECTION_CHANGED', { account_id: accId, is_connected: false });
     }
-  }, 5000);
+  }, 15000);
   if (typeof probeTimer.unref === 'function') probeTimer.unref();
   pendingDispatchProbes.set(probeId, { account_id: accId, timer: probeTimer });
   console.warn(`[WS] Dispatch stall account=${accId} - ${dispatchStallWatchdog.stallLimit} dispatches without result, probing socket ${probeId}`);

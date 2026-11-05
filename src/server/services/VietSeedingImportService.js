@@ -371,12 +371,38 @@ function existsInCrm(identifier) {
   return Boolean(getDb().prepare('SELECT id FROM accounts WHERE id = ?').get(id));
 }
 
+function saveCookieCacheToDb(accountId, cookies, database = getDb()) {
+  try {
+    const id = String(accountId || '').trim();
+    if (!/^[0-9]+$/.test(id) || !Array.isArray(cookies) || !cookies.length) return;
+    const hasAuth = cookies.some((c) => c && (c.name === 'c_user' || c.name === 'xs'));
+    if (!hasAuth) return;
+    ensureKvSchema(database);
+    const normalized = cookies.map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain || '.facebook.com',
+      path: c.path || '/',
+      expires: c.expires || 0,
+      secure: c.secure !== false,
+      httpOnly: Boolean(c.httpOnly)
+    }));
+    database.prepare(`
+      INSERT INTO page_api_config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+    `).run('fb_cookies:' + id, JSON.stringify(normalized));
+  } catch (_) {}
+}
+
 function cacheParsedAccounts(accounts) {
   const byIdentifier = new Map();
   for (const account of accounts) {
     const id = String(account.identifier || '').trim();
     if (!id || byIdentifier.has(id)) continue; // trùng uid giữ bản đầu
     byIdentifier.set(id, account);
+    if (Array.isArray(account.cookies) && account.cookies.length) {
+      saveCookieCacheToDb(id, account.cookies);
+    }
   }
   summaryCache = { at: Date.now(), byIdentifier };
   return byIdentifier;
@@ -645,6 +671,7 @@ async function runImportSteps(account, ctx, pendingKey) {
 
   const row = await waitForAccountRow(pendingKey);
   if (!row) throw new Error('Hết thời gian chờ — cookie hết hiệu lực hoặc Facebook chặn đăng nhập.');
+  saveCookieCacheToDb(String(row.id), account.cookies);
   return { account_id: String(row.id), name: row.name };
 }
 

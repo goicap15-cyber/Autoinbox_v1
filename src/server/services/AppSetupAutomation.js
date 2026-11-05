@@ -23,7 +23,11 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 let puppeteerPromise = null;
 function getPuppeteer() {
   if (!puppeteerPromise) {
-    puppeteerPromise = import('puppeteer-core').then((m) => m.default || m);
+    let target = 'puppeteer-core';
+    try {
+      target = require('url').pathToFileURL(require.resolve('puppeteer-core')).href;
+    } catch (_) {}
+    puppeteerPromise = import(target).then((m) => m.default || m);
   }
   return puppeteerPromise;
 }
@@ -99,7 +103,6 @@ async function launchAutomationChrome() {
   for (const opt of candidates) {
     try {
       const browser = await puppeteer.launch(opt);
-      scheduleAutomationChromeHide(browser);
       return browser;
     } catch (e) { lastErr = e; }
   }
@@ -275,7 +278,7 @@ const SAVE_WEBHOOK_RE = '^(?:xác minh và lưu|verify and save|verificar y guar
 // Nút Confirm trong dialog đăng ký trường webhook (đa ngôn ngữ)
 const CONFIRM_SUBSCRIBE_RE = '^(?:confirm|xác nhận|done|xong|lưu|save|hoàn tất|ok)$';
 
-const DATA_DIR = DEPS.dataDir; // giữ tên biến cũ cho phần thân còn lại
+// DATA_DIR resolved dynamically via DEPS.dataDir // giữ tên biến cũ cho phần thân còn lại
 
 /* ---------- Khởi động tác vụ ---------- */
 
@@ -380,7 +383,7 @@ function closeBrowser(job) {
 function errorShot(page, name) {
   // Cửa sổ ẩn (chạy ngầm) có thể không render được khung hình → PNG best-effort.
   // Luôn kèm dump text (URL + dialog + body) để chẩn đoán kể cả khi chụp trượt.
-  const txtPath = path.join(DATA_DIR, String(name).replace(/\.png$/i, '') + '.txt');
+  const txtPath = path.join(DEPS.dataDir, String(name).replace(/\.png$/i, '') + '.txt');
   return (async () => {
     const info = await page.evaluate(() => {
       const clean = (s) => String(s || '').replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').trim();
@@ -399,47 +402,126 @@ function errorShot(page, name) {
       `body: ${info.body || ''}`,
     ].join('\n');
     try { require('fs').writeFileSync(txtPath, dump); } catch (_) {}
-    await page.screenshot({ path: path.join(DATA_DIR, name) }).catch(() => {});
+    await page.screenshot({ path: path.join(DEPS.dataDir, name) }).catch(() => {});
   })().catch(() => {});
 }
 
 // Điền email liên hệ vào form tạo ứng dụng (cùng cơ chế setVal như pollAndFill)
-async function fillContactEmail(page, email) {
-  return page.evaluate((email) => {
-    const visible = (el) => el && el.offsetParent !== null && !el.disabled;
-    const byLabel = (re) => {
+async function typeIntoTaggedInput(page, tag, value) {
+  const sel = 'input[data-crm-auto-input="' + tag + '"]';
+  const handle = await page.$(sel);
+  if (!handle) return false;
+  await page.evaluate((el) => {
+    el.scrollIntoView({ block: 'center' });
+    el.focus();
+  }, handle).catch(() => {});
+  await handle.click({ clickCount: 3 }).catch(() => {});
+  await page.keyboard.down('Control').catch(() => {});
+  await page.keyboard.press('KeyA').catch(() => {});
+  await page.keyboard.up('Control').catch(() => {});
+  await page.keyboard.press('Backspace').catch(() => {});
+  const text = String(value || '').trim();
+  if (text) {
+    await handle.type(text, { delay: 12 }).catch(async () => {
+      await page.keyboard.type(text, { delay: 12 }).catch(() => {});
+    });
+  }
+  await page.evaluate((el, v) => {
+    if ((el.value || '').trim() !== v) {
+      const prev = el.value;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(el, v);
+      else el.value = v;
+      if (el._valueTracker && typeof el._valueTracker.setValue === 'function') {
+        el._valueTracker.setValue(prev);
+      }
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: v }));
+    }
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }, handle, text).catch(() => {});
+  await sleep(250);
+  return true;
+}
+
+async function tagAppCreationInputs(page) {
+  return page.evaluate(() => {
+    const isFormInput = (el) => {
+      if (!el || el.disabled || el.readOnly) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 50 || r.height < 14 || r.top < 95) return false;
+      if (el.closest('header, nav, [role="banner"], [role="navigation"], [role="search"]')) return false;
+      const t = String(el.getAttribute('type') || el.type || 'text').toLowerCase();
+      if (!['text', 'email', ''].includes(t)) return false;
+      const hint = [el.placeholder, el.getAttribute('aria-label'), el.name, el.id].filter(Boolean).join(' ').toLowerCase();
+      if (/search|tìm kiếm|buscar|pesquisar|rechercher/.test(hint)) return false;
+      return true;
+    };
+    // Also clear any accidental value typed into the top header search input
+    for (const s of document.querySelectorAll('header input, nav input, [role="banner"] input, [role="search"] input')) {
+      if (s && s.value) {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (setter) setter.call(s, '');
+        else s.value = '';
+        s.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }
+    const formInputs = [...document.querySelectorAll('input')].filter(isFormInput)
+      .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+    const byHeading = (re) => {
       for (const lb of [...document.querySelectorAll('label')]) {
         const t = ((lb.innerText || lb.textContent) || '').trim().toLowerCase();
         if (re.test(t)) {
           const forId = lb.getAttribute('for');
-          let el = forId ? document.getElementById(forId) : null;
-          if (!el) el = lb.querySelector('input');
-          if (visible(el)) return el;
+          const el = (forId ? document.getElementById(forId) : null) || lb.querySelector('input');
+          if (isFormInput(el)) return el;
+        }
+      }
+      for (const el of formInputs) {
+        const lblIds = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+        const lblText = lblIds.map((id) => document.getElementById(id)?.innerText || '').join(' ').toLowerCase();
+        if (lblText && re.test(lblText)) return el;
+        const ownHint = ((el.placeholder || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
+        if (ownHint && re.test(ownHint)) return el;
+      }
+      for (const node of [...document.querySelectorAll('span, div, label, h2, h3, h4')]) {
+        const txt = (node.innerText || '').trim();
+        if (!txt || txt.length > 140 || !re.test(txt.toLowerCase())) continue;
+        let anc = node.parentElement;
+        for (let up = 0; up < 6 && anc && anc !== document.body; up++) {
+          const cands = [...anc.querySelectorAll('input')].filter(isFormInput);
+          if (cands.length === 1) return cands[0];
+          if (cands.length > 1) break;
+          anc = anc.parentElement;
         }
       }
       return null;
     };
-    let el = byLabel(/email liên hệ|contact email|correo electr|e-mail de contato|e-mail de contact|contact e-mail/);
-    if (!el) {
-      const inputs = [...document.querySelectorAll('input[type="text"], input[type="email"]')].filter(visible);
-      el = inputs[1] || inputs[0] || null;
+    let nameEl = byHeading(/tên ứng dụng|app name|nombre de la aplicaci|nome do aplicativo|nom de l'application/i);
+    let emailEl = byHeading(/email liên hệ|contact email|correo electr|e-mail de contato|e-mail de contact|contact e-mail/i);
+    if ((!nameEl || !emailEl) && formInputs.length >= 2) {
+      if (!nameEl) nameEl = formInputs[0];
+      if (!emailEl) emailEl = formInputs.find((i) => i !== nameEl) || formInputs[1];
     }
-    if (!el) return false;
-    el.focus();
-    const proto = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    proto.call(el, email);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.blur();
-    return true;
-  }, email).then((r) => {
-    if (!r) throw new Error('Không tìm thấy ô "Email liên hệ" trên form.');
-  });
+    for (const old of document.querySelectorAll('[data-crm-auto-input]')) old.removeAttribute('data-crm-auto-input');
+    if (nameEl) nameEl.setAttribute('data-crm-auto-input', 'app-name');
+    if (emailEl && emailEl !== nameEl) emailEl.setAttribute('data-crm-auto-input', 'contact-email');
+    return {
+      hasName: Boolean(nameEl),
+      hasEmail: Boolean(emailEl && emailEl !== nameEl),
+      emailValue: emailEl ? String(emailEl.value || '').trim() : ''
+    };
+  }).catch(() => ({ hasName: false, hasEmail: false, emailValue: '' }));
+}
+
+async function fillContactEmail(page, email) {
+  const info = await tagAppCreationInputs(page);
+  if (!info.hasEmail) throw new Error('Không tìm thấy ô "Email liên hệ" trên form.');
+  await typeIntoTaggedInput(page, 'contact-email', email);
 }
 
 // Lấy cookie Facebook của account từ Chrome thật (extension gửi về) — dùng chung cho 3 luồng
 async function ensureAccountCookies(job, uid) {
-  setStatus(job, 'restoring', 'Đang nhận cookie phiên đăng nhập từ Chrome của tài khoản…');
+  setStatus(job, 'restoring', 'Đang nạp cookie phiên đăng nhập của tài khoản…');
   const cookies = await DEPS.getCookies(uid);
   if (!cookies || !cookies.length) {
     throw new Error('Không lấy được cookie Facebook từ Chrome của tài khoản. Hãy đảm bảo Chrome của account đang chạy và đã đăng nhập Facebook.');
@@ -450,6 +532,7 @@ async function ensureAccountCookies(job, uid) {
 /* ---------- Luồng chính ---------- */
 
 async function run(job, uid, appName, email) {
+  const sessionCookies = await ensureAccountCookies(job, uid);
   const browser = await launchAutomationChrome();
   job.browser = browser;
   job.popups = []; // các popup OAuth (Kết nối trang) sẽ được thu vào đây
@@ -471,7 +554,7 @@ async function run(job, uid, appName, email) {
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
 
-  await injectSession(page, { cookies: await ensureAccountCookies(job, uid) });
+  await injectSession(page, { cookies: sessionCookies });
 
   // MỖI LẦN CHẠY = TẠO MỘT APP MỚI (không tái sử dụng app cũ)
   let appId = null;
@@ -686,7 +769,7 @@ async function clickEnabledMatching(page, source, selector) {
     const els = [...document.querySelectorAll(selector)];
     const matches = els.filter((el) => {
       const visible = el.offsetParent !== null || el.getClientRects().length > 0;
-      if (!visible) return false;
+      if (!visible || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
       if (el.getAttribute('aria-disabled') === 'true') return false;
       const t = (el.innerText || '').trim();
       return t && re.test(t);
@@ -1153,8 +1236,8 @@ async function clickMatching(page, source, selector) {
     const els = [...document.querySelectorAll(selector)];
     const matches = els.filter((el) => {
       const visible = el.offsetParent !== null || el.getClientRects().length > 0;
-      if (!visible) return false;
-      const t = (el.innerText || el.textContent || '').trim();
+      if (!visible || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+      const t = String(el.innerText || el.textContent || '').replace(/[\u200b\ufeff]/g, '').trim();
       return t && re.test(t);
     });
     if (!matches.length) return false;
@@ -1294,6 +1377,16 @@ async function pickOtherOption(job, page) {
 
     if (res.act === 'filter') { filterDone = true; await sleep(2500); continue; }
     if (res.act === 'card') { cardDone = true; break; }
+    // Nếu vẫn đang kẹt ở màn "Chi tiết ứng dụng" (do cú click Tiếp đầu tiên chỉ mới blur input), bấm lại Tiếp
+    if (!filterDone) {
+      const stillOnAppDetails = await page.evaluate(() => {
+        return /tên ứng dụng|app name|email liên hệ|contact email/i.test(document.body?.innerText || '')
+          && !/khác\s*\(\d+\)|others?\s*\(\d+\)|legacy|trải nghiệm cũ/i.test(document.body?.innerText || '');
+      }).catch(() => false);
+      if (stillOnAppDetails) {
+        await clickMatching(page, CONTINUE_RE, '[role="button"], button');
+      }
+    }
     await sleep(1500);
   }
   return cardDone;
@@ -1370,79 +1463,38 @@ function waitUserPassword(job) {
 /* ---------- Điền form Tên + Email (giữ nguyên từ phiên bản trước) ---------- */
 
 async function pollAndFill(page, appName, email) {
-  const attempt = () => page.evaluate((appName, email) => {
-    const visible = (el) => el && el.offsetParent !== null && !el.disabled;
-    const byLabel = (re) => {
-      for (const lb of [...document.querySelectorAll('label')]) {
-        const t = ((lb.innerText || lb.textContent) || '').trim().toLowerCase();
-        if (re.test(t)) {
-          const forId = lb.getAttribute('for');
-          let el = forId ? document.getElementById(forId) : null;
-          if (!el) el = lb.querySelector('input');
-          if (visible(el)) return el;
+  const deadline = Date.now() + 90000;
+  const startedAt = Date.now();
+  while (Date.now() < deadline) {
+    try {
+      await dismissPopups(page);
+      const info = await tagAppCreationInputs(page);
+      // Wait until both Name and Email inputs are rendered (or 6s if only Name exists)
+      if (info.hasName && (info.hasEmail || Date.now() - startedAt > 6000)) {
+        await typeIntoTaggedInput(page, 'app-name', appName);
+        let after = await tagAppCreationInputs(page);
+        if (!after.hasEmail) {
+          await sleep(1200);
+          after = await tagAppCreationInputs(page);
         }
-      }
-      return null;
-    };
-    const findInputs = () => {
-      let name = byLabel(/tên ứng dụng|app name|nombre de la aplicaci|nome do aplicativo|nom de l'application/);
-      let emailEl = byLabel(/email liên hệ|contact email|correo electr|e-mail de contato|e-mail de contact|contact e-mail/);
-      if (!visible(name) || !visible(emailEl)) {
-        const inputs = [...document.querySelectorAll('input[type="text"]')].filter(visible);
-        if (!name && inputs.length >= 2) { name = inputs[0]; emailEl = emailEl || inputs[1]; }
-        else if (!name && inputs.length === 1) { name = inputs[0]; }
-      }
-      return { name: visible(name) ? name : null, email: visible(emailEl) ? emailEl : null };
-    };
-    const setVal = (el, v) => {
-      el.focus();
-      const proto = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      proto.call(el, v);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      el.blur();
-    };
-    return new Promise((resolve) => {
-      const deadline = Date.now() + 90000;
-      const tick = () => {
-        try {
-          const { name, email: emailEl } = findInputs();
-          if (name) {
-            setVal(name, appName);
-            if (emailEl) {
-              // KHÔNG đụng vào email nếu mình không có email mới — Facebook
-              // thường tự điền sẵn email của tài khoản, xóa nó là kẹt bước "Tiếp".
-              if (email && email.trim()) setVal(emailEl, email);
-              const filled = (emailEl.value || '').trim() !== '';
-              return resolve({ done: true, emailFilled: filled, needEmail: !filled });
-            }
-            setTimeout(() => {
-              const again = findInputs();
-              if (again.email) {
-                if (email && email.trim()) setVal(again.email, email);
-                const filled = (again.email.value || '').trim() !== '';
-                resolve({ done: true, emailFilled: filled, needEmail: !filled });
-              }
-              else resolve({ done: true, emailFilled: false, needEmail: true });
-            }, 1500);
-            return;
+        if (after.hasEmail) {
+          if (email && String(email).trim()) {
+            await typeIntoTaggedInput(page, 'contact-email', String(email).trim());
           }
-        } catch (e) {
-          return resolve({ done: false, reason: String(e && e.message || e) });
+          const finalCheck = await tagAppCreationInputs(page);
+          const filled = Boolean(finalCheck.emailValue);
+          return { done: true, emailFilled: filled, needEmail: !filled };
         }
-        if (Date.now() > deadline) return resolve({ done: false, reason: 'timeout' });
-        setTimeout(tick, 800);
-      };
-      tick();
-    });
-  }, appName, email).catch((e) => ({ done: false, reason: String(e && e.message || e) }));
-
-  let r = await attempt();
-  if (!r.done && r.reason && /execution context|destroyed|target closed/i.test(r.reason)) {
-    await new Promise((res) => setTimeout(res, 2000));
-    r = await attempt();
+        return { done: true, emailFilled: false, needEmail: true };
+      }
+    } catch (e) {
+      if (!/execution context|destroyed|target closed/i.test(String(e?.message || e))) {
+        return { done: false, reason: String(e?.message || e) };
+      }
+    }
+    await sleep(800);
   }
-  return r;
+  return { done: false, reason: 'timeout' };
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -1539,7 +1591,7 @@ async function setupMessenger(job, page, appId) {
       ? `Facebook chưa xác minh được webhook (${errDialog.replace(/\n/g, ' ').slice(0, 120)}…) — kiểm tra URL public. `
       : 'Đã bấm "Xác minh và lưu" — Facebook xác minh thành công. ';
   }
-  await page.screenshot({ path: path.join(DATA_DIR, 'sync-last.png') }).catch(() => {});
+  await page.screenshot({ path: path.join(DEPS.dataDir, 'sync-last.png') }).catch(() => {});
 
   /* ---- Giai đoạn 3: kết nối trang & đồng bộ danh sách fanpage ---- */
   setStatus(job, 'connecting_pages', 'Đang kết nối trang Facebook (mục "Tạo mã truy cập")…');
@@ -1965,7 +2017,7 @@ async function subscribeAppToPageObject(job, page) {
     await clickAt(r, 'field ' + r.field);
     await sleep(900);
   }
-  await page.screenshot({ path: path.join(DATA_DIR, 'webhooks-debug.png') }).catch(() => {});
+  await page.screenshot({ path: path.join(DEPS.dataDir, 'webhooks-debug.png') }).catch(() => {});
 
   // Xác minh cuối: mọi trường phải chuyển "Hủy đăng ký" (nghĩa là đã đăng ký)
   const done = await page
@@ -2004,70 +2056,98 @@ async function subscribeAppToPageObject(job, page) {
 }
 
 async function pollAndFillWebhook(page, cbUrl, vToken) {
-  return page
-    .evaluate((cbUrl, vToken) => {
-      const visible = (el) => el && el.offsetParent !== null && !el.disabled;
-      const setVal = (el, v) => {
-        el.focus();
-        const proto = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        proto.call(el, v);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.blur();
-      };
-      const byLabel = (re) => {
-        for (const lb of [...document.querySelectorAll('label')]) {
-          const t = ((lb.innerText || lb.textContent) || '').trim().toLowerCase();
-          if (re.test(t)) {
-            const forId = lb.getAttribute('for');
-            let el = forId ? document.getElementById(forId) : null;
-            if (!el) el = lb.querySelector('input');
-            if (visible(el)) return el;
-          }
-        }
-        return null;
-      };
-      return new Promise((resolve) => {
-        const deadline = Date.now() + 60000;
-        const tick = () => {
-          try {
-            let urlEl = byLabel(/url gọi lại|callback url/i)
-              || [...document.querySelectorAll('input[type="url"]')].find(visible);
-            if (!urlEl) {
-              // card đang thu gọn — bấm nút "Xem thêm" của card webhook
-              const heads = [...document.querySelectorAll('[role="heading"], h1, h2, h3')];
-              const h = heads.find((x) => /đặt cấu hình webhook|configure webhooks/i.test((x.innerText || '').trim()));
-              if (h) {
-                let node = h;
-                for (let i = 0; i < 10 && node; i++) {
-                  node = node.parentElement;
-                  if (!node) break;
-                  const btn = [...node.querySelectorAll('[role="button"][aria-controls]')]
-                    .find((b) => b.getAttribute('aria-expanded') === 'false');
-                  if (btn) { btn.click(); break; }
-                }
-              }
-              if (Date.now() > deadline) return resolve({ done: false, reason: 'timeout — không thấy ô URL gọi lại' });
-              return setTimeout(tick, 1500);
-            }
-            const original = urlEl.value;
-            setVal(urlEl, cbUrl);
-
-            let tokenEl = byLabel(/xác minh mã|verify token/i);
-            if (!tokenEl) {
-              tokenEl = [...document.querySelectorAll('input[type="text"]')].find((i) => visible(i) && i !== urlEl) || null;
-            }
-            if (tokenEl) setVal(tokenEl, vToken);
-            // URL trùng giá trị cũ → nút Lưu sẽ bị khóa vì không có gì thay đổi
-            return resolve({ done: true, tokenFilled: !!tokenEl, unchanged: original === cbUrl });
-          } catch (e) {
-            return resolve({ done: false, reason: String(e && e.message || e) });
-          }
+  const deadline = Date.now() + 60000;
+  while (Date.now() < deadline) {
+    try {
+      const state = await page.evaluate(() => {
+        const isWebhookInput = (el) => {
+          if (!el || el.disabled || el.readOnly) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width < 50 || r.height < 14 || r.top < 80) return false;
+          if (el.closest('header, nav, [role="banner"], [role="navigation"], [role="search"]')) return false;
+          const t = String(el.getAttribute('type') || el.type || 'text').toLowerCase();
+          if (!['text', 'url', ''].includes(t)) return false;
+          const hint = [el.placeholder, el.getAttribute('aria-label'), el.name, el.id].filter(Boolean).join(' ').toLowerCase();
+          if (/search|tìm kiếm|buscar|pesquisar|rechercher/.test(hint)) return false;
+          return true;
         };
-        tick();
+        const dlg = [...document.querySelectorAll('[role="dialog"], div[aria-modal="true"]')].find((d) => d.offsetParent !== null || d.getClientRects().length > 0);
+        const scope = dlg || document.body;
+        const inputs = [...scope.querySelectorAll('input')].filter(isWebhookInput)
+          .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+        const byHeading = (re) => {
+          for (const lb of [...scope.querySelectorAll('label')]) {
+            const t = ((lb.innerText || lb.textContent) || '').trim().toLowerCase();
+            if (re.test(t)) {
+              const forId = lb.getAttribute('for');
+              const el = (forId ? document.getElementById(forId) : null) || lb.querySelector('input');
+              if (isWebhookInput(el)) return el;
+            }
+          }
+          for (const el of inputs) {
+            const lblIds = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+            const lblText = lblIds.map((id) => document.getElementById(id)?.innerText || '').join(' ').toLowerCase();
+            if (lblText && re.test(lblText)) return el;
+          }
+          for (const node of [...scope.querySelectorAll('span, div, label, h2, h3, h4')]) {
+            const txt = (node.innerText || '').trim();
+            if (!txt || txt.length > 140 || !re.test(txt.toLowerCase())) continue;
+            let anc = node.parentElement;
+            for (let up = 0; up < 6 && anc && anc !== document.body; up++) {
+              const cands = [...anc.querySelectorAll('input')].filter(isWebhookInput);
+              if (cands.length === 1) return cands[0];
+              if (cands.length > 1) break;
+              anc = anc.parentElement;
+            }
+          }
+          return null;
+        };
+        let urlEl = byHeading(/url gọi lại|callback url/i)
+          || inputs.find((el) => String(el.getAttribute('type') || '').toLowerCase() === 'url');
+        if (!urlEl && inputs.length >= 2) urlEl = inputs[0];
+        if (!urlEl) {
+          const heads = [...document.querySelectorAll('[role="heading"], h1, h2, h3')];
+          const h = heads.find((x) => /đặt cấu hình webhook|configure webhooks/i.test((x.innerText || '').trim()));
+          if (h) {
+            let node = h;
+            for (let i = 0; i < 10 && node; i++) {
+              node = node.parentElement;
+              if (!node) break;
+              const btn = [...node.querySelectorAll('[role="button"][aria-controls]')]
+                .find((b) => b.getAttribute('aria-expanded') === 'false');
+              if (btn) { btn.click(); break; }
+            }
+          }
+          return { found: false };
+        }
+        let tokenEl = byHeading(/xác minh mã|verify token|mã xác minh/i)
+          || inputs.find((i) => i !== urlEl) || null;
+        for (const old of document.querySelectorAll('[data-crm-auto-input]')) old.removeAttribute('data-crm-auto-input');
+        urlEl.setAttribute('data-crm-auto-input', 'webhook-url');
+        if (tokenEl) tokenEl.setAttribute('data-crm-auto-input', 'webhook-token');
+        return {
+          found: true,
+          originalUrl: String(urlEl.value || ''),
+          hasToken: Boolean(tokenEl)
+        };
       });
-    }, cbUrl, vToken)
-    .catch((e) => ({ done: false, reason: String(e && e.message || e) }));
+      if (!state.found) {
+        await sleep(1500);
+        continue;
+      }
+      await typeIntoTaggedInput(page, 'webhook-url', cbUrl);
+      if (state.hasToken) {
+        await typeIntoTaggedInput(page, 'webhook-token', vToken);
+      }
+      return { done: true, tokenFilled: state.hasToken, unchanged: state.originalUrl === cbUrl };
+    } catch (e) {
+      if (!/execution context|destroyed|target closed/i.test(String(e?.message || e))) {
+        return { done: false, reason: String(e?.message || e) };
+      }
+      await sleep(1500);
+    }
+  }
+  return { done: false, reason: 'timeout — không thấy ô URL gọi lại' };
 }
 
 // Chờ nút (theo text) bật Enabled rồi bấm
@@ -2080,7 +2160,7 @@ async function clickWhenEnabled(page, source, timeoutMs) {
         const els = [...document.querySelectorAll('[role="button"], button')].filter((el) => {
           if (el.getAttribute('aria-disabled') === 'true') return false;
           const visible = el.offsetParent !== null || el.getClientRects().length > 0;
-          if (!visible) return false;
+          if (!visible || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
           const t = (el.innerText || '').trim();
           return t && re.test(t);
         });
@@ -2141,6 +2221,7 @@ function startDeleteApp(appId, uid) {
 }
 
 async function runDelete(job, uid, appId) {
+  const sessionCookies = await ensureAccountCookies(job, uid);
   const browser = await launchAutomationChrome();
   job.browser = browser;
   browser.on('disconnected', () => {
@@ -2154,7 +2235,7 @@ async function runDelete(job, uid, appId) {
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
 
-  await injectSession(page, { cookies: await ensureAccountCookies(job, uid) });
+  await injectSession(page, { cookies: sessionCookies });
 
   // Vào trang DANH SÁCH ứng dụng — mỗi app có menu ⋯ riêng ở đó
   setStatus(job, 'loading_apps', 'Đang mở danh sách ứng dụng…');
@@ -2234,7 +2315,7 @@ async function runDelete(job, uid, appId) {
       DEPS.savePages(job.uid, latest ? (latest.pages || []) : []);
     DEPS.clearPageTokens(job.uid);
     DEPS.removeAccountPages(job.uid);
-      await page.screenshot({ path: path.join(DATA_DIR, 'delete-last.png') }).catch(() => {});
+      await page.screenshot({ path: path.join(DEPS.dataDir, 'delete-last.png') }).catch(() => {});
       setStatus(job, 'success', `Đã gỡ ứng dụng ${appId} khỏi Facebook và xóa dữ liệu trong CRM.`);
       closeBrowser(job);
       return;
@@ -2346,28 +2427,49 @@ async function openPageSetupWorkerTab(job, browser, cookies) {
   return wp;
 }
 
-// Bảng token có thể render chậm trên tab vừa mở — chờ hàng của page xuất hiện
-// (mở rộng card lại mỗi vòng) trước khi bấm Add subscription / Tạo.
+// Bảng token có thể render chậm hoặc nằm phía dưới cần cuộn — chờ hàng của page xuất hiện
+// (mở rộng card + cuộn bảng mỗi vòng) trước khi bấm Add subscription / Tạo.
 async function waitPageSetupRow(tab, pageId, timeoutMs = 45000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const has = await tab
       .evaluate((pid) => {
         const rows = [...document.querySelectorAll('tbody tr[role="row"]')];
-        return rows.some((r) => {
+        const match = rows.find((r) => {
           const s = r.querySelector('span[label]');
           return s && s.getAttribute('label') === pid;
         });
+        if (match) {
+          match.scrollIntoView({ block: 'center' });
+          return true;
+        }
+        return false;
       }, String(pageId))
       .catch(() => false);
     if (has) return true;
     await expandCard(tab, 'tạo mã truy cập|generate access token').catch(() => {});
-    await sleep(1500);
+    await tab.evaluate(() => {
+      const tbody = document.querySelector('tbody[role="rowgroup"], tbody');
+      let el = tbody ? tbody.parentElement : null;
+      let scrolled = false;
+      while (el) {
+        const st = getComputedStyle(el);
+        if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight) {
+          el.scrollTop = Math.min(el.scrollTop + 900, el.scrollHeight);
+          scrolled = true;
+          break;
+        }
+        el = el.parentElement;
+      }
+      if (!scrolled) window.scrollBy(0, 900);
+    }).catch(() => {});
+    await sleep(1200);
   }
   return false;
 }
 
 async function runPageSetup(job, uid) {
+  const sessionCookies = await ensureAccountCookies(job, uid);
   const browser = await launchAutomationChrome();
   job.browser = browser;
   browser.on('disconnected', () => {
@@ -2381,44 +2483,31 @@ async function runPageSetup(job, uid) {
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
 
-  const sessionCookies = await ensureAccountCookies(job, uid);
   await injectSession(page, { cookies: sessionCookies });
 
-  setStatus(job, 'loading_apps', 'Đang mở cấu hình Messenger…');
+  setStatus(job, 'loading_apps', 'Đang mở trang Cài đặt API Messenger (chỗ lấy token)…');
   await page.goto(`https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
   if (/log_in|login\.php/.test(page.url() || '')) {
     throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM.');
   }
 
-  // Cập nhật webhook (URL có thể đã đổi — vd tunnel mới)
-  const webhookUrl = job.webhookUrl || 'http://localhost:3000/webhook';
-  const verifyToken = DEPS.getOrCreateVerifyToken();
-  setStatus(job, 'filling_webhook', 'Đang cập nhật URL gọi lại & mã xác minh webhook…');
-  await expandCard(page, 'đặt cấu hình webhook|configure webhooks');
-  const wr = await pollAndFillWebhook(page, webhookUrl, verifyToken);
-  if (wr.done && !wr.unchanged) {
-    setStatus(job, 'saving_webhook', 'Đang bấm "Xác minh và lưu"…');
-    await clickWhenEnabled(page, '^(?:xác minh và lưu|verify and save)$', 30000);
-    await sleep(8000);
+  // Đảm bảo đang ở đúng trang messenger_api_settings (không nhảy sang /webhooks/?view=page)
+  if (!/messenger_api_settings/.test(page.url() || '')) {
+    await page.goto(`https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`, { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
   }
+  await sleep(2000);
 
-  // Đăng ký TRƯỜNG webhook ngay trong mục Webhooks của messenger_api_settings
-  // (bấm nút See more/Xem thêm mở rộng card — hướng dẫn của user 2026-10-06:
-  //  KHÔNG đi vòng qua trang /webhooks/ nữa, nút Đăng ký nằm ngay tại đây)
-  await subscribeWebhookFieldsInCard(job, page);
-  // Đăng ký ĐỐI TƯỢNG Page trên trang Webhooks (tầng bắt buộc để Meta đẩy event tức thì)
-  await subscribeAppToPageObject(job, page);
-
-  // Mở rộng card "Tạo mã truy cập" nếu đang thu gọn
-  for (let i = 0; i < 5; i++) {
+  // Mở rộng thẳng card "2. Tạo mã truy cập / Generate access tokens"
+  setStatus(job, 'scanning', 'Đang mở mục Tạo mã truy cập (Generate access tokens)…');
+  for (let i = 0; i < 6; i++) {
     const st = await expandCard(page, 'tạo mã truy cập|generate access token');
     if (st !== 'no-heading') break;
-    await sleep(1500);
+    await sleep(1200);
   }
+  await sleep(1500);
 
   // CÀO DANH SÁCH TRANG trong bảng (cập nhật pages.json — kể cả khi CRM đang rỗng)
-  // Gộp dần + chờ ổn định 2 vòng để không bỏ sót page render chậm.
-  const tableDeadline = Date.now() + 30000;
+  const tableDeadline = Date.now() + 25000;
   const tableRows = [];
   let tableStable = 0;
   while (Date.now() < tableDeadline) {
@@ -2432,11 +2521,14 @@ async function runPageSetup(job, uid) {
       } else { tableRows.push(r); grown = true; }
     }
     if (tableRows.length) {
+      const allTargetsVisible = job.pageIds.length > 0
+        && job.pageIds.every((pid) => tableRows.some((x) => String(x.pageId) === String(pid)));
+      if (allTargetsVisible) break;
       tableStable = grown ? 0 : tableStable + 1;
       if (tableStable >= 2) break;
     }
     await expandCard(page, 'tạo mã truy cập|generate access token');
-    await sleep(2000);
+    await sleep(1500);
   }
   if (tableRows.length) {
     const clean = tableRows.map((r) => ({
@@ -2458,56 +2550,33 @@ async function runPageSetup(job, uid) {
   }
 
   const results = [];
-  // Xử lý song song bằng nhiều tab Chrome trên cùng 1 cửa sổ: mỗi tab mở lại
-  // trang cấu hình app, nhận pageId từ hàng đợi chung rồi tự đăng ký webhook +
-  // tạo token cho page của nó. Dialog subscribe/token là DOM riêng từng tab nên
-  // các tab không giành nhau; form re-auth dùng chung job.waitPwd qua lock
-  // trong askPassword. 3 tab là mức an toàn cho Facebook (nhiều hơn dễ dính
-  // checkpoint) và đủ nhẹ cho máy khách.
-  const PAGE_SETUP_PARALLEL_TABS = 3;
-  const workerCount = Math.max(1, Math.min(PAGE_SETUP_PARALLEL_TABS, targets.length));
-  let cursor = 0;
   let doneCount = 0;
 
-  const worker = async (tab) => {
-    while (job.browser && !['success', 'error'].includes(job.status)) {
-      const idx = cursor;
-      cursor += 1;
-      if (idx >= targets.length) break;
-      const pageId = targets[idx];
-      try {
-        if (!await waitPageSetupRow(tab, pageId)) {
-          try { DEPS.log('[pages] Không thấy hàng của trang ' + pageId + ' trong bảng token — bỏ qua.'); } catch (_) {}
-          results.push({ pageId, token: null });
-          doneCount += 1;
-          continue;
-        }
-        setStatus(job, 'subscribing', `Đang đăng ký webhook cho trang ${pageId} (${doneCount + 1}/${targets.length}, ${workerCount} luồng)…`);
-        await subscribePageFields(job, tab, pageId);
-
-        setStatus(job, 'generating_token', `Đang tạo Page Access Token cho trang ${pageId} (${doneCount + 1}/${targets.length}, ${workerCount} luồng)…`);
-        const token = await generatePageToken(job, tab, pageId);
-        results.push({ pageId, token: token || null });
-        doneCount += 1;
-        setStatus(job, 'generating_token', `Xong ${doneCount}/${targets.length} trang…`);
-      } catch (e) {
-        if (!job.browser) throw e; // Chrome bị đóng — dừng toàn bộ worker
-        try { DEPS.log('[pages] Lỗi xử lý trang ' + pageId + ': ' + ((e && e.message) || e)); } catch (_) {}
+  for (let idx = 0; idx < targets.length; idx++) {
+    if (!job.browser || ['success', 'error'].includes(job.status)) break;
+    const pageId = targets[idx];
+    try {
+      if (!await waitPageSetupRow(page, pageId)) {
+        try { DEPS.log('[pages] Không thấy hàng của trang ' + pageId + ' trong bảng token — bỏ qua.'); } catch (_) {}
         results.push({ pageId, token: null });
         doneCount += 1;
+        continue;
       }
-    }
-  };
+      setStatus(job, 'subscribing', `Đang đăng ký webhook cho trang ${pageId} (${doneCount + 1}/${targets.length})…`);
+      await subscribePageFields(job, page, pageId);
 
-  const tabs = [page];
-  for (let i = 1; i < workerCount; i++) {
-    try { tabs.push(await openPageSetupWorkerTab(job, browser, sessionCookies)); } catch (e) {
+      setStatus(job, 'generating_token', `Đang tạo Page Access Token cho trang ${pageId} (${doneCount + 1}/${targets.length})…`);
+      const token = await generatePageToken(job, page, pageId);
+      results.push({ pageId, token: token || null });
+      doneCount += 1;
+      setStatus(job, 'generating_token', `Xong ${doneCount}/${targets.length} trang…`);
+    } catch (e) {
       if (!job.browser) throw e;
-      try { DEPS.log('[pages] Không mở được tab song song #' + (i + 1) + ': ' + ((e && e.message) || e)); } catch (_) {}
-      break;
+      try { DEPS.log('[pages] Lỗi xử lý trang ' + pageId + ': ' + ((e && e.message) || e)); } catch (_) {}
+      results.push({ pageId, token: null });
+      doneCount += 1;
     }
   }
-  await Promise.all(tabs.map((t) => worker(t)));
 
   // Cập nhật token vào pages.json + bản ghi app mới nhất
   const allPages = DEPS.listPages(job.uid);
@@ -2697,7 +2766,7 @@ async function subscribePageFields(job, page, pageId) {
     await clickWhenEnabled(page, CONFIRM_SUBSCRIBE_RE, 20000);
   }
   await sleep(2500);
-  await page.screenshot({ path: path.join(DATA_DIR, `subscribe-debug-${pageId}.png`) }).catch(() => {});
+  await page.screenshot({ path: path.join(DEPS.dataDir, `subscribe-debug-${pageId}.png`) }).catch(() => {});
   // Đóng dialog nếu còn
   await clickMatching(page, '^(?:đóng|close|x)$', '[role="button"], button');
   await sleep(1000);
@@ -2769,48 +2838,10 @@ async function graphSubscribePage(pageId, token) {
 }
 
 async function generatePageToken(job, page, pageId) {
-  const clicked = await page
-    .evaluate((pageId) => {
-      const rows = [...document.querySelectorAll('tbody tr[role="row"]')];
-      const row = rows.find((r) => {
-        const s = r.querySelector('span[label]');
-        return s && s.getAttribute('label') === pageId;
-      });
-      if (!row) return false;
-      const btn = [...row.querySelectorAll('[role="button"], button')]
-        .find((b) => /^(tạo|generate|create)$/i.test((b.innerText || '').trim()));
-      if (!btn) return false;
-      btn.scrollIntoView({ block: 'center' });
-      const o = { bubbles: true, cancelable: true, view: window };
-      for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-        btn.dispatchEvent(new MouseEvent(t, o));
-      }
-      return true;
-    }, pageId)
-    .catch(() => false);
-  if (!clicked) return null;
-  await sleep(2500);
+  const log = (m) => { try { DEPS.log('[token] ' + m); } catch (_) {} };
+  const valid = (t) => !!t && TOKEN_LIKE.test((t || '').trim());
 
-  // Tick quyền pages_manage_metadata rồi bấm "Generate Token" trong dialog
-  // (nếu có) — trước khi chụp token. Thiếu quyền này thì đăng ký webhook
-  // qua Graph chết và Meta không đẩy tin khách về CRM.
-  await tickTokenPermissions(page);
-  const genBtn = await page
-    .evaluate(() => {
-      const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
-      const btn = [...document.querySelectorAll('[role="button"], button')].filter(vis)
-        .find((b) => /^(?:generate token|generate access token|tạo mã truy cập|tạo mã)$/i.test((b.innerText || '').trim()));
-      if (!btn) return null;
-      const r = btn.getBoundingClientRect();
-      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
-    })
-    .catch(() => null);
-  if (genBtn) {
-    await page.mouse.click(genBtn.x, genBtn.y).catch(() => {});
-    await sleep(2500);
-  }
-
-  // Cài bẫy: clipboard API + sự kiện copy — bắt MỌI text được copy (trim sẵn)
+  // Cài bẫy clipboard + copy TRƯỚC khi mở dialog
   await page
     .evaluate(() => {
       window.__capturedToken = null;
@@ -2829,48 +2860,141 @@ async function generatePageToken(job, page, pageId) {
           }
         }
       } catch { /* bỏ qua */ }
-      document.addEventListener('copy', (e) => {
-        try {
-          const t = e.clipboardData ? e.clipboardData.getData('text') : '';
-          if (t && t.trim().length > 20) window.__capturedToken = t.trim();
-        } catch { /* bỏ qua */ }
-      });
-    })
-    .catch(() => {});
-
-  // Tick "Tôi hiểu" nếu dialog yêu cầu
-  await page
-    .evaluate(() => {
-      const visible = (el) => el && el.offsetParent !== null;
-      const labels = [...document.querySelectorAll('label')]
-        .filter((l) => /^(?:tôi hiểu|i understand)$/i.test((l.innerText || '').trim()) && visible(l));
-      for (const lb of labels) {
-        const input = lb.querySelector('input[type="checkbox"]')
-          || document.getElementById(lb.getAttribute('for') || '');
-        if (input && visible(input) && input.getAttribute('aria-checked') !== 'true' && !input.checked) {
-          input.click();
-          return true;
-        }
+      if (!window.__crmCopyHooked) {
+        window.__crmCopyHooked = true;
+        document.addEventListener('copy', (e) => {
+          try {
+            const t = e.clipboardData ? e.clipboardData.getData('text') : '';
+            if (t && t.trim().length > 20) window.__capturedToken = t.trim();
+          } catch { /* bỏ qua */ }
+        });
       }
-      return false;
     })
     .catch(() => {});
-  await sleep(1000);
 
-  // Bấm "Sao chép" (thử 2 lần)
-  await clickMatching(page, '^(?:sao chép|copy)$', '[role="button"], button');
+  const genPos = await page
+    .evaluate((pageId) => {
+      const rows = [...document.querySelectorAll('tbody tr[role="row"]')];
+      const row = rows.find((r) => {
+        const s = r.querySelector('span[label]');
+        return s && s.getAttribute('label') === pageId;
+      });
+      if (!row) return null;
+      const btn = [...row.querySelectorAll('[role="button"], button')]
+        .find((b) => /^(tạo|generate|create)$/i.test((b.innerText || '').trim()));
+      if (!btn) return null;
+      btn.scrollIntoView({ block: 'center' });
+      const r = btn.getBoundingClientRect();
+      const o = { bubbles: true, cancelable: true, view: window };
+      for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+        btn.dispatchEvent(new MouseEvent(t, o));
+      }
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    }, pageId)
+    .catch(() => null);
+  if (!genPos) {
+    log('Không tìm thấy nút Tạo/Generate cho trang ' + pageId);
+    return null;
+  }
   await sleep(1200);
-  await clickMatching(page, '^(?:sao chép|copy)$', '[role="button"], button');
-  await sleep(1000);
 
-  // Đọc token: bẫy clipboard → quét input/textarea TOÀN TRANG (có thể nhiều dialog chồng nhau)
-  let token = await page.evaluate(() => window.__capturedToken || null).catch(() => null);
-  const valid = (t) => !!t && TOKEN_LIKE.test((t || '').trim());
-  if (!valid(token)) {
+  // Chờ dialog xuất hiện; nếu cú click DOM chưa mở dialog thì click chuột thật qua CDP
+  const hasDialogNow = await page.evaluate(() => {
+    return [...document.querySelectorAll('[role="dialog"]')].some((d) => d.offsetParent !== null || d.getClientRects().length > 0);
+  }).catch(() => false);
+  if (!hasDialogNow) {
+    await page.mouse.click(genPos.x, genPos.y).catch(() => {});
+    await sleep(1800);
+  }
+
+  // Vòng lặp chờ dialog Token Generation, tick quyền (nếu có), tick "Tôi hiểu / I understand" và đọc token
+  let token = null;
+  const deadline = Date.now() + 25000;
+  while (Date.now() < deadline && !valid(token)) {
+    if (await passwordVisible(page)) {
+      await askPassword(job, page);
+      continue;
+    }
+
+    // 1. Nếu có dialog chọn quyền (pages_manage_metadata + nút Generate Token)
+    await tickTokenPermissions(page);
+    const permGenBtn = await page
+      .evaluate(() => {
+        const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+        const btn = [...document.querySelectorAll('[role="button"], button')].filter(vis)
+          .find((b) => /^(?:generate token|generate access token|tạo mã truy cập|tạo mã)$/i.test((b.innerText || '').trim()));
+        if (!btn) return null;
+        const r = btn.getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+      })
+      .catch(() => null);
+    if (permGenBtn) {
+      await page.mouse.click(permGenBtn.x, permGenBtn.y).catch(() => {});
+      await sleep(1800);
+    }
+
+    // 2. Tick "Tôi hiểu / I understand" bằng cả DOM click lẫn click chuột thật qua CDP
+    const understandTarget = await page
+      .evaluate(() => {
+        const vis = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+        const center = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; };
+        const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter(vis);
+        const scope = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
+
+        // Tìm label hoặc phần tử chứa "Tôi hiểu" / "I understand"
+        const cands = [...scope.querySelectorAll('label, span, div')]
+          .filter((el) => vis(el) && /^(?:tôi hiểu|i understand)$/i.test((el.innerText || '').trim()));
+        for (const el of cands) {
+          const lb = el.closest('label') || el;
+          const input = lb.querySelector('input[type="checkbox"], [role="checkbox"]')
+            || (lb.getAttribute && lb.getAttribute('for') ? document.getElementById(lb.getAttribute('for')) : null)
+            || scope.querySelector('input[type="checkbox"], [role="checkbox"]');
+          const alreadyChecked = input
+            ? (input.checked === true || input.getAttribute('aria-checked') === 'true')
+            : false;
+          if (!alreadyChecked) {
+            try { if (input) input.click(); } catch (_) {}
+            try { lb.click(); } catch (_) {}
+            return { needMouse: true, pos: center(input && vis(input) ? input : lb) };
+          }
+          return { needMouse: false, alreadyChecked: true };
+        }
+        return null;
+      })
+      .catch(() => null);
+
+    if (understandTarget && understandTarget.needMouse && understandTarget.pos) {
+      await page.mouse.click(understandTarget.pos.x, understandTarget.pos.y).catch(() => {});
+      await sleep(700);
+    }
+
+    // 3. Bấm "Sao chép / Copy" nếu đã mở khóa
+    const copyPos = await page
+      .evaluate(() => {
+        const vis = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+        const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter(vis);
+        const scope = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
+        const btn = [...scope.querySelectorAll('[role="button"], button')].filter(vis)
+          .find((b) => /^(?:sao chép|copy)$/i.test((b.innerText || '').trim())
+            && !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+        if (!btn) return null;
+        try { btn.click(); } catch (_) {}
+        const r = btn.getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+      })
+      .catch(() => null);
+    if (copyPos) {
+      await page.mouse.click(copyPos.x, copyPos.y).catch(() => {});
+      await sleep(600);
+    }
+
+    // 4. Đọc token từ clipboard hook hoặc trực tiếp từ input/DOM của dialog
     token = await page
       .evaluate(() => {
-        // ưu tiên dialog trên cùng, rồi quét cả trang
-        const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter((x) => x.offsetParent);
+        if (window.__capturedToken && /^EA[A-Za-z0-9_-]{30,}$/.test(window.__capturedToken.trim())) {
+          return window.__capturedToken.trim();
+        }
+        const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter((x) => x.offsetParent || x.getClientRects().length > 0);
         const scopes = dlgs.length ? [...dlgs.reverse(), document.body] : [document.body];
         for (const scope of scopes) {
           const inputs = [...scope.querySelectorAll('input, textarea')]
@@ -2883,16 +3007,37 @@ async function generatePageToken(job, page, pageId) {
         return null;
       })
       .catch(() => null);
+
+    if (valid(token)) {
+      token = token.trim();
+      break;
+    }
+    await sleep(900);
   }
-  if (valid(token)) token = token.trim();
 
-  // Chụp lại màn hình dialog token để đối chiếu nếu cần debug (tên theo page
-  // vì các tab song song chụp cùng lúc, ghi đè nhau thì mất dấu vết)
-  await page.screenshot({ path: path.join(DATA_DIR, `token-debug-${pageId}.png`) }).catch(() => {});
+  await page.screenshot({ path: path.join(DEPS.dataDir, `token-debug-${pageId}.png`) }).catch(() => {});
 
-  // Đóng dialog
-  await clickMatching(page, '^(?:đóng|close|đã hiểu|got it|ok|x|done|xong)$', '[role="button"], button');
-  await sleep(800);
+  // Đóng dialog ("Done / Xong / Đóng / Close")
+  const closePos = await page
+    .evaluate(() => {
+      const vis = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+      const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter(vis);
+      const scope = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
+      const btn = [...scope.querySelectorAll('[role="button"], button')].filter(vis)
+        .find((b) => /^(?:done|xong|đóng|close|đã hiểu|got it|ok)$/i.test((b.innerText || '').trim()));
+      if (!btn) return null;
+      try { btn.click(); } catch (_) {}
+      const r = btn.getBoundingClientRect();
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    })
+    .catch(() => null);
+  if (closePos) {
+    await page.mouse.click(closePos.x, closePos.y).catch(() => {});
+  } else {
+    await clickMatching(page, '^(?:đóng|close|đã hiểu|got it|ok|x|done|xong)$', '[role="button"], button');
+  }
+  await sleep(900);
+  log('Kết quả lấy token trang ' + pageId + ': ' + (valid(token) ? 'OK' : 'FAIL'));
   return valid(token) ? token.trim() : null;
 }
 
@@ -2931,6 +3076,7 @@ function startPageSync(uid, appId = null) {
 }
 
 async function runPageSync(job, uid) {
+  const sessionCookies = await ensureAccountCookies(job, uid);
   const browser = await launchAutomationChrome();
   job.browser = browser;
   browser.on('disconnected', () => {
@@ -2941,7 +3087,7 @@ async function runPageSync(job, uid) {
   job.page = page;
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
-  await injectSession(page, { cookies: await ensureAccountCookies(job, uid) });
+  await injectSession(page, { cookies: sessionCookies });
 
   // Vào messenger_api_settings của app — bảng "Tạo mã truy cập" liệt kê MỌI page
   setStatus(job, 'scanning', 'Đang mở Cài đặt API Messenger…');
@@ -3095,6 +3241,7 @@ async function scrapeAppCards(page) {
 }
 
 async function runAppsScan(job, uid) {
+  const sessionCookies = await ensureAccountCookies(job, uid);
   const browser = await launchAutomationChrome();
   job.browser = browser;
   browser.on('disconnected', () => {
@@ -3105,7 +3252,7 @@ async function runAppsScan(job, uid) {
   job.page = page;
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
-  await injectSession(page, { cookies: await ensureAccountCookies(job, uid) });
+  await injectSession(page, { cookies: sessionCookies });
 
   setStatus(job, 'loading_apps', 'Đang mở danh sách ứng dụng…');
   await page.goto(APPS_URL, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});

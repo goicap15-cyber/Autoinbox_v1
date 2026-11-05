@@ -4,6 +4,16 @@ const fs = require('fs');
 const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
+const Module = require('module');
+
+// Cho phép gói hot-update nằm ngoài app.asar nạp trực tiếp node_modules bên trong app.asar
+const asarNodeModules = path.join(__dirname, '../node_modules');
+const origNodeModulePaths = Module._nodeModulePaths;
+Module._nodeModulePaths = function (from) {
+  const paths = origNodeModulePaths.call(this, from);
+  if (!paths.includes(asarNodeModules)) paths.push(asarNodeModules);
+  return paths;
+};
 
 const instanceToken = crypto.randomUUID();
 process.env.CRM_INSTANCE_TOKEN = instanceToken;
@@ -194,12 +204,19 @@ app.whenReady().then(async () => {
   }
   app.userAgentFallback = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 FB-CRM-Desktop';
   appendDesktopLog(`[startup] app=${app.getVersion()} packaged=${app.isPackaged} resources=${process.resourcesPath}`);
-  // Start Backend Express/WebSocket Server
+  // Start Backend Express/WebSocket Server (ưu tiên bản hot-update nếu đã tải về)
   try {
+    const hotUpdateServer = process.resourcesPath
+      ? path.join(process.resourcesPath, 'hot-update', 'dist', 'server', 'index.js')
+      : '';
     const distServer = path.join(__dirname, '../dist/server/index.js');
     const srcServer = path.join(__dirname, 'server/index.js');
 
-    if (fs.existsSync(distServer)) {
+    if (hotUpdateServer && fs.existsSync(hotUpdateServer)) {
+      console.log('[Electron] Loading hot-updated server from resources/hot-update/dist/server/index.js');
+      appendDesktopLog(`[startup] Loading hot-update server: ${hotUpdateServer}`);
+      backendRuntime = require(hotUpdateServer);
+    } else if (fs.existsSync(distServer)) {
       console.log('[Electron] Loading compiled server from dist/server/index.js');
       backendRuntime = require(distServer);
     } else if (fs.existsSync(srcServer)) {

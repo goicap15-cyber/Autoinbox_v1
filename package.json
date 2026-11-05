@@ -1,6 +1,6 @@
 {
   "name": "autochatbot-fb-crm",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "FB Personal Messenger CRM - Desktop Application",
   "author": "Adsup <contact@adsup.vn>",
   "main": "src/electron.js",
@@ -12,6 +12,8 @@
     "build:bytecode": "node scripts/build-bytecode.js",
     "build:extension": "node scripts/obfuscate-extension.js",
     "build:all": "npm run build:ui && npm run build:bytecode && npm run build:extension",
+    "release:update": "node scripts/publish-update.js",
+    "release:push": "node scripts/publish-update.js --push",
     "dist": "npm run build:all && node scripts/rebuild-native-for-electron.js prepare && node scripts/rebuild-native-for-electron.js verify && electron-builder && node scripts/rebuild-native-for-electron.js restore",
     "dist:win": "npm run build:all && node scripts/rebuild-native-for-electron.js prepare && node scripts/rebuild-native-for-electron.js verify && electron-builder --win && node scripts/rebuild-native-for-electron.js restore",
     "dist:linux": "npm run build:all && node scripts/rebuild-native-for-electron.js prepare && node scripts/rebuild-native-for-electron.js verify && electron-builder --linux && node scripts/rebuild-native-for-electron.js restore",

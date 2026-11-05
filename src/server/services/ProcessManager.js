@@ -50,18 +50,19 @@ function resolveAccountProfileDir(storedProfileDir, accountId) {
 let puppeteerPromise = null;
 function getPuppeteer() {
   if (!puppeteerPromise) {
-    puppeteerPromise = import('puppeteer-core').then((module) => module.default || module);
+    let target = 'puppeteer-core';
+    try {
+      target = require('url').pathToFileURL(require.resolve('puppeteer-core')).href;
+    } catch (_) {}
+    puppeteerPromise = import(target).then((module) => module.default || module);
   }
   return puppeteerPromise;
 }
 
-// Ẩn Chrome "chạy ngầm" khi toggle OFF: SW_HIDE (ShowWindow 0) — window biến
-// mất khỏi màn hình VÀ khỏi taskbar (Windows tự gỡ nút khi window hide, không
-// để lại nút ma), process vẫn sống nên extension đồng bộ ngầm bình thường
-// (launch args đã có --disable-backgrounding-occluded-windows,
-// --disable-renderer-backgrounding). Không dùng WS_EX_TOOLWINDOW +
-// SetWindowPos(-32000): đổi style lúc window đang hiển thị không update
-// taskbar -> sinh nút "ma" không bấm được (reproduced 2026-09-29).
+// Ẩn Chrome chạy ngầm: ShowWindow(0) trước để Windows Shell gỡ nút taskbar
+// sạch sẽ (không để lại nút ma), sau đó gắn WS_EX_TOOLWINDOW, dời ra tọa độ
+// (-32000, -32000) và bật lại ShowWindow(4) (SW_SHOWNOACTIVATE) để Chromium
+// giữ trạng thái hiển thị cho phép React DOM của Messenger tiếp tục render.
 function hideChromeWindowFromScreen(pid, profileDir = '') {
   if (process.platform !== 'win32') return;
   const profile = String(profileDir || '').replace(/'/g, "''").replace(/\\/g, '/');
@@ -71,7 +72,20 @@ Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int n, int v);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int n);
+    public static void HideOffscreen(IntPtr h) {
+    ShowWindow(h, 4);
+    ShowWindow(h, 0);
+    int ex = GetWindowLong(h, -20);
+    SetWindowLong(h, -20, (ex | 0x00000080) & ~0x00040000);
+    SetWindowPos(h, IntPtr.Zero, -32000, -32000, 0, 0, 0x0035);
+    ShowWindow(h, 4);
+    SetWindowPos(h, IntPtr.Zero, -32000, -32000, 0, 0, 0x0015);
+  }
 }' -ErrorAction SilentlyContinue
 $profile = '${profile}'
 $targetPids = @(${pid || 0})
@@ -89,7 +103,7 @@ $cb = [HideWinHelper+EnumProc]{
     $sbC = New-Object System.Text.StringBuilder 128
     [void][HideWinHelper]::GetClassName($h, $sbC, 128)
     if ($sbC.ToString().StartsWith('Chrome_WidgetWin')) {
-      [void][HideWinHelper]::ShowWindowAsync($h, 0)
+      [HideWinHelper]::HideOffscreen($h)
       [void]$handles.Add($h)
     }
   }
@@ -98,11 +112,13 @@ $cb = [HideWinHelper+EnumProc]{
 [void][HideWinHelper]::EnumWindows($cb, [IntPtr]::Zero)
 if ($handles.Count -eq 0) {
   Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $targetSet.Contains([uint32]$_.Id) -and $_.MainWindowHandle -ne 0 } | ForEach-Object {
-    [void][HideWinHelper]::ShowWindowAsync($_.MainWindowHandle, 0)
+    [HideWinHelper]::HideOffscreen($_.MainWindowHandle)
   }
 }`;
   const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
-  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => {});
+  return new Promise((resolve) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => resolve());
+  });
 }
 
 // Đóng Chrome bằng WM_CLOSE (tương đương bấm X) để Windows tự gỡ nút taskbar
@@ -494,7 +510,7 @@ class ProcessManager {
           '--disable-background-timer-throttling',
           '--disable-backgrounding-occluded-windows',
           '--disable-renderer-backgrounding',
-          '--disable-features=IntensiveWakeUpThrottling',
+          '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion',
           '--disable-popup-blocking',
           '--disable-notifications',
           '--autoplay-policy=no-user-gesture-required'
@@ -748,7 +764,7 @@ class ProcessManager {
     // of launching another browser against the same user-data directory.
     const runningProfilePid = findBundledChromePidByProfile(absProfileDir, chromeExecutable);
     if (runningProfilePid) {
-      this.processes.set(pendingKey, {
+      this.processes.set(pendingKey, { launchedByThisRun: true,
         process: null,
         browser: null,
         profileDir: absProfileDir,
@@ -793,7 +809,7 @@ class ProcessManager {
           '--disable-background-timer-throttling',
           '--disable-backgrounding-occluded-windows',
           '--disable-renderer-backgrounding',
-          '--disable-features=IntensiveWakeUpThrottling',
+          '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion',
           '--disable-popup-blocking',
           '--disable-notifications',
           '--autoplay-policy=no-user-gesture-required'
@@ -817,12 +833,13 @@ class ProcessManager {
         }
       });
 
-      this.processes.set(pendingKey, {
+      this.processes.set(pendingKey, { launchedByThisRun: true,
         process: child,
         browser,
         profileDir,
         pid: child.pid,
-        status: 'RUNNING'
+        status: 'RUNNING',
+        displayMode: 'VISIBLE'
       });
 
       // launch() installs the extension first; only then open Facebook so the
@@ -897,9 +914,10 @@ class ProcessManager {
         this.processes.delete(accId);
         return { success: false, error: 'CHROME_PROCESS_DEAD' };
       }
-      hideChromeWindowFromScreen(currentProc.pid, currentProc.profileDir);
+      await hideChromeWindowFromScreen(currentProc.pid, currentProc.profileDir);
       if (this.displayOpTokens.get(accId) === opToken) {
         currentProc.displayMode = 'BACKGROUND';
+        this.scheduleHide(accId, currentProc.pid, 1500);
         console.log(`[ProcessManager] Đã ẩn Chrome của account ${accId} chạy ngầm (vẫn sống để extension đồng bộ).`);
       }
       return { success: true };
@@ -1274,11 +1292,39 @@ foreach ($proc in $roots) {
     for (const [key, entry] of this.processes) {
       if (entry?.pid === pending.pid) this.processes.delete(key);
     }
+    pending.launchedByThisRun = true;
+    if (!pending.displayMode) pending.displayMode = 'VISIBLE';
     this.processes.set(accountId, pending);
     return true;
+  }
+
+  resolveAccountProfileDir(storedProfileDir, accountId) {
+    return resolveAccountProfileDir(storedProfileDir, accountId); } isAccountRunning(accountId) { return this.getStatus(accountId) === 'RUNNING';
+  }
+
+  hasValidFacebookProfile(profileDir) {
+    if (!profileDir || typeof profileDir !== 'string') return false;
+    try {
+      if (!fs.existsSync(profileDir)) return false;
+      const cookieCandidates = [
+        path.join(profileDir, 'Default', 'Network', 'Cookies'),
+        path.join(profileDir, 'Default', 'Cookies')
+      ];
+      return cookieCandidates.some((cookiePath) => {
+        try {
+          const stat = fs.statSync(cookiePath);
+          return stat.isFile() && stat.size > 0;
+        } catch (_) {
+          return false;
+        }
+      });
+    } catch (_) {
+      return false;
+    }
   }
 }
 
 module.exports = new ProcessManager();
 module.exports.ProcessManager = ProcessManager;
 module.exports.closeChromePidsGracefullySync = closeChromePidsGracefullySync;
+module.exports.resolveAccountProfileDir = resolveAccountProfileDir;

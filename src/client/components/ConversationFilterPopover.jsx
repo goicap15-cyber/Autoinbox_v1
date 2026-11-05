@@ -112,7 +112,7 @@ export default function ConversationFilterPopover({ isOpen, appliedFilters, inbo
                 {personalAccounts.length === 0 && <p className="px-2 py-1 text-[11px] text-[var(--color-text-muted)]">Chưa có tài khoản cá nhân nào.</p>}
                 {personalAccounts.map((account) => (
                   <ToggleOption key={'account:' + account.id} selected={draftFilters.sourceKeys.includes('account:' + account.id)} onClick={() => toggle('sourceKeys', 'account:' + account.id)} className="w-full">
-                    <User size={11} /><span className="truncate">{account.name || account.id}</span>
+                    <User size={11} /><span className="truncate">{account.name || account.id}</span><span className="ml-auto shrink-0 font-mono text-[10px] opacity-60">#{String(account.id).slice(-4)}</span>
                   </ToggleOption>
                 ))}
               </div>

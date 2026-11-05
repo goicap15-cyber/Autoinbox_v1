@@ -77,7 +77,7 @@
 
   function readSidebarActivity() {
     // Tab chat CRM có thể là facebook.com/messages hoặc messenger.com/t/...
-    if (!isMessengerHost && !/\/messages(?:\/|$|\?)/i.test(location.pathname + location.search)) {
+    if ((!isMessengerHost && !/\/messages(?:\/|$|\?)/i.test(location.pathname + location.search)) || /\/messages\/(?:(?:e2ee\/)?(?:requests|spam|filtered)|(?:requests|spam|filtered)\/e2ee)(?:\/|$|\?)/i.test(location.pathname) || /[?&]crm_tab_role=requests\b/i.test(location.search)) {
       return { fingerprint: '', threads: [] };
     }
     const selectors = [
@@ -127,7 +127,7 @@
         thread_url: (() => { try { return new URL(href, location.origin).toString(); } catch (_) { return href; } })(),
         is_e2ee: /\/messages\/(?:e2ee\/)?t\//i.test(href)
       });
-      if (rows.length >= 30) break;
+      if (rows.length >= 100) break;
     }
     return { fingerprint: rows.length ? hash(rows.join('\n')) : '', threads };
   }
