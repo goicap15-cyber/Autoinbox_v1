@@ -1,7 +1,7 @@
 {
-  "version": "1.0.5",
-  "releasedAt": "2026-11-05T10:47:14.914Z",
-  "notes": "Đồng bộ chuông lời nhắc 3 nốt, cảnh báo sắp hết hạn gói bản quyền, bộ lọc khoảng ngày & gợi ý mẫu nhanh",
-  "sizeBytes": 2507418,
-  "sha256": "41c10bdc8c4a5d515fdc8707b623a806127120c7fb5c4da0f927326ff3c7460b"
+  "version": "1.0.7",
+  "releasedAt": "2026-11-05T10:53:44.158Z",
+  "notes": "Giao diện popup cập nhật ô vuông gọn đẹp chính giữa màn hình & Tự động cập nhật nhanh",
+  "sizeBytes": 2506239,
+  "sha256": "9d581b152480f7a4cbffaa0830ac763085b8b84fe91620391755e471f029b3b6"
 }

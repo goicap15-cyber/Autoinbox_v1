@@ -26,6 +26,7 @@ export default function AppUpdateModal({
   const currentVersion = updateStatus?.currentVersion || '1.0.0';
   const latestVersion = updateStatus?.latestVersion || currentVersion;
   const updateAvailable = Boolean(updateStatus?.updateAvailable);
+  const isUpdating = ['downloading', 'applying', 'restarting'].includes(state) || loadingApply;
   const isBusy = ['checking', 'downloading', 'applying', 'restarting'].includes(state) || loadingCheck || loadingApply;
 
   const handleCheckUpdate = async () => {
@@ -53,111 +54,107 @@ export default function AppUpdateModal({
 
   return (
     <div
-      className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 backdrop-blur-xs p-4"
+      className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50 backdrop-blur-[2px] p-4"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)] shadow-2xl overflow-hidden"
+        style={{ height: 'auto' }}
+        className="relative w-[360px] max-w-[92vw] rounded-3xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-6 text-[var(--color-text-primary)] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
-          <div className="flex items-center gap-2.5">
-            <div className="relative flex h-9 w-9 items-center justify-center rounded-xl bg-blue-500/15 text-blue-400">
-              <DownloadCloud size={20} />
-              {updateAvailable && (
-                <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500" />
-                </span>
-              )}
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold">Cập nhật ứng dụng</h3>
-                {updateAvailable && (
-                  <span className="inline-flex items-center rounded-full bg-blue-500/15 border border-blue-500/30 px-2 py-0.5 text-[10px] font-bold text-blue-400">
-                    BẢN MỚI
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-[var(--color-text-secondary)]">
-                Phiên bản đang chạy: <strong className="text-[var(--color-text-primary)]">v{currentVersion}</strong>
-              </p>
-            </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute top-4 right-4 rounded-xl p-1.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] cursor-pointer transition-colors"
+          aria-label="Đóng"
+        >
+          <X size={18} />
+        </button>
+
+        <div className="flex flex-col items-center text-center">
+          <div className="relative mb-3.5 flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-500/12 border border-blue-500/25 text-blue-500">
+            <DownloadCloud size={28} strokeWidth={1.8} />
+            {updateAvailable && (
+              <span className="absolute -top-1 -right-1 flex h-3.5 w-3.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                <span className="relative inline-flex h-3.5 w-3.5 rounded-full bg-rose-500 ring-2 ring-[var(--color-bg-elevated)]" />
+              </span>
+            )}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-lg p-1.5 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] cursor-pointer"
-            aria-label="Đóng"
-          >
-            <X size={18} />
-          </button>
+
+          <div className="flex items-center justify-center gap-2">
+            <h3 className="text-base font-bold text-[var(--color-text-primary)]">
+              {updateAvailable ? 'Có bản cập nhật mới!' : 'Cập nhật ứng dụng'}
+            </h3>
+          </div>
+
+          <div className="mt-1.5 flex items-center justify-center gap-2 text-xs text-[var(--color-text-secondary)]">
+            <span>Đang chạy: <strong className="text-[var(--color-text-primary)]">v{currentVersion}</strong></span>
+            {updateAvailable ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-blue-600 px-2.5 py-0.5 text-[11px] font-semibold text-white">
+                <Sparkles size={11} /> Mới v{latestVersion}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-500">
+                <CheckCircle2 size={11} /> Mới nhất
+              </span>
+            )}
+          </div>
         </div>
 
-        <div className="p-5 space-y-4">
-          <div className={`rounded-xl border p-4 space-y-2.5 ${updateAvailable ? 'border-blue-500/35 bg-blue-500/5' : 'border-[var(--color-border)] bg-[var(--color-bg-secondary)]'}`}>
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-[var(--color-text-secondary)]">Trạng thái phiên bản</span>
-              {updateAvailable ? (
-                <span className="inline-flex items-center gap-1 rounded-full bg-blue-600 px-2.5 py-0.5 text-xs font-semibold text-white shadow-xs">
-                  <Sparkles size={12} /> Có bản mới v{latestVersion}
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-xs font-medium text-emerald-500">
-                  <CheckCircle2 size={12} /> Đã mới nhất (v{currentVersion})
-                </span>
-              )}
+        <div className="mt-4 rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-3.5 text-center">
+          <p className="text-xs leading-relaxed text-[var(--color-text-secondary)] line-clamp-4">
+            {updateAvailable && updateStatus?.notes
+              ? updateStatus.notes
+              : (updateStatus?.message || `Bạn đang sử dụng phiên bản v${currentVersion}.`)}
+          </p>
+
+          {isUpdating && (
+            <div className="mt-3 space-y-1.5 text-left">
+              <div className="h-2 w-full rounded-full bg-black/15 overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-blue-600 to-indigo-600 transition-all duration-300"
+                  style={{ width: `${Math.max(10, Number(updateStatus?.progress) || 20)}%` }}
+                />
+              </div>
+              <div className="flex justify-between text-[11px] text-[var(--color-text-secondary)]">
+                <span>{state === 'restarting' ? 'Đang làm mới giao diện...' : 'Đang tải bản cập nhật...'}</span>
+                <span>{Number(updateStatus?.progress) || 0}%</span>
+              </div>
             </div>
+          )}
+        </div>
 
-            <p className="text-xs leading-relaxed text-[var(--color-text-primary)]">
-              {updateStatus?.message || `Bạn đang sử dụng phiên bản v${currentVersion}. Bấm "Kiểm tra cập nhật" để kiểm tra bản mới nhất.`}
-            </p>
-
-            {updateStatus?.notes && updateAvailable && (
-              <div className="mt-2 rounded-lg bg-black/10 p-2.5 text-xs text-[var(--color-text-secondary)] whitespace-pre-wrap">
-                <strong className="block mb-1 text-[var(--color-text-primary)]">Nội dung bản cập nhật:</strong>
-                {updateStatus.notes}
-              </div>
-            )}
-
-            {['downloading', 'applying', 'restarting'].includes(state) && (
-              <div className="pt-2 space-y-1.5">
-                <div className="h-2 w-full rounded-full bg-black/20 overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 transition-all duration-300"
-                    style={{ width: `${Math.max(8, Number(updateStatus?.progress) || 15)}%` }}
-                  />
-                </div>
-                <div className="flex justify-between text-[11px] text-[var(--color-text-secondary)]">
-                  <span>{state === 'restarting' ? 'Đang áp dụng giao diện mới...' : 'Đang tải bản cập nhật...'}</span>
-                  <span>{Number(updateStatus?.progress) || 0}%</span>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2.5">
+        <div className="mt-5 flex flex-col gap-2">
+          {updateAvailable ? (
+            <button
+              type="button"
+              disabled={isBusy}
+              onClick={handleApplyUpdate}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 py-2.5 px-4 text-xs font-semibold text-white shadow-md disabled:opacity-50 cursor-pointer transition-all"
+            >
+              <DownloadCloud size={16} />
+              {isUpdating ? 'Đang cập nhật...' : `Cập nhật ngay (v${latestVersion})`}
+            </button>
+          ) : (
             <button
               type="button"
               disabled={isBusy}
               onClick={handleCheckUpdate}
-              className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-4 py-2.5 text-xs font-semibold hover:bg-[var(--color-bg-hover)] disabled:opacity-50 cursor-pointer"
+              className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 py-2.5 px-4 text-xs font-semibold text-white shadow-md disabled:opacity-50 cursor-pointer transition-all"
             >
               <RefreshCw size={15} className={state === 'checking' || loadingCheck ? 'animate-spin' : ''} />
-              Kiểm tra cập nhật
+              Kiểm tra bản cập nhật mới
             </button>
+          )}
 
-            <button
-              type="button"
-              disabled={isBusy || !updateAvailable}
-              onClick={handleApplyUpdate}
-              className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-40 cursor-pointer shadow-md"
-            >
-              <DownloadCloud size={15} />
-              {updateAvailable ? `Cập nhật ngay (v${latestVersion})` : 'Đã ở bản mới nhất'}
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="w-full inline-flex items-center justify-center rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-surface)] hover:bg-[var(--color-bg-hover)] py-2 px-4 text-xs font-medium text-[var(--color-text-secondary)] cursor-pointer transition-all"
+          >
+            {updateAvailable ? 'Để sau' : 'Đóng'}
+          </button>
         </div>
       </div>
     </div>

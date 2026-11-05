@@ -2450,77 +2450,20 @@ export default function App() {
           onOpenPayment={() => setActiveModal('payment')}
         />
       )}
-      {activeModal === 'appUpdate' && (
+      {(activeModal === 'appUpdate' ||
+        ['downloading', 'applying', 'restarting'].includes(appUpdateStatus?.state) ||
+        (appUpdateStatus?.updateAvailable && updateBannerDismissedVersion !== appUpdateStatus?.latestVersion)) && (
         <AppUpdateModal
           isOpen={true}
-          onClose={() => setActiveModal(null)}
+          onClose={() => {
+            if (activeModal === 'appUpdate') setActiveModal(null);
+            if (appUpdateStatus?.latestVersion) {
+              setUpdateBannerDismissedVersion(appUpdateStatus.latestVersion);
+            }
+          }}
           updateStatus={appUpdateStatus}
           onStatusChange={setAppUpdateStatus}
         />
-      )}
-
-      {appUpdateStatus?.updateAvailable && activeModal !== 'appUpdate' && updateBannerDismissedVersion !== appUpdateStatus?.latestVersion && (
-        <div className="fixed bottom-5 right-5 z-[110] w-[340px] rounded-2xl border border-slate-700/80 bg-slate-900/95 backdrop-blur-md p-4 text-slate-100 shadow-[0_20px_50px_rgba(0,0,0,0.5)] ring-1 ring-white/10 transition-all">
-          <div className="flex items-start gap-3.5">
-            <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500/20 to-indigo-500/20 border border-blue-500/30 text-blue-400">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242" />
-                <path d="M12 12v9" />
-                <path d="m8 17 4 4 4-4" />
-              </svg>
-              <span className="absolute -top-1 -right-1 flex h-3 w-3">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-3 w-3 bg-rose-500 ring-2 ring-slate-900" />
-              </span>
-            </div>
-
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-white">Bản cập nhật mới</span>
-                  <span className="inline-flex items-center rounded-full bg-blue-500/20 border border-blue-400/30 px-2 py-0.5 text-[10px] font-semibold text-blue-300">
-                    v{appUpdateStatus.latestVersion}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setUpdateBannerDismissedVersion(appUpdateStatus.latestVersion)}
-                  className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200 cursor-pointer"
-                  aria-label="Ẩn thông báo"
-                >
-                  ✕
-                </button>
-              </div>
-
-              <p className="mt-1 text-[11px] leading-relaxed text-slate-300 line-clamp-2">
-                {appUpdateStatus.notes || 'Đã có phiên bản mới với các cải tiến hiệu năng và tính năng. Cập nhật ngay không cần tắt ứng dụng.'}
-              </p>
-
-              <div className="mt-3 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveModal('appUpdate');
-                    fetch('/api/app-update/apply', { method: 'POST' })
-                      .then((r) => r.json())
-                      .then((d) => { if (d?.status) setAppUpdateStatus(d.status); })
-                      .catch(() => {});
-                  }}
-                  className="flex-1 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 px-3 py-2 text-xs font-semibold text-white shadow-md shadow-blue-900/30 cursor-pointer transition-all"
-                >
-                  Cập nhật ngay
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setUpdateBannerDismissedVersion(appUpdateStatus.latestVersion)}
-                  className="rounded-xl border border-slate-700 bg-slate-800/70 hover:bg-slate-800 px-3 py-2 text-xs font-medium text-slate-300 cursor-pointer transition-all"
-                >
-                  Để sau
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
       )}
 
       {/* Real-time Incoming Call Overlay */}
