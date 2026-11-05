@@ -7,7 +7,7 @@ const { execFileSync } = require('child_process');
 const JSZip = require('jszip');
 const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 
-const DEFAULT_GITHUB_REPO = 'itadsup1-boop/autoinbox';
+const DEFAULT_GITHUB_REPO = 'goicap15-cyber/Autoinbox_v1';
 const DEFAULT_GITHUB_BRANCH = 'prod-owner-only';
 
 let cachedGitCredentialToken = null;
@@ -135,8 +135,12 @@ class AppUpdaterService {
         saved = { ...JSON.parse(fs.readFileSync(configPath, 'utf8')), ...saved };
       } catch (_) {}
     }
+    const savedRepo = String(saved.repo || '').trim();
+    const effectiveRepo = (!savedRepo || savedRepo === 'itadsup1-boop/autoinbox')
+      ? String(process.env.CRM_UPDATE_GITHUB_REPO || DEFAULT_GITHUB_REPO).trim()
+      : savedRepo;
     return {
-      repo: String(saved.repo || process.env.CRM_UPDATE_GITHUB_REPO || DEFAULT_GITHUB_REPO).trim(),
+      repo: effectiveRepo,
       branch: String(saved.branch || process.env.CRM_UPDATE_GITHUB_BRANCH || DEFAULT_GITHUB_BRANCH).trim(),
       customManifestUrl: String(saved.customManifestUrl || process.env.CRM_UPDATE_MANIFEST_URL || '').trim(),
       githubToken: String(saved.githubToken || process.env.CRM_UPDATE_GITHUB_TOKEN || '').trim(),
@@ -251,26 +255,29 @@ class AppUpdaterService {
       // Fallback sang đọc trực tiếp từ nhánh (branch) trên GitHub
     }
 
-    // 3. Đọc từ nhánh GitHub qua Contents API (hỗ trợ cả Repo Private & Public)
+    // 3. Ưu tiên đọc qua raw.githubusercontent.com (không bị giới hạn 60 req/giờ của GitHub API trên máy khách thuê)
     try {
-      const contentsManifestUrl = `https://api.github.com/repos/${cfg.repo}/contents/updates/version.json?ref=${encodeURIComponent(cfg.branch)}`;
-      const contentsBuf = await fetchBuffer(contentsManifestUrl, {
-        ...headers,
-        Accept: 'application/vnd.github.raw',
-      });
-      const manifest = JSON.parse(contentsBuf.toString('utf8'));
+      const rawHeaders = { ...headers, 'Cache-Control': 'no-cache', Pragma: 'no-cache' };
+      // Với repo Public không cần gửi kèm local token nếu không cấu hình githubToken riêng
+      if (!cfg.githubToken) delete rawHeaders.Authorization;
+      const rawManifestUrl = `https://raw.githubusercontent.com/${cfg.repo}/${cfg.branch}/updates/version.json?t=${Date.now()}`;
+      const rawBuf = await fetchBuffer(rawManifestUrl, rawHeaders);
+      const manifest = JSON.parse(rawBuf.toString('utf8'));
       if (!manifest.downloadUrl) {
-        manifest.downloadUrl = `https://api.github.com/repos/${cfg.repo}/contents/updates/crm-update.zip?ref=${encodeURIComponent(cfg.branch)}`;
+        manifest.downloadUrl = `https://raw.githubusercontent.com/${cfg.repo}/${cfg.branch}/updates/crm-update.zip?t=${Date.now()}`;
       }
       return manifest;
     } catch (_) {}
 
-    // 4. Fallback đọc qua raw.githubusercontent.com
-    const rawManifestUrl = `https://raw.githubusercontent.com/${cfg.repo}/${cfg.branch}/updates/version.json?t=${Date.now()}`;
-    const rawBuf = await fetchBuffer(rawManifestUrl, headers);
-    const manifest = JSON.parse(rawBuf.toString('utf8'));
+    // 4. Fallback đọc từ nhánh GitHub qua Contents API (hỗ trợ cả Repo Private)
+    const contentsManifestUrl = `https://api.github.com/repos/${cfg.repo}/contents/updates/version.json?ref=${encodeURIComponent(cfg.branch)}`;
+    const contentsBuf = await fetchBuffer(contentsManifestUrl, {
+      ...headers,
+      Accept: 'application/vnd.github.raw',
+    });
+    const manifest = JSON.parse(contentsBuf.toString('utf8'));
     if (!manifest.downloadUrl) {
-      manifest.downloadUrl = `https://raw.githubusercontent.com/${cfg.repo}/${cfg.branch}/updates/crm-update.zip?t=${Date.now()}`;
+      manifest.downloadUrl = `https://api.github.com/repos/${cfg.repo}/contents/updates/crm-update.zip?ref=${encodeURIComponent(cfg.branch)}`;
     }
     return manifest;
   }

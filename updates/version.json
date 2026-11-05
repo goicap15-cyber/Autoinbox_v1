@@ -1,7 +1,7 @@
 {
-  "version": "1.0.3",
-  "releasedAt": "2026-11-05T09:47:50.646Z",
-  "notes": "Giao diện thông báo cập nhật hiện đại & Tự động cập nhật ngay không cần đóng ứng dụng",
-  "sizeBytes": 1944881,
-  "sha256": "aaa8eae619c1c1029c835abf0d0c725cdea6c46050b5bcef7bd23cbbfdeadfe3"
+  "version": "1.0.4",
+  "releasedAt": "2026-11-05T10:14:54.658Z",
+  "notes": "Đồng bộ nguồn cập nhật sang Autoinbox_v1 & Tự động nâng cấp không cần đóng ứng dụng",
+  "sizeBytes": 1945107,
+  "sha256": "02c1ffc163aa439987037556d2dba9198ec1899c90746ccd9a850eab48c9962b"
 }
