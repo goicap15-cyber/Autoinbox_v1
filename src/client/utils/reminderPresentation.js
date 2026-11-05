@@ -4,6 +4,12 @@ function parseDueTimestamp(value) {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
+// Khóa chuông lời nhắc: id + due_at — đặt nhắc MỚI trên cùng hội thoại phải
+// re-arm chuông (khóa khác), không bị kế thừa trạng thái tắt/rung của nhắc cũ.
+export function reminderBellKey(thread) {
+  return String(thread?.id || '') + '|' + String(thread?.reminder_due_at || '');
+}
+
 export function getReminderDueState(thread, now = Date.now()) {
   const reminderStatus = thread?.reminder_status;
   if (!thread || (reminderStatus && reminderStatus !== 'active')) {

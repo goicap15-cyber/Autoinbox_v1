@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS threads (
     is_unread BOOLEAN DEFAULT 1,
     unread_manual INTEGER NOT NULL DEFAULT 0,
     pinned INTEGER NOT NULL DEFAULT 0,
+    pinned_at TEXT,
     history_completed INTEGER NOT NULL DEFAULT 0,
     ad_post_link TEXT,
     ad_title TEXT,
@@ -121,6 +122,7 @@ CREATE TABLE IF NOT EXISTS messages (
     fb_message_id TEXT UNIQUE,
     client_message_id TEXT,
     sender_id TEXT NOT NULL,
+    sender_name TEXT,
     content TEXT,
     media_type TEXT CHECK(media_type IN ('text', 'image', 'video', 'voice', 'file', 'call')) DEFAULT 'text',
     media_url TEXT,
@@ -132,6 +134,7 @@ CREATE TABLE IF NOT EXISTS messages (
     media_size INTEGER CHECK(media_size IS NULL OR media_size >= 0),
     is_outgoing BOOLEAN NOT NULL DEFAULT 0,
     sender_role TEXT NOT NULL DEFAULT 'customer' CHECK(sender_role IN ('customer', 'operator')),
+    sent_by_agent TEXT,
     sequence_order INTEGER,
     direction_status TEXT NOT NULL DEFAULT 'confirmed' CHECK(direction_status IN ('confirmed', 'pending')),
     is_unsent BOOLEAN NOT NULL DEFAULT 0,
@@ -271,6 +274,8 @@ CREATE INDEX IF NOT EXISTS idx_threads_account ON threads(account_id);
 CREATE INDEX IF NOT EXISTS idx_threads_assigned ON threads(assigned_user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+-- active-on quét messages theo timestamp_ms toàn cục (không theo thread)
+CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp_ms);
 
 -- 8. Bảng Message Queue (Hàng đợi tin nhắn)
 CREATE TABLE IF NOT EXISTS message_queue (

@@ -12,6 +12,7 @@
 const crypto = require('crypto');
 const InboxSourceService = require('./InboxSourceService');
 const ConversationRepository = require('../repositories/ConversationRepository');
+const { isKnownPageSystemNotice } = require('../utils/pageSystemNotice');
 
 let defaultDb;
 function getDb() {
@@ -324,6 +325,8 @@ class PageMessengerAdapter {
           for (const msg of (msgData.data || []).reverse()) {
             const existing = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(msg.id);
             if (existing) continue;
+            // Bỏ qua thông báo hệ thống Meta (handover AI agent) lọt trong lịch sử
+            if (msg.message && isKnownPageSystemNotice(msg.message)) continue;
 
             const isOutgoing = String(msg.from?.id) === String(source.external_id);
             const ts = new Date(msg.created_time).getTime();
@@ -337,7 +340,12 @@ class PageMessengerAdapter {
           // Update thread last_message
           const lastMsg = (msgData.data || [])[0];
           if (lastMsg) {
-            ConversationRepository.touchThread(thread.id, (lastMsg.message || '').substring(0, 200), db);
+            ConversationRepository.alignThreadActivity(
+              thread.id,
+              (lastMsg.message || '').substring(0, 200),
+              lastMsg.created_time ? new Date(lastMsg.created_time).getTime() : 0,
+              db
+            );
           }
         } catch (convErr) {
           console.warn(`[PAGE_BACKFILL] Error processing conversation:`, convErr.message);

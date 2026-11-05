@@ -77,6 +77,45 @@ export function playMessageSound() {
   }
 }
 
+/**
+ * Reminder bell: 3 nốt chuông dần cao (E5 -> A5 -> C#6, sóng triangle) rồi
+ * lặp nốt cao 1 lần nữa — khác hẳn chime 2 nốt tin nhắn để agent không bao
+ * giờ lầm "tin mới" với "đến giờ nhắc". Mỗi lượt chơi 2 cụm liên tiếp cách
+ * 0.9s với gain 0.4 cho đủ to, rõ.
+ */
+export function playReminderSound() {
+  if (!soundEnabled) return;
+  try {
+    const ctx = getAudioContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const tones = [
+      { freq: 659.25, at: 0 },
+      { freq: 880.0, at: 0.16 },
+      { freq: 1108.73, at: 0.32 },
+      { freq: 1108.73, at: 0.64 }
+    ];
+    for (const phraseOffset of [0, 0.9]) {
+      for (const tone of tones) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(tone.freq, now + phraseOffset + tone.at);
+        gain.gain.setValueAtTime(0, now + phraseOffset + tone.at);
+        gain.gain.linearRampToValueAtTime(0.4, now + phraseOffset + tone.at + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + phraseOffset + tone.at + 0.32);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + phraseOffset + tone.at);
+        osc.stop(now + phraseOffset + tone.at + 0.34);
+      }
+    }
+  } catch (err) {
+    console.warn('[NotificationSound] Reminder bell failed:', err.message);
+  }
+}
+
 export function isSoundEnabled() {
   return soundEnabled;
 }

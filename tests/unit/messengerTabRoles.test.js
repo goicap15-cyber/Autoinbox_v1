@@ -41,7 +41,7 @@ test('only chat and discovery surfaces forward realtime events', () => {
 test('background reuses the stable interaction tab for operator sends', () => {
   const background = fs.readFileSync(path.join(__dirname, '../../src/extension/background.js'), 'utf8');
   assert.match(background, /case 'SEND_MESSAGE':[\s\S]+?await handleSendMessage\(message\.data\)/);
-  assert.match(background, /const personalRole = data\.campaign_id \? 'campaign' : 'interaction'/);
+  assert.match(background, /const personalRole = \(data\.campaign_id \|\| data\.send_via_profile\) \? 'campaign' : 'interaction'/);
   assert.ok(background.includes("runPersonalSendSerialized(`${data.account_id || user_id}:${personalRole}`"));
   assert.match(background, /tab_role: personalRole/);
   assert.match(background, /ensureRoleMessengerTab\(targetAcc, 'history'\)/);

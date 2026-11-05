@@ -19,6 +19,20 @@ test('backend text guard suppresses the Meta notice but preserves genuine phone 
   assert.equal(isSystemOrMetadataText('0989 861 561'), false);
 });
 
+test('recognizes the English AI-agent handover notice echoed as an outgoing page message', () => {
+  assert.equal(isKnownPageSystemNotice('You took over this chat from your AI agent.'), true);
+  assert.equal(isKnownPageSystemNotice('You took over this chat from your AI agent'), true);
+  assert.equal(isKnownPageSystemNotice('  You TOOK over this chat from YOUR AI agent.  '), true);
+  assert.equal(isSystemOrMetadataText('You took over this chat from your AI agent.'), true);
+  assert.equal(isKnownPageSystemNotice('You took over this chat'), false);
+  assert.equal(isKnownPageSystemNotice('I took over this chat from your AI agent.'), false);
+});
+
+test('Vietnamese AI-agent handover notice stays recognized', () => {
+  assert.equal(isKnownPageSystemNotice('Tác nhân AI đã chuyển đoạn chat này cho bạn'), true);
+  assert.equal(isKnownPageSystemNotice('Tác nhân AI đã chuyển đoạn chat này cho bạn.'), true);
+});
+
 
 test('extension boundary uses the same exact suppression while preserving a customer number', () => {
   const fs = require('node:fs');

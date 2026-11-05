@@ -342,19 +342,9 @@
       videoBlobHydration.pending.delete(event.data.rid);
       const dataUrl = String(event.data.dataUrl || '');
       if (!dataUrl.startsWith('data:video/')) return;
-      let tsMs = null;
-      const timeMatch = String(pending.effectiveLabel || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
-      if (timeMatch) {
-        let hours = Number(timeMatch[1]);
-        const minutes = Number(timeMatch[2]);
-        const ampm = String(timeMatch[3] || '').toUpperCase();
-        if ((ampm === 'PM' || ampm === 'CH') && hours < 12) hours += 12;
-        if ((ampm === 'AM' || ampm === 'SA') && hours === 12) hours = 0;
-        const observed = new Date();
-        observed.setHours(hours, minutes, 0, 0);
-        if (observed.getTime() > Date.now() + 60000) observed.setDate(observed.getDate() - 1);
-        tsMs = observed.getTime();
-      }
+      // Video hydrate trễ không còn node gốc để tìm divider - fallback ngày máy
+      // như cũ (video thường vừa gửi nên rủi ro thấp).
+      const tsMs = parseLabelTimestampMs(pending.effectiveLabel);
       try {
         if (chrome?.runtime?.id) {
           console.log(`[DOM Observer] video blob hydrated: thread=${pending.threadId} mid=${pending.nativeId} bytes=${dataUrl.length}`);
@@ -1172,7 +1162,7 @@
     const childMsgEl = !rowAriaLabel ? messageRow.querySelector?.('[aria-label*="Tin nhắn do"], [aria-label*="Message sent"]') : null;
     const effectiveLabel = rowAriaLabel || (childMsgEl?.getAttribute?.('aria-label') || '');
 
-    const hasMessageLabel = /Tin nhắn do .+ gửi lúc|Message sent by/i.test(effectiveLabel);
+    const hasMessageLabel = /Tin nhắn do .+ gửi lúc|Message sent by|Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by/i.test(effectiveLabel);
     // [data-message-id] checked first: live DOM inspection (spec 043) found it's
     // the reliable current-structure marker, set on the row at insertion time -
     // unlike the aria-label above, which React hydrates a beat later. Checking
@@ -1293,7 +1283,14 @@
           sender_name = contactNameStr;
           direction_evidence = 'avatar';
         } else {
-          const mainEl = document.querySelector('div[role="main"]');
+          // K2 (2026-11-04): container tham chiếu phải là role="main" của
+          // chính hội thoại (closest từ row). FB DOM hiện có phần tử
+          // role="main" khác đứng trước cột chat, document.querySelector bắt
+          // nhầm container rộng/lệch -> đo MỌI bubble thành bên phải
+          // (reproduce 3-4/11: 37/37 event dom_observer raw is_outgoing=true,
+          // tin khách của thread 100004449999465 lưu thành operator).
+          const mainEl = messageRow.closest?.('div[role="main"]')
+            || document.querySelector('div[role="main"]');
           // For media messages, measure the actual media element (video/img) instead of
           // the full-width article wrapper. A div[role="article"] stretches 100% of the
           // container so its center is always ~50%, falling below the 55% threshold and
@@ -1353,7 +1350,10 @@
     // Quyết đoán khi CÓ lá ở một bên rõ (<=0.45 / >=0.55) và KHÔNG có lá nào
     // ở bên đối nghịch — tránh dính pill reaction/mảnh trang trí bên kia.
     if (finalBubbles.length > 0) {
-      const mainEl = document.querySelector('div[role="main"]');
+      // K2 (2026-11-04): cùng lỗi container với nhánh geometry thường ở trên
+      // — closest từ messageRow thay cho document.querySelector toàn trang.
+      const mainEl = messageRow.closest?.('div[role="main"]')
+        || document.querySelector('div[role="main"]');
       const mainRect = mainEl?.getBoundingClientRect?.();
       if (mainRect?.width > 0) {
         let sawDecisiveLeft = false;
@@ -1896,19 +1896,7 @@
         lastObservedMessages.set(fbMessageId, observationSignature);
         bubbleFamilyTracker.markSeen(verdict.key);
 
-        let timestampMs = null;
-        const timeMatch = String(parsed.effective_label || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
-        if (timeMatch) {
-          let hours = Number(timeMatch[1]);
-          const minutes = Number(timeMatch[2]);
-          const suffix = String(timeMatch[3] || '').toUpperCase();
-          if ((suffix === 'PM' || suffix === 'CH') && hours < 12) hours += 12;
-          if ((suffix === 'AM' || suffix === 'SA') && hours === 12) hours = 0;
-          const observedAt = new Date();
-          observedAt.setHours(hours, minutes, 0, 0);
-          if (observedAt.getTime() > Date.now() + 60000) observedAt.setDate(observedAt.getDate() - 1);
-          timestampMs = observedAt.getTime();
-        }
+        const timestampMs = parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || row), false);
 
         try {
           chrome.runtime.sendMessage({
@@ -1961,6 +1949,91 @@
 
   // Forward một quan sát bubble về background -> backend. Tách riêng để đường
   // tức thời và đường defer (chờ hydrate native id) dùng chung payload.
+
+  // Ngày của tin KHÔNG có trong nhãn giờ ("9:36 AM") - nhãn chỉ mang giờ, ngày
+  // nằm ở divider phía trên ("Oct 16, 2026, 10:49 AM" / "Hôm Nay"). Stamp theo
+  // ngày máy khiến cả khối tin cũ trôi sang ngày mở thread (reproduce
+  // 2026-10-25: khối tin 16/10 thread cá nhân bị đóng dấu 24/10 - ngày cào).
+  function parseDateDividerText(text) {
+    const t = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!t || t.length > 64) return null;
+    const lower = t.toLowerCase();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (/^(hôm nay|today)$/.test(lower)) return today.getTime();
+    if (/^(hôm qua|yesterday)$/.test(lower)) return today.getTime() - 86400000;
+    const weekdayMap = {
+      sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
+      'chủ nhật': 0, 'thứ hai': 1, 'thứ ba': 2, 'thứ tư': 3, 'thứ năm': 4, 'thứ sáu': 5, 'thứ bảy': 6
+    };
+    if (Object.prototype.hasOwnProperty.call(weekdayMap, lower)) {
+      for (let back = 1; back <= 7; back += 1) {
+        const day = new Date(today.getTime() - back * 86400000);
+        if (day.getDay() === weekdayMap[lower]) return day.getTime();
+      }
+      return null;
+    }
+    const monthsEn = {
+      jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+      january: 0, february: 1, march: 2, april: 3, june: 5, july: 6, august: 7,
+      september: 8, october: 9, november: 10, december: 11
+    };
+    let m = lower.match(/^([a-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
+    if (m && Object.prototype.hasOwnProperty.call(monthsEn, m[1])) {
+      return new Date(Number(m[3]), monthsEn[m[1]], Number(m[2])).getTime();
+    }
+    m = lower.match(/^(\d{1,2})\s+thg\s+(\d{1,2}),?\s+(\d{4})/);
+    if (m) return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1])).getTime();
+    return null;
+  }
+
+  // Tìm divider ngày gần nhất PHÍA TRÊN bubble (trong phần log đang render -
+  // Messenger ảo hóa nên số row có hạn). Chỉ nhận row divider thuần (không có
+  // article/bubble) để chữ của tin khách trùng kiểu ngày không bị nhận nhầm.
+  function resolveDividerDateMs(anchorNode) {
+    try {
+      if (!anchorNode || !anchorNode.closest) return null;
+      const log = anchorNode.closest('[role="log"]')
+        || document.querySelector('div[role="main"] [role="log"]');
+      if (!log) return null;
+      const row = anchorNode.closest('div[role="row"], div[role="article"]') || anchorNode;
+      const rows = Array.from(log.querySelectorAll('div[role="row"], div[role="article"]'));
+      const idx = rows.indexOf(row);
+      if (idx < 0) return null;
+      for (let i = idx - 1; i >= 0; i -= 1) {
+        if (rows[i].querySelector('[role="article"]')) continue;
+        const dividerMs = parseDateDividerText(rows[i].textContent);
+        if (dividerMs) return dividerMs;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function parseLabelTimestampMs(labelText, dateContextMs = null, allowTodayFallback = true) {
+    const timeMatch = String(labelText || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
+    if (!timeMatch) return null;
+    let hours = parseInt(timeMatch[1], 10);
+    const minutes = parseInt(timeMatch[2], 10);
+    const ampm = timeMatch[3] ? timeMatch[3].toUpperCase() : null;
+    if (ampm === 'PM' || ampm === 'CH') {
+      if (hours < 12) hours += 12;
+    } else if (ampm === 'AM' || ampm === 'SA') {
+      if (hours === 12) hours = 0;
+    }
+    // Đường QUÉT (recovery/tail pass): không có divider ngày phía trên thì
+    // KHÔNG được dán ngày máy - tin cũ vẫn mount trong DOM sẽ bị đóng dấu
+    // hôm nay và rơi xuống cuối thread (reproduce 2026-11-03: rác label
+    // "58 AM by Khang" đậu vào 3/11). Trả null để server giữ giờ cũ.
+    if (!dateContextMs && !allowTodayFallback) return null;
+    const stamped = dateContextMs ? new Date(dateContextMs) : new Date();
+    stamped.setHours(hours, minutes, 0, 0);
+    // Tự vệ "trôi qua nửa đêm" chỉ dùng khi KHÔNG có ngày tham chiếu.
+    if (!dateContextMs && stamped.getTime() > Date.now() + 60000) {
+      stamped.setDate(stamped.getDate() - 1);
+    }
+    return stamped.getTime();
+  }
+
   function forwardIncomingDomObservation(thread_id, parsed, fbMessageId, contactAvatar, domPosition) {
     // Chống echo CHỈ áp cho row KHÔNG có native id: row mang mid thật được
     // server tự khớp theo fb_message_id (reconcile/hysteresis spec 019).
@@ -1984,31 +2057,12 @@
 
     let tsMs = null;
     let tsSource = 'realtime_fallback';
-    if (parsed.effective_label) {
-      // Parse: "Tin nhắn do Bạn gửi lúc 15:20" hoặc "15:20"
-      const timeMatch = parsed.effective_label.match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
-      if (timeMatch) {
-        let hours = parseInt(timeMatch[1], 10);
-        const minutes = parseInt(timeMatch[2], 10);
-        const ampm = timeMatch[3]?.toUpperCase();
-        if (ampm === 'PM' || ampm === 'CH') {
-          if (hours < 12) hours += 12;
-        } else if (ampm === 'AM' || ampm === 'SA') {
-          if (hours === 12) hours = 0;
-        }
-
-        const now = new Date();
-        // Assuming current day. If label has specific day, it gets complex.
-        now.setHours(hours, minutes, 0, 0);
-
-        // If the parsed time is slightly in the future (e.g. timezone mismatch), subtract 1 day
-        if (now.getTime() > Date.now() + 60000) {
-          now.setDate(now.getDate() - 1);
-        }
-
-        tsMs = now.getTime();
-        tsSource = 'facebook_label';
-      }
+    // Ngày lấy từ divider FB gần nhất phía trên bubble; không thấy divider
+    // (hội thoại mới / tin vừa đến) mới fallback ngày máy.
+    const labelTsMs = parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || null));
+    if (labelTsMs) {
+      tsMs = labelTsMs;
+      tsSource = 'facebook_label';
     }
 
     try {
@@ -2175,34 +2229,8 @@
         bubbleFamilyTracker.markSeen(verdict.key);
         if (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
 
-        let tsMs = null;
-        let tsSource = 'realtime_fallback';
-        if (parsed.effective_label) {
-          // Parse: "Tin nhắn do Bạn gửi lúc 15:20" hoặc "15:20"
-          const timeMatch = parsed.effective_label.match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
-          if (timeMatch) {
-            let hours = parseInt(timeMatch[1], 10);
-            const minutes = parseInt(timeMatch[2], 10);
-            const ampm = timeMatch[3]?.toUpperCase();
-            if (ampm === 'PM' || ampm === 'CH') {
-              if (hours < 12) hours += 12;
-            } else if (ampm === 'AM' || ampm === 'SA') {
-              if (hours === 12) hours = 0;
-            }
-
-            const now = new Date();
-            // Assuming current day. If label has specific day, it gets complex.
-            now.setHours(hours, minutes, 0, 0);
-
-            // If the parsed time is slightly in the future (e.g. timezone mismatch), subtract 1 day
-            if (now.getTime() > Date.now() + 60000) {
-              now.setDate(now.getDate() - 1);
-            }
-
-            tsMs = now.getTime();
-            tsSource = 'facebook_label';
-          }
-        }
+        const tsMs = parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || row));
+        const tsSource = tsMs ? 'facebook_label' : 'realtime_fallback';
 
         if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
 
@@ -2306,19 +2334,7 @@
         const needsQuoteForward = Boolean(parsed.reply_quote_text) && !quotedReplyForwarded.has(fbMessageId);
         if (verdict.duplicate && !needsQuoteForward) continue;
         if (lastObservedMessages.get(fbMessageId) === observationSignature && !needsQuoteForward) continue;
-        let tsMs = null;
-        const timeMatch = String(parsed.effective_label || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM|SA|CH))?/i);
-        if (timeMatch) {
-          let hours = Number(timeMatch[1]);
-          const minutes = Number(timeMatch[2]);
-          const ampm = String(timeMatch[3] || '').toUpperCase();
-          if ((ampm === 'PM' || ampm === 'CH') && hours < 12) hours += 12;
-          if ((ampm === 'AM' || ampm === 'SA') && hours === 12) hours = 0;
-          const observed = new Date();
-          observed.setHours(hours, minutes, 0, 0);
-          if (observed.getTime() > Date.now() + 60000) observed.setDate(observed.getDate() - 1);
-          tsMs = observed.getTime();
-        }
+        const tsMs = parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || row), false);
         lastObservedMessages.set(fbMessageId, observationSignature);
         bubbleFamilyTracker.markSeen(verdict.key);
         try {

@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { getReminderDueState, reminderBellKey } from './utils/reminderPresentation.js';
+import { playReminderSound } from './utils/notificationSound.js';
 import AppSidebar from './components/AppSidebar.jsx';
 import ConversationSidebar from './components/ConversationSidebar.jsx';
 import ChatHeader from './components/ChatHeader.jsx';
@@ -19,6 +21,7 @@ import IncomingCallModal from './components/IncomingCallModal.jsx';
 import PaymentModal from './components/PaymentModal.jsx';
 import LicenseManagerModal from './components/LicenseManagerModal.jsx';
 import LicenseLockScreen from './components/LicenseLockScreen.jsx';
+import LicenseExpiryBanner, { computeLicenseDaysLeft, formatLicenseExpiryDate } from './components/LicenseExpiryBanner.jsx';
 import AuthScreen from './components/AuthScreen.jsx';
 import EmployeeManagementModal from './components/EmployeeManagementModal.jsx';
 import AppUpdateModal from './components/AppUpdateModal.jsx';
@@ -436,9 +439,10 @@ export default function App() {
   const [activeModal, setActiveModal] = useState(null);
   const [richCapabilities, setRichCapabilities] = useState(null);
   const [bulkHistoryProgress, setBulkHistoryProgress] = useState(null);
-  // Bộ lọc chi tiết ngày: dateFilter='YYYY-MM-DD', dateFilterIds = tập thread id
-  // có tin nhắn trong ngày đó (từ /api/threads/active-on - nguồn messages).
-  const [dateFilter, setDateFilter] = useState('');
+  // Bộ lọc khoảng ngày: dateRange = {from, to} 'YYYY-MM-DD' (một trong hai
+  // có thể trống), dateFilterIds = tập thread id có tin nhắn trong khoảng đó
+  // (từ /api/threads/active-on - nguồn messages).
+  const [dateRange, setDateRange] = useState({ from: '', to: '' });
   const [dateFilterIds, setDateFilterIds] = useState(null);
   const [accountSyncing, setAccountSyncing] = useState(null);
   const [historySyncingThreadId, setHistorySyncingThreadId] = useState(null);
@@ -453,6 +457,7 @@ export default function App() {
   const [campaignRefreshVersion, setCampaignRefreshVersion] = useState(0);
   const [incomingCallInfo, setIncomingCallInfo] = useState(null);
   const [licenseStatus, setLicenseStatus] = useState(null);
+  const [licenseBannerDismissed, setLicenseBannerDismissed] = useState(false);
   const [sessionUser, setSessionUser] = useState(null);
   const sessionUserIdRef = useRef(null);
   const accountsRef = useRef([]);
@@ -682,6 +687,61 @@ export default function App() {
 
   const loadThreadsRef = useRef(loadThreads);
   useEffect(() => { loadThreadsRef.current = loadThreads; }, [loadThreads]);
+
+  // Chuông lời nhắc: hội thoại chuyển sang "đến hạn" (kể cả phát hiện bằng
+  // timer khi danh sách không đổi) thì kêu chime 3 nốt riêng (2 cụm liên tiếp),
+  // lặp lại mỗi 1 phút đến khi khách bấm chuông đỏ trên row (menu: tắt chuông /
+  // hoàn thành / hủy nhắc). Nhắc đã quá hạn TRƯỚC khi mở app chỉ ghi nhận,
+  // không dội.
+  const reminderBellRungRef = useRef(new Set());
+  const reminderBellFirstPassRef = useRef(true);
+  const [reminderBellMuted, setReminderBellMuted] = useState(() => new Set());
+  const reminderBellMutedRef = useRef(reminderBellMuted);
+  useEffect(() => { reminderBellMutedRef.current = reminderBellMuted; }, [reminderBellMuted]);
+
+  const evaluateReminderBells = useCallback(() => {
+    if (!reminderBellFirstPassRef.current && threadsRef.current.length === 0) return;
+    const now = Date.now();
+    const dueKeys = [];
+    for (const thread of threadsRef.current) {
+      if (getReminderDueState(thread, now).isDue) dueKeys.push(reminderBellKey(thread));
+    }
+    if (reminderBellFirstPassRef.current) {
+      for (const key of dueKeys) reminderBellRungRef.current.add(key);
+      reminderBellFirstPassRef.current = false;
+      return;
+    }
+    let hasNewDue = false;
+    for (const key of dueKeys) {
+      if (reminderBellMutedRef.current.has(key) || reminderBellRungRef.current.has(key)) continue;
+      reminderBellRungRef.current.add(key);
+      hasNewDue = true;
+    }
+    if (hasNewDue) playReminderSound();
+  }, []);
+
+  useEffect(() => { evaluateReminderBells(); }, [threads, evaluateReminderBells]);
+  useEffect(() => {
+    const detectTimer = setInterval(evaluateReminderBells, 30000);
+    const repeatTimer = setInterval(() => {
+      const now = Date.now();
+      const hasUrgent = threadsRef.current.some((thread) =>
+        getReminderDueState(thread, now).isDue
+        && !reminderBellMutedRef.current.has(reminderBellKey(thread)));
+      if (hasUrgent) playReminderSound();
+    }, 60000);
+    return () => { clearInterval(detectTimer); clearInterval(repeatTimer); };
+  }, [evaluateReminderBells]);
+
+  const handleToggleReminderBell = useCallback((thread) => {
+    const key = reminderBellKey(thread);
+    setReminderBellMuted((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   // Page API tự đồng bộ (auto-backfill): server bắn THREAD_LIST_UPDATED khi có
   // tin mới được kéo về — refresh danh sách hội thoại, chat đang mở tự cập nhật
@@ -1483,11 +1543,12 @@ export default function App() {
     });
 
     socket.on('CONTACT_UPDATED', (contactUpdate = {}) => {
-      const { thread_id, avatar_url, name, nickname, phone, email, status_id, status_name, status_color, phone_source, phone_captured_at } = contactUpdate;
+      const { thread_id, avatar_url, name, nickname, phone, email, status_id, status_name, status_color, phone_source, phone_captured_at, profile_url } = contactUpdate;
       if (thread_id == null) return;
       const tidStr = String(thread_id);
       const contactPatch = {
         ...(avatar_url ? { avatar_url } : {}),
+        ...(profile_url ? { profile_url } : {}),
         ...(name ? { name } : {}),
         ...(nickname !== undefined ? { nickname } : {}),
         ...(phone ? { phone } : {}),
@@ -1499,6 +1560,7 @@ export default function App() {
       setThreads(prev => prev.map(t => String(t.id) === tidStr ? {
         ...t,
         ...(avatar_url ? { avatar_url } : {}),
+        ...(profile_url ? { profile_url } : {}),
         ...(name ? { contact_name: name } : {}),
         ...(nickname !== undefined ? { nickname } : {}),
         ...(status_id !== undefined ? { status_id, status_name: status_name || null, status_color: status_color || null } : {})
@@ -2115,13 +2177,17 @@ export default function App() {
     });
   }, [activeThreadId, selectedThread, socket, isConnected]);
 
-  // Lấy danh sách hội thoại có tin nhắn trong ngày đang lọc
+  // Lấy danh sách hội thoại có tin nhắn trong khoảng ngày đang lọc
   useEffect(() => {
-    if (!dateFilter || !socket || !isConnected) { setDateFilterIds(null); return; }
+    const hasRange = Boolean(dateRange.from || dateRange.to);
+    if (!hasRange || !socket || !isConnected) { setDateFilterIds(null); return; }
     let cancelled = false;
+    const params = new URLSearchParams();
+    if (dateRange.from) params.set('from', dateRange.from);
+    if (dateRange.to) params.set('to', dateRange.to);
     const load = async () => {
       try {
-        const res = await fetch('/api/threads/active-on?date=' + encodeURIComponent(dateFilter));
+        const res = await fetch('/api/threads/active-on?' + params.toString());
         const data = await res.json();
         if (!cancelled && data?.success) setDateFilterIds(new Set((data.thread_ids || []).map(String)));
       } catch (_) {}
@@ -2129,10 +2195,10 @@ export default function App() {
     load();
     const timer = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [dateFilter, socket, isConnected, accounts]);
+  }, [dateRange, socket, isConnected, accounts]);
 
-  const handleDateFilterChange = useCallback((value) => {
-    setDateFilter(value || '');
+  const handleDateRangeChange = useCallback((range) => {
+    setDateRange({ from: range?.from || '', to: range?.to || '' });
     setDateFilterIds(null);
   }, []);
 
@@ -2155,6 +2221,24 @@ export default function App() {
     return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Äang kiểm tra phiên đăng nhập...</div>;
   }
 
+  // Preview banner hết hạn license (?_licensePreviewDays=3) — chỉ có hiệu lực trên Vite dev
+  // server (import.meta.env.DEV); build production không chứa nhánh này.
+  const licensePreviewDays = import.meta.env.DEV
+    ? Number.parseInt(new URLSearchParams(window.location.search).get('_licensePreviewDays') || '', 10)
+    : null;
+  if (Number.isFinite(licensePreviewDays)) {
+    return (
+      <div className="min-h-screen bg-slate-950">
+        <LicenseExpiryBanner
+          daysLeft={licensePreviewDays}
+          expiresAtLabel={formatLicenseExpiryDate(new Date(Date.now() + licensePreviewDays * 86400000).toISOString())}
+          onOpenPayment={() => {}}
+          onDismiss={() => {}}
+        />
+      </div>
+    );
+  }
+
   if (!sessionUser) {
     return <AuthScreen onAuthenticated={setSessionUser} />;
   }
@@ -2163,8 +2247,19 @@ export default function App() {
     return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Äang kiá»ƒm tra báº£n quyá»n...</div>;
   }
 
+  const licenseDaysLeft = licenseStatus?.isLicensed ? computeLicenseDaysLeft(licenseStatus.expiresAt) : null;
+  const licenseExpiryLabel = formatLicenseExpiryDate(licenseStatus?.expiresAt);
+
   return (
     <div className={gridClass}>
+      {!licenseBannerDismissed && licenseDaysLeft !== null && licenseExpiryLabel && (
+        <LicenseExpiryBanner
+          daysLeft={licenseDaysLeft}
+          expiresAtLabel={licenseExpiryLabel}
+          onOpenPayment={() => setActiveModal('payment')}
+          onDismiss={() => setLicenseBannerDismissed(true)}
+        />
+      )}
       {/* Column 1: Sidebar Navigation - 48px */}
       <AppSidebar
         activeView={activeView}
@@ -2184,10 +2279,12 @@ export default function App() {
 
       {/* Column 2: Conversation List */}
       <ConversationSidebar
-        dateFilter={dateFilter}
+        dateRange={dateRange}
         dateFilterIds={dateFilterIds}
-        onDateFilterChange={handleDateFilterChange}
+        onDateRangeChange={handleDateRangeChange}
         threads={threads} activeThreadId={activeThreadId}
+        reminderBellMuted={reminderBellMuted} onToggleReminderBell={handleToggleReminderBell}
+        onCompleteReminder={handleCompleteReminder} onCancelReminder={handleCancelReminder}
         onSelectThread={handleSelectThread}
         activeTab={activeTab} onTabChange={handleConversationTabChange}
         waitingCount={waitingCount}
@@ -2239,7 +2336,7 @@ export default function App() {
               // request locked and the next clicked user cannot mirror scroll.
               key={String(activeThreadId)}
               messages={activeMessages}
-              jumpToDate={dateFilter || null}
+              jumpToRange={(dateRange.from || dateRange.to) ? dateRange : null}
               activeThread={selectedThread}
               // Keep automatic first-open sync as the primary path, and expose
               // the existing manual retry control when Facebook confirms an

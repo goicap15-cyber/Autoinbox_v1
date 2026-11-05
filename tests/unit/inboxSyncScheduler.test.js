@@ -12,7 +12,8 @@ test('default lightweight inbox fallback targets near-realtime delivery', () => 
   const scheduler = new InboxSyncScheduler();
   assert.equal(scheduler.sidebarIntervalMs, 2000);
   assert.equal(scheduler.sidebarCooldownMs, 1200);
-  assert.equal(scheduler.requestsIntervalMs, 60000);
+  // 2026-10-16: tin nhắn chờ quét nền liên tục như hội thoại (30s, always-on)
+  assert.equal(scheduler.requestsIntervalMs, 30000);
 });
 
 test('operator opening a sync window dispatches a deep FULL scan immediately (2026-09-19: bấm sync = quét sâu ngay, không phải realtime nhẹ)', () => {
@@ -148,7 +149,7 @@ test('lightweight request polling reaches the extension with a bounded budget', 
   enableTestSyncWindow(scheduler);
   assert.equal(scheduler.requestSidebarSync('acc', 'scheduler_requests', { scanMode: 'realtime_requests' }), true);
   assert.equal(wsMessages[0]?.data?.scan_mode, 'realtime_requests');
-  assert.equal(wsMessages[0]?.data?.time_budget_ms, 12000);
+  assert.equal(wsMessages[0]?.data?.time_budget_ms, 30000);
   scheduler.markSidebarResult('acc');
   scheduler.unregisterAccount('acc');
 });
@@ -161,7 +162,11 @@ test('scheduled Requests scan yields to realtime while an explicit waiting-tab s
   enableTestSyncWindow(scheduler);
   scheduler.requestSidebarSync('acc', 'scheduler_requests', { scanMode: 'realtime_requests' });
   const state = scheduler.accounts.get('acc');
+  // 2026-10-16: quét requests được bảo vệ 20s để chạy trọn (possible + spam,
+  // có navigate); realtime chỉ giành lại lane sau ngưỡng đó.
   state.lastSidebarSyncAt = Date.now() - 9000;
+  assert.equal(scheduler.requestSidebarSync('acc', 'scheduler_realtime', { scanMode: 'realtime' }), false);
+  state.lastSidebarSyncAt = Date.now() - 21000;
   assert.equal(scheduler.requestSidebarSync('acc', 'scheduler_realtime', { scanMode: 'realtime' }), true);
   assert.equal(wsMessages[1]?.data?.reason, 'realtime_preempt_requests');
   scheduler.markSidebarResult('acc');

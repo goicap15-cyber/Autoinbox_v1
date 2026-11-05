@@ -90,11 +90,14 @@ function addDirToZip(zip, fsDir, zipPrefix) {
   console.log(`- Manifest  : updates/version.json`);
 
   if (shouldPush) {
-    console.log('3. Đang đẩy bản cập nhật lên nhánh phát hành GitHub (autoinbox_v1 -> prod-owner-only)...');
+    console.log('3. Đang đẩy bản cập nhật lên nhánh phát hành GitHub (origin & autoinbox_v1 -> prod-owner-only)...');
     execSync('git add -f updates/version.json updates/crm-update.zip package.json', { cwd: ROOT, stdio: 'inherit' });
     execSync(`git commit -m "chore(release): publish hot-update v${nextVersion}"`, { cwd: ROOT, stdio: 'inherit' });
-    execSync('git push autoinbox_v1 HEAD:prod-owner-only', { cwd: ROOT, stdio: 'inherit' });
-    console.log('=== Đã đẩy bản cập nhật lên GitHub Autoinbox_v1 thành công! ===');
+    execSync('git push origin HEAD:prod-owner-only', { cwd: ROOT, stdio: 'inherit' });
+    try {
+      execSync('git push autoinbox_v1 HEAD:prod-owner-only', { cwd: ROOT, stdio: 'inherit' });
+    } catch (_) {}
+    console.log('=== Đã đẩy bản cập nhật lên GitHub prod-owner-only thành công! ===');
   }
 })();
 

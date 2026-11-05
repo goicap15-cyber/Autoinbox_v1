@@ -60,7 +60,7 @@ export default function PhoneAutomationSettingsModal({ leadStatuses = [], onClos
         <div className="space-y-4 p-5">
           <div className="rounded-xl border border-violet-100 bg-violet-50 p-4">
             <div className="flex items-center justify-between gap-3">
-              <div><p className="flex items-center gap-2 text-sm font-bold text-violet-950"><Power size={16} className={enabled ? 'text-emerald-600' : 'text-slate-400'} /> Tự đổi trạng thái khi có số</p><p className="mt-1 text-xs leading-relaxed text-violet-800/75">Chỉ nhận số Việt Nam hợp lệ từ tin nhắn đến. Không nhận nhầm số nhân viên/CRM gửi ra.</p></div>
+              <div><p className="flex items-center gap-2 text-sm font-bold text-violet-950"><Power size={16} className={enabled ? 'text-emerald-600' : 'text-slate-400'} /> Tự đổi trạng thái khi có số</p><p className="mt-1 text-xs leading-relaxed text-violet-800/75">Nhận số Việt Nam và số di động quốc tế (+81, +82, +1...) từ tin nhắn đến. Không nhận nhầm số nhân viên/CRM gửi ra.</p></div>
               <button type="button" onClick={() => { setSaved(false); setEnabled((value) => !value); }} role="switch" aria-checked={enabled} aria-label="Bật tự động hoá số điện thoại" className={'relative h-7 w-12 shrink-0 rounded-full transition-colors ' + (enabled ? 'bg-emerald-500' : 'bg-slate-300')}><span className={'absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow transition-transform ' + (enabled ? 'translate-x-5' : 'translate-x-0')} /></button>
             </div>
           </div>

@@ -93,7 +93,6 @@ function renderRichContent(text) {
 
 export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenByCustomer = false }) {
   const [isTimePinned, setIsTimePinned] = useState(false);
-  const isPendingDirection = msg.direction_status === 'pending';
   // is_outgoing flag la nguon chan ly chinh. sender_type 'staff'/'ai' chi la go y phu
   // - KHONG duoc dung standalone vi khach hang cung co the bi gan sender_type sai boi extension.
   const hasExplicitOutgoing = msg.is_outgoing === true || msg.is_outgoing === 1
@@ -103,7 +102,10 @@ export default function MessageBubble({ msg, activeThread, onRetry, isLastSeenBy
     || msg.from === 'me'
     || (!hasExplicitOutgoing && msg.is_outgoing !== false && msg.is_outgoing !== 0
         && (msg.sender_type === 'staff' || msg.sender_type === 'ai'));
-  const isOutgoing = isConfirmedOutgoing(msg) || (!isPendingDirection && Boolean(isBoolOutgoing));
+  // Fix B (server) giữ is_outgoing=1 cho outgoing "yếu chứng" và chỉ đánh
+  // direction pending chờ confirm — render như tin đi, đừng lật sang cột khách.
+  const isPendingDirection = msg.direction_status === 'pending' && !isBoolOutgoing;
+  const isOutgoing = isConfirmedOutgoing(msg) || Boolean(isBoolOutgoing);
   const isUnsent = Boolean(msg.is_unsent || msg.unsent);
   const content = msg.content || msg.text_content || msg.text || msg.message || '';
   const senderName = msg.sender_name || (isOutgoing ? (msg.is_ai || msg.sender_type === 'ai' ? 'AI' : 'Bạn') : activeThread?.contact_name || 'Khách hàng');

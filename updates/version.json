@@ -1,7 +1,7 @@
 {
-  "version": "1.0.4",
-  "releasedAt": "2026-11-05T10:14:54.658Z",
-  "notes": "Đồng bộ nguồn cập nhật sang Autoinbox_v1 & Tự động nâng cấp không cần đóng ứng dụng",
-  "sizeBytes": 1945107,
-  "sha256": "02c1ffc163aa439987037556d2dba9198ec1899c90746ccd9a850eab48c9962b"
+  "version": "1.0.5",
+  "releasedAt": "2026-11-05T10:47:14.914Z",
+  "notes": "Đồng bộ chuông lời nhắc 3 nốt, cảnh báo sắp hết hạn gói bản quyền, bộ lọc khoảng ngày & gợi ý mẫu nhanh",
+  "sizeBytes": 2507418,
+  "sha256": "41c10bdc8c4a5d515fdc8707b623a806127120c7fb5c4da0f927326ff3c7460b"
 }

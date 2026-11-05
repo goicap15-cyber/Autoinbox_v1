@@ -31,10 +31,10 @@ async function send(emailInput) {
   const otp = String(crypto.randomInt(100000, 1000000));
   const mailer = nodemailer.createTransport({ service: 'gmail', auth: { user, pass } });
   await mailer.sendMail({
-    from: `MISSPRICE CRM <${user}>`, to: email,
-    subject: 'Mã xác minh đăng ký MISSPRICE CRM',
+    from: `AdsupCRM <${user}>`, to: email,
+    subject: 'Mã xác minh đăng ký AdsupCRM',
     text: `Mã OTP của bạn là ${otp}. Mã có hiệu lực trong 5 phút.`,
-    html: `<div style="font-family:Arial,sans-serif"><h2>MISSPRICE CRM</h2><p>Mã xác minh đăng ký:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${otp}</p><p>Mã có hiệu lực trong 5 phút. Không cung cấp mã này cho người khác.</p></div>`
+    html: `<div style="font-family:Arial,sans-serif"><h2>AdsupCRM</h2><p>Mã xác minh đăng ký:</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${otp}</p><p>Mã có hiệu lực trong 5 phút. Không cung cấp mã này cho người khác.</p></div>`
   });
   pendingOtps.set(email, { hash: digest(email, otp), expiresAt: Date.now() + OTP_TTL_MS, sentAt: Date.now(), attempts: 0 });
   return { success: true, data: { email, expires_in: 300, resend_after: 60 } };

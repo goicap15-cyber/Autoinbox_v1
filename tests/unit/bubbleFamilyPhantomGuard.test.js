@@ -3,17 +3,23 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
 // Phantom family __bubble_N: id tổng hợp mid.X__bubble_N gắn nhầm article —
-// (a) lật chiều (operator thành khách) hoặc (b) tái dùng anchor cũ cách xa.
-// Reproduce 2026-10-08: "nhắn gì đó"/"allo"/"alo" của operator hiện thêm bản
-// sao bên trái khách trong thread 1411372724455599.
-test('WS insert path skips bubble-family phantoms (flipped or far anchor)', () => {
+// (a) lật chiều (operator thành khách), (b) tái dùng anchor cũ cách xa, hoặc
+// (c) K1 2026-11-04: cùng hướng + ts sát nhau (re-render của CÙNG lá) — cả 3
+// đều phải bị bỏ qua khi base cùng nội dung đã tồn tại. Trước đây (c) lọt
+// xuống INSERT và sinh row nhân đôi khi sweep lại hội thoại cũ (reproduce
+// 2026-11-04 01:59: 9 row mid.$X__bubble_1 nhân bản block tin thread
+// 100004449999465). Reproduce 2026-10-08: "nhắn gì đó"/"allo"/"alo" của
+// operator hiện thêm bản sao bên trái khách trong thread 1411372724455599.
+test('WS insert path skips bubble-family phantoms (flipped, far anchor, or same-leaf re-render)', () => {
   const server = fs.readFileSync('src/server/server.js', 'utf8');
   assert.equal(server.includes("syncDebug('WS_SKIP_BUBBLE_FAMILY_PHANTOM'"), true);
   assert.equal(/__bubble_\\d\+\$\/\.test\(String\(stableMessageId\)\)/.test(server), true);
   assert.equal(/bubbleFamilyId\.length >= 12/.test(server), true);
   assert.equal(/fb_message_id LIKE '%\.' \|\| \?/.test(server), true);
-  assert.equal(/Number\(bubbleBaseRow\.is_outgoing\) !== \(isOutgoing \? 1 : 0\)/.test(server), true);
-  assert.equal(/Math\.abs\(Number\(tsMs \|\| 0\) - Number\(bubbleBaseRow\.timestamp_ms \|\| 0\)\) > 60000/.test(server), true);
+  // K1: base tồn tại + cùng nội dung = cùng tin -> break, không còn điều kiện
+  // kèm theo về chiều/ts (trước đây cùng chiều + ts sát bị lọt xuống insert).
+  assert.equal(/if \(bubbleBaseRow\s*\n\s*&& String\(bubbleBaseRow\.content \|\| ''\)\.trim\(\) === String\(m\.content \|\| ''\)\.trim\(\)\)/.test(server), true);
+  assert.equal(/ts_delta_ms: Math\.abs\(Number\(tsMs \|\| 0\) - Number\(bubbleBaseRow\.timestamp_ms \|\| 0\)\)/.test(server), true);
 });
 
 test('startup heal deletes flipped-direction bubble phantoms and keeps bases', () => {
@@ -33,8 +39,9 @@ test('Messenger-typed outgoing text passes all three gates when it has a real mi
   const content = fs.readFileSync('src/extension/content.js', 'utf8');
   const background = fs.readFileSync('src/extension/background.js', 'utf8');
   const server = fs.readFileSync('src/server/server.js', 'utf8');
-  // gate 1 - observer chỉ nhường khi CHƯA có native id
-  assert.equal(/if \(isPlainOutgoingDomText && !parsed\.native_id\) return;/.test(content), true);
+  // gate 1 - observer chỉ nhường khi CHƯA có native id (merge 04/11: bản
+  // ghi markObservedOutgoing trước khi return cho thuật toán nhận echo sidebar)
+  assert.equal(/if \(isPlainOutgoingDomText && !parsed\.native_id\) \{\s*\n\s*markObservedOutgoing\(thread_id, parsed\.content\);\s*\n\s*return;/.test(content), true);
   // gate 2 - bg bỏ qua echo KHÔNG mid thật, echo có mid thật đi tiếp;
   // mid.$X__bubble_N (lá thật đã hydrate) phải được strip hậu tố trước khi
   // test, không thì reading thật của tin ĐI bị nuốt câm ở cổng này.
