@@ -1,7 +1,7 @@
 {
   "version": "1.0.2",
-  "releasedAt": "2026-11-05T09:28:50.067Z",
+  "releasedAt": "2026-11-05T09:34:21.524Z",
   "notes": "Bản cập nhật v1.0.2: Kiểm tra tính năng cập nhật tự động (Hot-Update)",
-  "sizeBytes": 1943221,
-  "sha256": "ec3b1fe267ba12ddf7ddadab28f05bd838454368c8434386b56435801766fa23"
+  "sizeBytes": 1943577,
+  "sha256": "d6aac3c7ff96fed937cb465498e12ad552604d85872f8b0e8534e8887c77ca93"
 }

@@ -3,11 +3,30 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 const JSZip = require('jszip');
 const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 
 const DEFAULT_GITHUB_REPO = 'itadsup1-boop/autoinbox';
 const DEFAULT_GITHUB_BRANCH = 'prod-owner-only';
+
+let cachedGitCredentialToken = null;
+function getGitCredentialToken() {
+  if (cachedGitCredentialToken !== null) return cachedGitCredentialToken;
+  try {
+    const out = execFileSync('git', ['credential', 'fill'], {
+      input: 'protocol=https\nhost=github.com\n\n',
+      encoding: 'utf8',
+      timeout: 4000,
+      windowsHide: true,
+    });
+    const m = String(out || '').match(/^password=(.+)$/m);
+    cachedGitCredentialToken = m ? m[1].trim() : '';
+  } catch (_) {
+    cachedGitCredentialToken = '';
+  }
+  return cachedGitCredentialToken;
+}
 
 function isElectronPackaged() {
   try {
@@ -173,9 +192,10 @@ class AppUpdaterService {
 
   async fetchRemoteManifest() {
     const cfg = this.getConfig();
+    const token = cfg.githubToken || getGitCredentialToken();
     const headers = {};
-    if (cfg.githubToken) {
-      headers.Authorization = `token ${cfg.githubToken}`;
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
     }
 
     // 1. Nếu có cấu hình URL manifest trực tiếp
@@ -223,7 +243,21 @@ class AppUpdaterService {
       // Fallback sang đọc trực tiếp từ nhánh (branch) trên GitHub
     }
 
-    // 3. Đọc từ nhánh GitHub (updates/version.json)
+    // 3. Đọc từ nhánh GitHub qua Contents API (hỗ trợ cả Repo Private & Public)
+    try {
+      const contentsManifestUrl = `https://api.github.com/repos/${cfg.repo}/contents/updates/version.json?ref=${encodeURIComponent(cfg.branch)}`;
+      const contentsBuf = await fetchBuffer(contentsManifestUrl, {
+        ...headers,
+        Accept: 'application/vnd.github.raw',
+      });
+      const manifest = JSON.parse(contentsBuf.toString('utf8'));
+      if (!manifest.downloadUrl) {
+        manifest.downloadUrl = `https://api.github.com/repos/${cfg.repo}/contents/updates/crm-update.zip?ref=${encodeURIComponent(cfg.branch)}`;
+      }
+      return manifest;
+    } catch (_) {}
+
+    // 4. Fallback đọc qua raw.githubusercontent.com
     const rawManifestUrl = `https://raw.githubusercontent.com/${cfg.repo}/${cfg.branch}/updates/version.json?t=${Date.now()}`;
     const rawBuf = await fetchBuffer(rawManifestUrl, headers);
     const manifest = JSON.parse(rawBuf.toString('utf8'));
@@ -347,8 +381,11 @@ class AppUpdaterService {
       }
 
       const cfg = this.getConfig();
-      const headers = {};
-      if (cfg.githubToken) headers.Authorization = `token ${cfg.githubToken}`;
+      const token = cfg.githubToken || getGitCredentialToken();
+      const headers = {
+        Accept: 'application/vnd.github.raw',
+      };
+      if (token) headers.Authorization = `Bearer ${token}`;
 
       this.emitStatus({
         state: 'downloading',
