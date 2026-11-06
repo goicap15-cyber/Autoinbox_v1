@@ -480,6 +480,16 @@ class AppUpdaterService {
         } catch (_) {}
       }
 
+      // Bổ sung tự động @puppeteer/browsers ra resources/node_modules cho các bộ cài cũ thiếu gói này trong app.asar
+      const stagedVendorModules = path.join(hotUpdateDir, 'vendor', 'node_modules');
+      if (fs.existsSync(stagedVendorModules)) {
+        try {
+          const targetResModules = path.join(resourcesPath, 'node_modules');
+          fs.mkdirSync(targetResModules, { recursive: true });
+          fs.cpSync(stagedVendorModules, targetResModules, { recursive: true, force: true });
+        } catch (_) {}
+      }
+
       // Cập nhật luôn thư mục extension bên ngoài để Chrome nạp bản mới ngay
       const stagedExt = path.join(hotUpdateDir, 'dist', 'extension');
       if (fs.existsSync(stagedExt)) {

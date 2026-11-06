@@ -1,8 +1,8 @@
 {
-  "version": "1.0.11",
-  "releasedAt": "2026-11-06T07:07:15.028Z",
-  "notes": "Sửa mở Chrome nổi trực tiếp khi bấm Tạo app & Webhook, bỏ nút Hiện Chrome thừa và tự giải phóng cổng khi khởi động lại",
+  "version": "1.0.12",
+  "releasedAt": "2026-11-06T07:19:07.556Z",
+  "notes": "Bổ sung gói @puppeteer/browsers bị thiếu trên máy khách để mở Chrome tạo App & Webhook",
   "requiresRestart": true,
-  "sizeBytes": 2511447,
-  "sha256": "3909a293d0d9e65b637d1981e5d8ae4ae4edbd914b1b719925774c1e769954b2"
+  "sizeBytes": 3077029,
+  "sha256": "db8ae5a0afbf8e218fcf635279c043d1b9e047d7572a0cecf4bbf522e3d13cac"
 }

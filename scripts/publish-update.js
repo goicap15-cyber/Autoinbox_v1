@@ -61,6 +61,24 @@ function addDirToZip(zip, fsDir, zipPrefix) {
   if (fs.existsSync(path.join(ROOT, 'chrome-bundling', 'resolveChromePath.js'))) {
     zip.file('chrome-bundling/resolveChromePath.js', fs.readFileSync(path.join(ROOT, 'chrome-bundling', 'resolveChromePath.js')));
   }
+  // Đóng gói kèm @puppeteer/browsers và các gói phụ thuộc nhỏ vào vendor/node_modules
+  // để tự vá cho các máy khách đang chạy bản win-unpacked/Setup cũ thiếu @puppeteer/browsers trong app.asar
+  const visitedVendor = new Set();
+  function collectVendorPkg(pkgName) {
+    if (visitedVendor.has(pkgName)) return;
+    visitedVendor.add(pkgName);
+    const pkgDir = path.join(ROOT, 'node_modules', pkgName);
+    const pkgJson = path.join(pkgDir, 'package.json');
+    if (!fs.existsSync(pkgJson)) return;
+    addDirToZip(zip, pkgDir, `vendor/node_modules/${pkgName}`);
+    try {
+      const meta = JSON.parse(fs.readFileSync(pkgJson, 'utf8'));
+      for (const dep of Object.keys(meta.dependencies || {})) {
+        collectVendorPkg(dep);
+      }
+    } catch (_) {}
+  }
+  collectVendorPkg('@puppeteer/browsers');
   zip.file('package.json', fs.readFileSync(pkgPath));
   zip.file('src/electron.js', fs.readFileSync(path.join(ROOT, 'src', 'electron.js')));
   zip.file('src/preload.js', fs.readFileSync(path.join(ROOT, 'src', 'preload.js')));

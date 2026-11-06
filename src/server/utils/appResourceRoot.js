@@ -54,10 +54,29 @@ function resolveBinRoot() {
   return isPackaged() && process.resourcesPath ? process.resourcesPath : REPO_ROOT;
 }
 
+function ensureVendorModulesForAsar() {
+  try {
+    const resRoot = process.resourcesPath
+      || (fs.existsSync(path.resolve(REPO_ROOT, '..', 'app.asar')) ? path.resolve(REPO_ROOT, '..') : null);
+    if (!resRoot) return;
+    const asarBrowsersPkg = path.join(resRoot, 'app.asar', 'node_modules', '@puppeteer', 'browsers', 'package.json');
+    if (fs.existsSync(asarBrowsersPkg)) return;
+    const targetBrowsersPkg = path.join(resRoot, 'node_modules', '@puppeteer', 'browsers', 'package.json');
+    if (fs.existsSync(targetBrowsersPkg)) return;
+    const vendorSrc = path.join(resRoot, 'hot-update', 'vendor', 'node_modules');
+    if (fs.existsSync(vendorSrc)) {
+      const targetModules = path.join(resRoot, 'node_modules');
+      fs.mkdirSync(targetModules, { recursive: true });
+      fs.cpSync(vendorSrc, targetModules, { recursive: true, force: true });
+    }
+  } catch (_) {}
+}
+
 let puppeteerPromise = null;
 function loadPuppeteer() {
   if (!puppeteerPromise) {
     puppeteerPromise = (async () => {
+      ensureVendorModulesForAsar();
       const searchPaths = [
         __dirname,
         process.resourcesPath ? path.join(process.resourcesPath, 'app.asar', 'node_modules') : null,
