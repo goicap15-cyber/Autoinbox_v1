@@ -506,7 +506,7 @@ export default function AccountManagerModal({ onClose, onSourcesChanged, onFaceb
               {addingSession ? (
                 <>
                   <RefreshCw size={14} className="animate-spin" />
-                  <span>Đang mở Chrome...</span>
+                  <span>{pendingKey ? 'Đang chờ đăng nhập...' : 'Đang mở Chrome...'}</span>
                 </>
               ) : (
                 <>

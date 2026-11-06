@@ -1,8 +1,8 @@
 {
-  "version": "1.0.14",
-  "releasedAt": "2026-11-06T08:17:08.491Z",
-  "notes": "Sửa lỗi querySelectorAll khi trang Messenger đang tải và tăng tốc điền Webhook + lấy token 10 tab",
+  "version": "1.0.15",
+  "releasedAt": "2026-11-06T09:32:28.909Z",
+  "notes": "Sửa lỗi tự nạp tiện ích CRM và tự nhận tài khoản Facebook ngay khi đăng nhập",
   "requiresRestart": true,
-  "sizeBytes": 3079243,
-  "sha256": "65ee74b797c5d7f91dc4acf610d4982a42ebdaedccb701530220f23990299fda"
+  "sizeBytes": 3079823,
+  "sha256": "6acf627a0f46f9770c0bc427d27aca2d8468016b6d159a2d2bfe75b80b1144fc"
 }

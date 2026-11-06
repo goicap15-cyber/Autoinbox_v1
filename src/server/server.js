@@ -2167,6 +2167,14 @@ wss.on('connection', (ws, req) => {
               ws.close(1000, 'ACCOUNT_REMOVED');
               break;
             }
+          } else if (!pending_key && !processManager.processes.has(String(account_id))) {
+            const activePendingKey = [...processManager.processes.entries()]
+              .find(([key, proc]) => key.startsWith('pending_') && proc?.status === 'RUNNING')?.[0];
+            if (activePendingKey) {
+              ownerUserId = pendingAccountOwners.get(activePendingKey) || markerOwnerUserId(activePendingKey) || ownerUserId;
+              readdPendingKey = activePendingKey;
+              console.log(`[WS] REGISTER_ACCOUNT: tự động gắn tài khoản ${account_id} vào phiên thêm mới đang mở ${activePendingKey}`);
+            }
           }
           if (pending_key) {
             db.prepare('DELETE FROM removed_accounts WHERE account_id = ?').run(String(account_id));
@@ -7908,7 +7916,7 @@ app.post('/api/accounts/new-session', async (req, res) => {
       pendingAccountOwners.delete(existingPendingKey);
       continue;
     }
-    processManager.unhideWindow(existingPendingKey);
+    await processManager.ensurePendingSessionReady(existingPendingKey);
     console.log(`[API] Reuse unfinished Facebook login session: ${existingPendingKey}`);
     return res.json({ success: true, pending_key: existingPendingKey, reused: true });
   }

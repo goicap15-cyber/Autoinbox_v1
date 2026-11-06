@@ -1296,6 +1296,7 @@ if (chrome?.cookies?.onChanged) {
   chrome.cookies.onChanged.addListener((changeInfo) => {
     if (changeInfo?.cookie?.name === 'xs' && !changeInfo.removed && changeInfo.cookie.value) {
       persistFacebookSessionCookies().catch(() => {});
+      checkFacebookCookiesAndRegister();
     }
   });
 }

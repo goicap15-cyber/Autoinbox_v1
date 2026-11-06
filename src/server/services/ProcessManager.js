@@ -451,6 +451,7 @@ class ProcessManager {
 
     const args = [
       ...this.getCommonChromeArgs(),
+      '--enable-unsafe-extension-debugging',
       `--user-data-dir=${nativeProfileDir}`,
       `--disable-extensions-except=${nativeExtPath}`,
       `--load-extension=${nativeExtPath}`,
@@ -493,6 +494,88 @@ class ProcessManager {
     try { child.unref(); } catch (_) {}
     console.log(`[ProcessManager] Đã mở Chrome trực tiếp (Direct Spawn --load-extension) [PID ${activePid}]: ${bundledExe}`);
     return { child, pid: activePid, exe: bundledExe };
+  }
+
+  async findCrmExtensionWorker(browser, waitMs = 2500) {
+    if (!browser || !browser.connected) return null;
+    const deadline = Date.now() + Math.max(200, waitMs);
+    while (Date.now() < deadline) {
+      try {
+        const targets = browser.targets() || [];
+        for (const t of targets) {
+          if (t.type() === 'service_worker' && String(t.url() || '').endsWith('/background.js')) {
+            const worker = await t.worker().catch(() => null);
+            if (!worker) continue;
+            const isCrm = await worker.evaluate(() => {
+              try {
+                const mf = chrome?.runtime?.getManifest?.();
+                return Boolean(mf && /AutoChatbot/i.test(mf.name || ''));
+              } catch (_) {
+                return false;
+              }
+            }).catch(() => false);
+            if (isCrm) return worker;
+          }
+        }
+      } catch (_) {}
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return null;
+  }
+
+  async ensureCrmExtensionLoaded(browser, nativeExtPath) {
+    let worker = await this.findCrmExtensionWorker(browser, 1800);
+    if (worker) return worker;
+    if (typeof browser?.installExtension === 'function') {
+      try {
+        await browser.installExtension(nativeExtPath);
+      } catch (e) {
+        console.warn('[ProcessManager] installExtension fallback warning:', e?.message || e);
+      }
+      worker = await this.findCrmExtensionWorker(browser, 2500);
+      if (worker) return worker;
+    }
+    throw new Error('Tiện ích CRM (AutoChatbot FB Engine) chưa được nạp vào Chrome');
+  }
+
+  async primePendingKeyInExtension(browser, pendingKey) {
+    if (!browser || !pendingKey) return false;
+    try {
+      const worker = await this.findCrmExtensionWorker(browser, 2500);
+      if (!worker) return false;
+      await worker.evaluate(async (key) => {
+        try {
+          if (typeof pending_key !== 'undefined') {
+            pending_key = key;
+          }
+          if (chrome?.storage?.local) {
+            await chrome.storage.local.set({ crm_pending_key: key });
+          }
+          if (typeof checkFacebookCookiesAndRegister === 'function') {
+            await checkFacebookCookiesAndRegister();
+          }
+        } catch (_) {}
+      }, String(pendingKey));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async ensurePendingSessionReady(pendingKey) {
+    const entry = this.processes.get(pendingKey);
+    if (!entry || this.getStatus(pendingKey) !== 'RUNNING') return false;
+    if (entry.browser?.connected) {
+      const worker = await this.findCrmExtensionWorker(entry.browser, 1200);
+      if (worker) {
+        await this.primePendingKeyInExtension(entry.browser, pendingKey);
+        await this.unhideWindow(pendingKey);
+        return true;
+      }
+    }
+    console.log(`[ProcessManager] Phiên pending ${pendingKey} thiếu tiện ích CRM -> khởi động lại Chrome trên cùng profile để nhận đăng nhập.`);
+    this.stopAccountProcess(pendingKey);
+    return this.startNewAccountProcess(pendingKey);
   }
 
   async launchBrowserWithExtension(absProfileDir, absExtPath) {
@@ -546,6 +629,7 @@ class ProcessManager {
           try { if (fs.existsSync(portFile)) fs.unlinkSync(portFile); } catch (_) {}
           const directChild = spawn(cand.exe, [
             ...baseArgs,
+            '--enable-unsafe-extension-debugging',
             `--user-data-dir=${nativeProfileDir}`,
             `--disable-extensions-except=${nativeExtPath}`,
             `--load-extension=${nativeExtPath}`,
@@ -575,23 +659,25 @@ class ProcessManager {
           browser = await puppeteer.connect({ browserWSEndpoint: wsUrl, defaultViewport: null });
           try { directChild.unref(); } catch (_) {}
           browser.process = () => directChild;
+          await this.ensureCrmExtensionLoaded(browser, nativeExtPath);
         } else {
           const launchArgs = cand.mode === 'flag'
-            ? [...baseArgs, `--disable-extensions-except=${nativeExtPath}`, `--load-extension=${nativeExtPath}`]
-            : baseArgs;
+            ? [...baseArgs, '--enable-unsafe-extension-debugging', `--disable-extensions-except=${nativeExtPath}`, `--load-extension=${nativeExtPath}`]
+            : [...baseArgs, '--enable-unsafe-extension-debugging'];
           browser = await launchWithVisibleSpawn(() => puppeteer.launch({
             executablePath: cand.exe,
             headless: false,
             pipe: cand.pipe !== false,
-            ignoreDefaultArgs: ['--enable-automation'],
+            ignoreDefaultArgs: ['--enable-automation', '--disable-extensions'],
             userDataDir: nativeProfileDir,
             defaultViewport: null,
-            enableExtensions: cand.mode === 'cdp',
+            enableExtensions: true,
             args: launchArgs
           }));
           if (cand.mode === 'cdp') {
             await browser.installExtension(nativeExtPath);
           }
+          await this.ensureCrmExtensionLoaded(browser, nativeExtPath);
         }
         this.lastLaunchError = null;
         console.log(`[ProcessManager] Đã mở thành công qua ${cand.label}: ${cand.exe}`);
@@ -1000,27 +1086,14 @@ class ProcessManager {
     // of launching another browser against the same user-data directory.
     const runningProfilePid = findBundledChromePidByProfile(absProfileDir, chromeExecutable);
     if (runningProfilePid) {
-      this.processes.set(pendingKey, { launchedByThisRun: true,
-        process: null,
-        browser: null,
-        profileDir: absProfileDir,
-        pid: runningProfilePid,
-        status: 'RUNNING',
-        displayMode: 'VISIBLE'
-      });
-      this.unhideWindow(pendingKey);
-      // Chrome can outlive the backend. Reopening the exact setup URL lets
-      // the extension capture the ownership token again after a restart.
-      try {
-        spawn(chromeExecutable, [
-          `--user-data-dir=${absProfileDir}`,
-          setupUrl
-        ], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
-      } catch (error) {
-        console.warn(`[ProcessManager] Không thể khôi phục URL liên kết cho ${pendingKey}:`, error.message);
+      console.log(`[ProcessManager] Đóng Chrome pending cũ (PID ${runningProfilePid}) của ${pendingKey} để khởi chạy lại kèm tiện ích CRM...`);
+      if (process.platform === 'win32') {
+        const stillAlive = closeChromePidsGracefullySync([runningProfilePid], 2500);
+        for (const pid of stillAlive) {
+          spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+        }
       }
-      console.log(`[ProcessManager] Reused pending Chrome ${pendingKey} (PID ${runningProfilePid}).`);
-      return true;
+      await this.cleanupFailedCandidateProfileLock(profileDir, chromeExecutable);
     }
 
     suppressCrashRestoreBubble(profileDir);
@@ -1054,6 +1127,8 @@ class ProcessManager {
         displayMode: 'VISIBLE'
       });
 
+      await this.primePendingKeyInExtension(browser, pendingKey);
+
       // launch() installs the extension first; only then open Facebook so the
       // pending-key capture runs on the first Facebook document.
       const pages = await browser.pages();
@@ -1067,6 +1142,8 @@ class ProcessManager {
           }
         } catch (_) {}
       });
+
+      await this.primePendingKeyInExtension(browser, pendingKey);
 
       console.log(`[ProcessManager] Chrome Stable [PID ${child.pid}] đã tự cài extension và mở Facebook.`);
       return true;
