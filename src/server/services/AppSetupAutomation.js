@@ -8,10 +8,12 @@
 //    mật khẩu → điền vào form xác nhận và bấm "Gửi". Mật khẩu KHÔNG lưu lại.
 // Mọi nút bấm bắt theo text đa ngôn ngữ + role, không dùng class tự sinh của FB.
 const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
-const { resolveChromePath } = require('../../../chrome-bundling/resolveChromePath');
+const { execFile, spawn, spawnSync } = require('child_process');
+const { resolveChromePath, findSystemChromePath } = require('../../../chrome-bundling/resolveChromePath');
 const { resolveBinRoot, loadPuppeteer } = require('../utils/appResourceRoot');
+const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 // Bộ quét Fanpage (UMD — chạy được cả trong Node): bóc JSON Comet từ HTML facebook.com/pages
 const FbPageDiscovery = require('../../extension/pageDiscovery');
 
@@ -31,6 +33,7 @@ function getPuppeteer() {
 // - dataDir                   : thư mục lưu screenshot debug
 const DEPS = {
   getCookies: async () => [],
+  saveCookies: () => {},
   getOrCreateVerifyToken: () => '',
   recordRun: () => {},
   upsertPages: () => {},
@@ -57,45 +60,177 @@ function configurePageSetupAutomation(deps = {}) {
 
 // Chrome thật (headful) cho tự động hóa: ưu tiên Chrome bundled của dự án,
 // fallback Chrome cài sẵn trên máy — giống đúng cách ProcessManager chạy Chrome.
+function cleanupOldAutomationProfiles() {
+  try {
+    const profilesRoot = path.join(APP_DATA_ROOT, 'profiles');
+    if (!fs.existsSync(profilesRoot)) return;
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const entry of fs.readdirSync(profilesRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('page_auto_')) continue;
+      const full = path.join(profilesRoot, entry.name);
+      try {
+        const st = fs.statSync(full);
+        if (st.mtimeMs < cutoff) fs.rmSync(full, { recursive: true, force: true });
+      } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+async function spawnVisibleChromeAndConnect(puppeteer, exePath, baseArgs) {
+  const profilesRoot = path.join(APP_DATA_ROOT, 'profiles');
+  fs.mkdirSync(profilesRoot, { recursive: true });
+  const profileDir = path.join(profilesRoot, `page_auto_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
+  fs.mkdirSync(profileDir, { recursive: true });
+
+  const child = spawn(exePath, [
+    ...baseArgs,
+    `--user-data-dir=${path.resolve(profileDir)}`,
+    '--remote-debugging-port=0',
+    'about:blank',
+  ], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: false,
+  });
+
+  let spawnError = null;
+  child.once('error', (e) => { spawnError = e; });
+
+  const portFile = path.join(profileDir, 'DevToolsActivePort');
+  let wsEndpoint = null;
+  const deadline = Date.now() + 14000;
+  while (Date.now() < deadline) {
+    if (spawnError) throw spawnError;
+    if (fs.existsSync(portFile)) {
+      try {
+        const lines = fs.readFileSync(portFile, 'utf8').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+        if (lines.length >= 2 && Number(lines[0]) > 0) {
+          wsEndpoint = `ws://127.0.0.1:${lines[0]}${lines[1]}`;
+          break;
+        }
+      } catch (_) {}
+    }
+    await new Promise((r) => setTimeout(r, 120));
+  }
+
+  if (!wsEndpoint) {
+    try {
+      if (child.pid && process.platform === 'win32') {
+        spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+      }
+    } catch (_) {}
+    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch (_) {}
+    throw new Error(`Chrome không tạo được cổng DevToolsActivePort (exe: ${exePath})`);
+  }
+
+  const browser = await puppeteer.connect({
+    browserWSEndpoint: wsEndpoint,
+    defaultViewport: null,
+  });
+
+  try { child.unref(); } catch (_) {}
+  browser._spawnedChild = child;
+  browser._autoProfileDir = profileDir;
+  browser.process = () => child;
+  const origClose = browser.close.bind(browser);
+  browser.close = async () => {
+    try { await origClose(); } catch (_) {}
+    await new Promise((r) => setTimeout(r, 250));
+    if (child.pid && process.platform === 'win32') {
+      try {
+        process.kill(child.pid, 0);
+        spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+      } catch (_) {}
+    }
+    setTimeout(() => {
+      try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch (_) {}
+    }, 600);
+  };
+
+  if (child.pid) {
+    setTimeout(() => showAutomationWindows(child.pid), 350);
+    setTimeout(() => showAutomationWindows(child.pid), 1200);
+  }
+  return browser;
+}
+
 async function launchAutomationChrome() {
-  // Chạy ngầm (SW_HIDE) cần bộ args chống-throttle y như ProcessManager dùng
-  // cho Chrome CRM ẩn: thiếu chúng thì Chrome đánh dấu cửa sổ occluded,
-  // renderer bị throttle, FB render lười (IntersectionObserver) không vẽ ra
-  // DOM option Use cases → automation "không bắt được" phần tử (reproduce
-  // 03-11: quét 90s không thấy "Khác/Other"). CalculateNativeWinOcclusion tắt
-  // luôn việc đo occlusion để trang coi cửa sổ ẩn như đang hiển thị.
+  cleanupOldAutomationProfiles();
   const args = [
     '--no-sandbox',
+    '--disable-setuid-sandbox',
     '--lang=vi-VN',
-    '--window-size=1200,860',
+    '--window-size=1240,880',
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',
     '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion',
     '--hide-crash-restore-bubble',
+    '--disable-session-crashed-bubble',
     '--no-first-run',
     '--no-default-browser-check',
   ];
-  const base = { headless: false, args, defaultViewport: null };
-  let exe = null;
-  try {
-    exe = resolveChromePath({ repoRoot: resolveBinRoot() });
-  } catch (_) { /* bỏ qua, dùng fallback dưới */ }
-  const candidates = [
-    ...(exe ? [{ ...base, executablePath: exe }] : []),
-    base,
-    { ...base, channel: 'chrome' },
-    { ...base, executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' },
-  ];
+
   const puppeteer = await getPuppeteer();
-  let lastErr = null;
-  for (const opt of candidates) {
+  const binRoot = resolveBinRoot();
+  const legacyBin = path.join(binRoot, 'bin', 'chrome-win', 'chrome.exe');
+  let bundledExe = null;
+  try {
+    bundledExe = resolveChromePath({ repoRoot: binRoot, legacyBinChromePath: legacyBin, preferSystemChrome: false });
+  } catch (_) {}
+  const sysExe = findSystemChromePath();
+
+  const exeList = [];
+  if (bundledExe && fs.existsSync(bundledExe)) exeList.push(bundledExe);
+  if (sysExe && fs.existsSync(sysExe) && !exeList.includes(sysExe)) exeList.push(sysExe);
+
+  const errors = [];
+
+  // 1) Ưu tiên mở trực tiếp qua spawn (windowsHide: false) + kết nối DevToolsActivePort
+  //    Hoạt động 100% trên mọi máy khách Windows kể cả khi @puppeteer/browsers ẩn cửa sổ hoặc lỗi pipe
+  for (const exe of exeList) {
     try {
-      const browser = await puppeteer.launch(opt);
+      const browser = await spawnVisibleChromeAndConnect(puppeteer, exe, args);
+      DEPS.log(`Đã mở Chrome tự động hóa (Direct Spawn) thành công: ${exe}`);
       return browser;
-    } catch (e) { lastErr = e; }
+    } catch (e) {
+      errors.push(`DirectSpawn(${path.basename(exe)}): ${e?.message || e}`);
+    }
   }
-  throw lastErr || new Error('Không khởi động được Chrome để tự động hóa.');
+
+  // 2) Dự phòng qua puppeteer.launch (cả pipe: true và pipe: false) với profile riêng trong APP_DATA_ROOT
+  const launchCandidates = [];
+  for (const exe of exeList) {
+    launchCandidates.push({ executablePath: exe, pipe: true });
+    launchCandidates.push({ executablePath: exe, pipe: false });
+  }
+  launchCandidates.push({ channel: 'chrome', pipe: true });
+
+  for (const cand of launchCandidates) {
+    const fallbackProfile = path.join(APP_DATA_ROOT, 'profiles', `page_auto_pup_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+    try {
+      fs.mkdirSync(fallbackProfile, { recursive: true });
+      const browser = await puppeteer.launch({
+        headless: false,
+        defaultViewport: null,
+        ignoreDefaultArgs: ['--enable-automation'],
+        userDataDir: fallbackProfile,
+        args,
+        ...cand,
+      });
+      const pid = browser.process?.()?.pid;
+      if (pid) {
+        setTimeout(() => showAutomationWindows(pid), 350);
+        setTimeout(() => showAutomationWindows(pid), 1200);
+      }
+      return browser;
+    } catch (e) {
+      errors.push(`PuppeteerLaunch: ${e?.message || e}`);
+      try { fs.rmSync(fallbackProfile, { recursive: true, force: true }); } catch (_) {}
+    }
+  }
+
+  throw new Error('Không khởi động được Chrome tự động hóa: ' + (errors.join(' | ') || 'Không tìm thấy Chrome'));
 }
 
 // Chrome automation "chạy ngầm": ẩn cửa sổ bằng SW_HIDE ngay sau khi launch —
@@ -508,14 +643,73 @@ async function fillContactEmail(page, email) {
   await typeIntoTaggedInput(page, 'contact-email', email);
 }
 
-// Lấy cookie Facebook của account từ Chrome thật (extension gửi về) — dùng chung cho 3 luồng
+// Lấy cookie Facebook của account (nếu chưa có sẵn trên máy khách thì trả mảng rỗng
+// để vẫn mở Chrome cho người dùng đăng nhập trực tiếp rồi lưu cookie tự động).
 async function ensureAccountCookies(job, uid) {
-  setStatus(job, 'restoring', 'Đang nạp cookie phiên đăng nhập của tài khoản…');
-  const cookies = await DEPS.getCookies(uid);
-  if (!cookies || !cookies.length) {
-    throw new Error('Không lấy được cookie Facebook từ Chrome của tài khoản. Hãy đảm bảo Chrome của account đang chạy và đã đăng nhập Facebook.');
+  setStatus(job, 'restoring', 'Đang kiểm tra phiên đăng nhập của tài khoản…');
+  try {
+    const cookies = await DEPS.getCookies(uid);
+    if (Array.isArray(cookies) && cookies.length) return cookies;
+  } catch (e) {
+    try { DEPS.log(`Chưa có sẵn cookie của ${uid} (${e?.message || e}) — sẽ mở Chrome để kiểm tra/đăng nhập trực tiếp.`); } catch (_) {}
   }
-  return cookies;
+  return [];
+}
+
+async function getPrimaryAutomationPage(browser) {
+  try {
+    const pages = await browser.pages();
+    if (pages && pages.length > 0) return pages[0];
+  } catch (_) {}
+  return browser.newPage();
+}
+
+function isFacebookLoginUrl(rawUrl) {
+  return /log_in|login\.php|facebook\.com\/login/i.test(String(rawUrl || ''));
+}
+
+// Nếu phiên cookie trống hoặc đã hết hạn (rơi vào trang login), giữ cửa sổ Chrome mở
+// nổi lên trước mặt người dùng, chờ đăng nhập (tối đa 3 phút), lưu lại cookie vào DB
+// rồi điều hướng tiếp tới targetUrl!
+async function ensureLoggedInDevelopersPage(job, page, uid, targetUrl, sessionCookies) {
+  if (!isFacebookLoginUrl(page.url()) && Array.isArray(sessionCookies) && sessionCookies.length > 0) {
+    const checkCookies = await page.cookies('https://www.facebook.com', 'https://developers.facebook.com').catch(() => []);
+    if (checkCookies.some((c) => c.name === 'c_user' && c.value)) {
+      return;
+    }
+  }
+  if (!isFacebookLoginUrl(page.url())) {
+    const hasSession = (await page.cookies('https://www.facebook.com').catch(() => [])).some((c) => c.name === 'c_user' && c.value);
+    if (hasSession) return;
+    await page.goto('https://www.facebook.com/login.php?next=' + encodeURIComponent(targetUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+  }
+
+  try {
+    const pid = job.browser?.process?.()?.pid;
+    if (pid) showAutomationWindows(pid);
+  } catch (_) {}
+
+  setStatus(job, 'waiting_login', 'Cửa sổ Chrome đã mở — vui lòng đăng nhập Facebook trong Chrome (xong hệ thống sẽ tự lưu phiên và chạy tiếp)…');
+
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    if (['error', 'success'].includes(job.status)) throw new Error('Đã hủy tác vụ.');
+    const curUrl = page.url() || '';
+    const fbCookies = await page.cookies('https://www.facebook.com', 'https://developers.facebook.com').catch(() => []);
+    const hasCUser = fbCookies.some((c) => c.name === 'c_user' && String(c.value || '').trim() && String(c.value) !== '0');
+    const hasXs = fbCookies.some((c) => c.name === 'xs' && String(c.value || '').trim());
+    if (hasCUser && hasXs && !isFacebookLoginUrl(curUrl) && !/checkpoint|two_step_verification|twofactor/i.test(curUrl)) {
+      try { DEPS.saveCookies(uid, fbCookies); } catch (_) {}
+      if (Array.isArray(sessionCookies)) {
+        sessionCookies.splice(0, sessionCookies.length, ...fbCookies);
+      }
+      setStatus(job, 'loading_apps', 'Đã nhận phiên đăng nhập Facebook — đang mở trang cấu hình…');
+      await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+      return;
+    }
+    await sleep(1500);
+  }
+  throw new Error('Quá thời gian chờ đăng nhập Facebook trong Chrome (3 phút). Hãy thử lại.');
 }
 
 /* ---------- Luồng chính ---------- */
@@ -538,21 +732,21 @@ async function run(job, uid, appName, email) {
     }
   });
 
-  const page = await browser.newPage();
+  const page = await getPrimaryAutomationPage(browser);
   job.page = page;
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
 
-  await injectSession(page, { cookies: sessionCookies });
+  if (sessionCookies.length) {
+    await injectSession(page, { cookies: sessionCookies });
+  }
 
   // MỖI LẦN CHẠY = TẠO MỘT APP MỚI (không tái sử dụng app cũ)
   let appId = null;
 
   setStatus(job, 'loading_apps', 'Đang mở Developers Facebook…');
   await page.goto(APPS_URL, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login\.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM rồi đồng bộ lại.');
-  }
+  await ensureLoggedInDevelopersPage(job, page, uid, APPS_URL, sessionCookies);
 
   // TRƯỜNG HỢP 1: tài khoản FB mới — chưa đăng ký developer → chạy luồng đăng ký trước
   if (await needsDeveloperRegistration(page)) {
@@ -560,23 +754,26 @@ async function run(job, uid, appName, email) {
     // Đăng ký xong → vào lại danh sách ứng dụng để tạo app
     setStatus(job, 'loading_apps', 'Đăng ký developer xong — đang mở danh sách ứng dụng…');
     await page.goto(APPS_URL, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-    if (/log_in|login\.php/.test(page.url() || '')) {
-      throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM.');
-    }
+    await ensureLoggedInDevelopersPage(job, page, uid, APPS_URL, sessionCookies);
   }
   // TRƯỜNG HỢP 2: tài khoản đã đăng ký — đi thẳng vào wizard tạo app (phần dưới)
 
-  setStatus(job, 'finding_create', 'Đang tìm nút "Tạo ứng dụng"…');
+  setStatus(job, 'finding_create', 'Đang mở trang Tạo ứng dụng…');
   const link = await page
-    .waitForSelector('a[href*="/apps/creation"]', { timeout: 60000 })
+    .waitForSelector('a[href*="/apps/creation"]', { timeout: 12000 })
     .catch(() => null);
-  if (!link) {
-    throw new Error('Không thấy nút "Tạo ứng dụng" trên trang Ứng dụng. Bạn có thể tự bấm trong Chrome.');
+  if (link) {
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {}),
+      link.click().catch(() => page.evaluate((el) => el.click(), link)),
+    ]);
+  } else {
+    const clickedBtn = await clickMatching(page, '^(?:tạo ứng dụng|create app)$', '[role="button"], button, a');
+    if (clickedBtn) await sleep(2500);
+    if (!/\/apps\/creation/i.test(page.url() || '')) {
+      await page.goto('https://developers.facebook.com/apps/creation/', { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+    }
   }
-  await Promise.all([
-    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {}),
-    link.click().catch(() => page.evaluate((el) => el.click(), link)),
-  ]);
 
   setStatus(job, 'filling', 'Đang điền Tên ứng dụng & Email liên hệ…');
   const result = await pollAndFill(page, appName, email);
@@ -1874,10 +2071,9 @@ async function subscribeAppToPageObject(job, page) {
   setStatus(job, 'subscribing_object', 'Đang đăng ký app với đối tượng Page (trang Webhooks)…');
   // Deep link ?view=page — vào THẲNG object Page (không có param là rơi object
   // khác → "vào sai trang", báo lỗi 2026-10-06).
-  await page.goto('https://developers.facebook.com/apps/' + job.appId + '/webhooks/?view=page', { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong Chrome của account rồi chạy lại.');
-  }
+  const webhooksUrl = 'https://developers.facebook.com/apps/' + job.appId + '/webhooks/?view=page';
+  await page.goto(webhooksUrl, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+  await ensureLoggedInDevelopersPage(job, page, job.uid, webhooksUrl, null);
   await sleep(4000);
 
   // Trang hay tự mở dialog "Đặt cấu hình webhook" đè lên bảng trường → đóng nó
@@ -2219,19 +2415,19 @@ async function runDelete(job, uid, appId) {
     if (!['success', 'error'].includes(job.status)) failSoft(job, 'Cửa sổ Chrome đã bị đóng.');
   });
 
-  const page = await browser.newPage();
+  const page = await getPrimaryAutomationPage(browser);
   job.page = page;
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
 
-  await injectSession(page, { cookies: sessionCookies });
+  if (sessionCookies.length) {
+    await injectSession(page, { cookies: sessionCookies });
+  }
 
   // Vào trang DANH SÁCH ứng dụng — mỗi app có menu ⋯ riêng ở đó
   setStatus(job, 'loading_apps', 'Đang mở danh sách ứng dụng…');
   await page.goto('https://developers.facebook.com/apps/', { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM.');
-  }
+  await ensureLoggedInDevelopersPage(job, page, uid, 'https://developers.facebook.com/apps/', sessionCookies);
 
   // Tìm đúng card chứa App ID rồi lấy menu ⋯ của app đó
   setStatus(job, 'finding_menu', `Đang tìm ứng dụng ${appId} và mở menu ⋯…`);
@@ -2467,18 +2663,19 @@ async function runPageSetup(job, uid) {
     if (!['success', 'error'].includes(job.status)) failSoft(job, 'Cửa sổ Chrome đã bị đóng.');
   });
 
-  const page = await browser.newPage();
+  const page = await getPrimaryAutomationPage(browser);
   job.page = page;
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
 
-  await injectSession(page, { cookies: sessionCookies });
-
-  setStatus(job, 'loading_apps', 'Đang mở trang Cài đặt API Messenger (chỗ lấy token)…');
-  await page.goto(`https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login\.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM.');
+  if (sessionCookies.length) {
+    await injectSession(page, { cookies: sessionCookies });
   }
+
+  const settingsUrl = `https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`;
+  setStatus(job, 'loading_apps', 'Đang mở trang Cài đặt API Messenger (chỗ lấy token)…');
+  await page.goto(settingsUrl, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+  await ensureLoggedInDevelopersPage(job, page, uid, settingsUrl, sessionCookies);
 
   // Đảm bảo đang ở đúng trang messenger_api_settings (không nhảy sang /webhooks/?view=page)
   if (!/messenger_api_settings/.test(page.url() || '')) {
@@ -3072,18 +3269,19 @@ async function runPageSync(job, uid) {
     job.browser = null;
     if (!['success', 'error'].includes(job.status)) failSoft(job, 'Cửa sổ Chrome đã bị đóng.');
   });
-  const page = await browser.newPage();
+  const page = await getPrimaryAutomationPage(browser);
   job.page = page;
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
-  await injectSession(page, { cookies: sessionCookies });
+  if (sessionCookies.length) {
+    await injectSession(page, { cookies: sessionCookies });
+  }
 
   // Vào messenger_api_settings của app — bảng "Tạo mã truy cập" liệt kê MỌI page
+  const syncSettingsUrl = 'https://developers.facebook.com/apps/' + job.appId + '/messenger/messenger_api_settings/';
   setStatus(job, 'scanning', 'Đang mở Cài đặt API Messenger…');
-  await page.goto('https://developers.facebook.com/apps/' + job.appId + '/messenger/messenger_api_settings/', { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login\.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong Chrome của account rồi chạy lại.');
-  }
+  await page.goto(syncSettingsUrl, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+  await ensureLoggedInDevelopersPage(job, page, uid, syncSettingsUrl, sessionCookies);
   await sleep(3500);
 
   // Bấm nút "more"/"Xem thêm" mở rộng bảng page
@@ -3237,17 +3435,17 @@ async function runAppsScan(job, uid) {
     job.browser = null;
     if (!['success', 'error'].includes(job.status)) failSoft(job, 'Cửa sổ Chrome đã bị đóng.');
   });
-  const page = await browser.newPage();
+  const page = await getPrimaryAutomationPage(browser);
   job.page = page;
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
-  await injectSession(page, { cookies: sessionCookies });
+  if (sessionCookies.length) {
+    await injectSession(page, { cookies: sessionCookies });
+  }
 
   setStatus(job, 'loading_apps', 'Đang mở danh sách ứng dụng…');
   await page.goto(APPS_URL, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login\.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM rồi chạy lại.');
-  }
+  await ensureLoggedInDevelopersPage(job, page, uid, APPS_URL, sessionCookies);
   await page
     .waitForSelector('a[href*="/apps/"]', { timeout: 30000 })
     .catch(() => {});

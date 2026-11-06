@@ -1490,6 +1490,7 @@ function saveAccountCookies(accountId, cookies) {
       secure: c.secure !== false,
       httpOnly: Boolean(c.httpOnly)
     }));
+    db.exec('CREATE TABLE IF NOT EXISTS page_api_config (key TEXT PRIMARY KEY, value TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)');
     db.prepare(`
       INSERT INTO page_api_config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
@@ -1634,28 +1635,16 @@ function readCookiesFromProfileDisk(accountId) {
   return null;
 }
 
-async function requestExtensionCookies(accountId, timeoutMs = 4000) {
+async function requestExtensionCookies(accountId, timeoutMs = 4500) {
   const accId = String(accountId);
 
-  // 1) Đọc trực tiếp qua CDP nếu Chrome của account đang gắn với ProcessManager (nhanh <10ms, không qua WS)
+  // 1) Đọc trực tiếp qua CDP nếu Chrome của account đang gắn với ProcessManager (nhanh <10ms)
   const cdpCookies = await getCookiesViaCdp(accId);
   if (cdpCookies && cdpCookies.length) {
     return cdpCookies;
   }
 
-  // 2) Lấy ngay từ kho cookie đã lưu sẵn trong DB (fb_cookies:<accountId>) — không cần mở Chrome
-  const savedCookies = loadSavedAccountCookies(accId);
-  if (savedCookies && savedCookies.length) {
-    return savedCookies;
-  }
-
-  // 3) Giải mã trực tiếp từ file Cookies trong profile_dir trên ổ cứng (khi Chrome của account đang tắt)
-  const diskCookies = readCookiesFromProfileDisk(accId);
-  if (diskCookies && diskCookies.length) {
-    return diskCookies;
-  }
-
-  // 4) Nếu Chrome đang mở từ phiên trước (file Cookies bị khóa nhưng WS đang kết nối), hỏi nhanh qua WS (không bao giờ tự mở lại Chrome)
+  // 2) Nếu tiện ích Chrome đang mở kết nối WS, hỏi cookie sống trực tiếp trước để luôn mới nhất
   const ws = extensionConnections.get(accId);
   if (ws && ws.readyState === WebSocket.OPEN) {
     try {
@@ -1675,13 +1664,26 @@ async function requestExtensionCookies(accountId, timeoutMs = 4000) {
     } catch (_) {}
   }
 
-  throw new Error('Chưa có dữ liệu cookie của tài khoản này. Vui lòng kết nối tài khoản Facebook một lần để hệ thống lưu cookie.');
+  // 3) Lấy từ kho cookie đã lưu sẵn trong DB (fb_cookies:<accountId>)
+  const savedCookies = loadSavedAccountCookies(accId);
+  if (savedCookies && savedCookies.length) {
+    return savedCookies;
+  }
+
+  // 4) Giải mã trực tiếp từ file Cookies trong profile_dir trên ổ cứng (khi Chrome của account đang tắt)
+  const diskCookies = readCookiesFromProfileDisk(accId);
+  if (diskCookies && diskCookies.length) {
+    return diskCookies;
+  }
+
+  throw new Error('Chưa có dữ liệu cookie của tài khoản này.');
 }
 
 // Bơm phụ thuộc cho tự động hóa tạo app: cookie từ extension, trạng thái ra
 // socket.io, dữ liệu page/app lưu qua PageApiService (KV page_api_config + inbox_sources)
 setupAutomation.configurePageSetupAutomation({
   getCookies: (accountId) => requestExtensionCookies(accountId),
+  saveCookies: (accountId, cookies) => saveAccountCookies(accountId, cookies),
   getOrCreateVerifyToken: () => pageApiService.getOrCreateVerifyToken(),
   recordRun: (status, note) => {
     try { appendRotating(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status, note: String(note || '').slice(0, 300) }) + '\n', 10 * 1024 * 1024); } catch (_) {}
@@ -2181,7 +2183,16 @@ wss.on('connection', (ws, req) => {
             }
             try { previousExtension.close(1000, 'SUPERSEDED_CONNECTION'); } catch (_) {}
           }
-          extensionConnections.set(account_id, ws);
+          extensionConnections.set(String(account_id), ws);
+          if (!isSameConnection && ws.readyState === WebSocket.OPEN) {
+            setTimeout(() => {
+              try {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'GET_FB_COOKIES', data: { request_id: 'auto_' + Date.now() } }));
+                }
+              } catch (_) {}
+            }, 1200);
+          }
           const existingDisconnectTimer = disconnectGraceTimers.get(String(account_id));
           if (existingDisconnectTimer) {
             clearTimeout(existingDisconnectTimer);

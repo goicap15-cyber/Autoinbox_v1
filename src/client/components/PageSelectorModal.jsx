@@ -127,13 +127,22 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
 
   const pollStatus = async () => {
     try {
-      const res = await fetch('/api/page-api/sync-status');
+      const curSyncId = jobRef.current?.sync_id || '';
+      const qs = curSyncId ? `?sync_id=${encodeURIComponent(curSyncId)}` : '';
+      const res = await fetch(`/api/page-api/sync-status${qs}`);
       const data = await res.json();
       if (res.ok && data.success) {
         const j = data.job;
         if (!j) { setJob(null); return null; }
-        if (String(j.account_id) !== accountId) { return null; } // job của account khác
+        if (j.account_id && String(j.account_id) !== accountId) { return null; }
         setJob(j);
+        if (['success', 'error'].includes(j.status)) {
+          loadPages();
+          onSourcesChanged?.();
+          if (j.status === 'success') setSuccessMsg(j.message || 'Hoàn tất.');
+          if (j.status === 'error') setErrorMsg(j.error || j.message || 'Lỗi không rõ.');
+          setTimeout(() => setJob(null), 4000);
+        }
         return j;
       }
     } catch (_) {}
@@ -552,7 +561,11 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
               <strong className="text-[var(--color-text-primary,#f8fafc)]">Đang chạy:</strong>{' '}
               {job.message || job.status}
             </span>
-            <button onClick={cancelJob} className="text-[10px] px-2 py-1 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors shrink-0">
+            <button type="button" onClick={() => fetch('/api/page-api/chrome-visibility', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ visible: true }) }).catch(() => {})}
+              className="text-[10px] px-2 py-1 rounded-lg bg-sky-500/15 text-sky-300 border border-sky-500/30 hover:bg-sky-500/25 transition-colors shrink-0">
+              Hiện Chrome
+            </button>
+            <button type="button" onClick={cancelJob} className="text-[10px] px-2 py-1 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors shrink-0">
               Hủy
             </button>
           </div>

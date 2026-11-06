@@ -509,6 +509,7 @@ class ProcessManager {
 
     const candidates = [];
     if (bundledExe && fs.existsSync(bundledExe)) {
+      candidates.push({ label: 'Bundled Chrome (Direct Spawn + DevToolsActivePort)', exe: bundledExe, mode: 'direct-connect', pipe: false });
       candidates.push({ label: 'Bundled Chrome (CDP installExtension)', exe: bundledExe, mode: 'cdp', pipe: true });
       candidates.push({ label: 'Bundled Chrome (--load-extension)', exe: bundledExe, mode: 'flag', pipe: true });
       candidates.push({ label: 'Bundled Chrome (WebSocket --load-extension)', exe: bundledExe, mode: 'flag', pipe: false });
@@ -524,21 +525,57 @@ class ProcessManager {
     for (const cand of candidates) {
       let browser = null;
       try {
-        const launchArgs = cand.mode === 'flag'
-          ? [...baseArgs, `--disable-extensions-except=${nativeExtPath}`, `--load-extension=${nativeExtPath}`]
-          : baseArgs;
-        browser = await puppeteer.launch({
-          executablePath: cand.exe,
-          headless: false,
-          pipe: cand.pipe !== false,
-          ignoreDefaultArgs: ['--enable-automation'],
-          userDataDir: nativeProfileDir,
-          defaultViewport: null,
-          enableExtensions: cand.mode === 'cdp',
-          args: launchArgs
-        });
-        if (cand.mode === 'cdp') {
-          await browser.installExtension(nativeExtPath);
+        if (cand.mode === 'direct-connect') {
+          const portFile = path.join(nativeProfileDir, 'DevToolsActivePort');
+          try { if (fs.existsSync(portFile)) fs.unlinkSync(portFile); } catch (_) {}
+          const directChild = spawn(cand.exe, [
+            ...baseArgs,
+            `--user-data-dir=${nativeProfileDir}`,
+            `--disable-extensions-except=${nativeExtPath}`,
+            `--load-extension=${nativeExtPath}`,
+            '--remote-debugging-port=0',
+            'about:blank'
+          ], { detached: true, stdio: 'ignore', windowsHide: false });
+          let wsUrl = null;
+          const dl = Date.now() + 12000;
+          while (Date.now() < dl) {
+            if (fs.existsSync(portFile)) {
+              try {
+                const lines = fs.readFileSync(portFile, 'utf8').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+                if (lines.length >= 2 && Number(lines[0]) > 0) {
+                  wsUrl = `ws://127.0.0.1:${lines[0]}${lines[1]}`;
+                  break;
+                }
+              } catch (_) {}
+            }
+            await new Promise((r) => setTimeout(r, 120));
+          }
+          if (!wsUrl) {
+            if (directChild.pid && process.platform === 'win32') {
+              spawnSync('taskkill.exe', ['/PID', String(directChild.pid), '/T', '/F'], { windowsHide: true });
+            }
+            throw new Error('Không đọc được DevToolsActivePort sau khi mở Chrome');
+          }
+          browser = await puppeteer.connect({ browserWSEndpoint: wsUrl, defaultViewport: null });
+          try { directChild.unref(); } catch (_) {}
+          browser.process = () => directChild;
+        } else {
+          const launchArgs = cand.mode === 'flag'
+            ? [...baseArgs, `--disable-extensions-except=${nativeExtPath}`, `--load-extension=${nativeExtPath}`]
+            : baseArgs;
+          browser = await puppeteer.launch({
+            executablePath: cand.exe,
+            headless: false,
+            pipe: cand.pipe !== false,
+            ignoreDefaultArgs: ['--enable-automation'],
+            userDataDir: nativeProfileDir,
+            defaultViewport: null,
+            enableExtensions: cand.mode === 'cdp',
+            args: launchArgs
+          });
+          if (cand.mode === 'cdp') {
+            await browser.installExtension(nativeExtPath);
+          }
         }
         this.lastLaunchError = null;
         console.log(`[ProcessManager] Đã mở thành công qua ${cand.label}: ${cand.exe}`);
