@@ -3,7 +3,7 @@ const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const { resolveChromePath, findSystemChromePath } = require('../../../chrome-bundling/resolveChromePath');
-const { resolveExtensionPath, resolveBinRoot } = require('../utils/appResourceRoot');
+const { resolveExtensionPath, resolveBinRoot, loadPuppeteer } = require('../utils/appResourceRoot');
 const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 
 // Older databases store Chrome profiles as repo-relative paths such as
@@ -47,16 +47,8 @@ function resolveAccountProfileDir(storedProfileDir, accountId) {
 
 // puppeteer-core v25 is ESM. Load it through the supported CommonJS-to-ESM
 // bridge only when a managed Chrome process is actually started.
-let puppeteerPromise = null;
 function getPuppeteer() {
-  if (!puppeteerPromise) {
-    let target = 'puppeteer-core';
-    try {
-      target = require('url').pathToFileURL(require.resolve('puppeteer-core')).href;
-    } catch (_) {}
-    puppeteerPromise = import(target).then((module) => module.default || module);
-  }
-  return puppeteerPromise;
+  return loadPuppeteer();
 }
 
 // Ẩn Chrome chạy ngầm: ShowWindow(0) trước để Windows Shell gỡ nút taskbar
@@ -382,9 +374,13 @@ class ProcessManager {
     });
   }
 
-  async launchBrowserWithExtension(absProfileDir, absExtPath) {
-    const puppeteer = await getPuppeteer();
-    const baseArgs = [
+  refreshResourcePaths() {
+    this.extensionPath = resolveExtensionPath();
+    this.binChromePath = path.join(resolveBinRoot(), 'bin', 'chrome-win', 'chrome.exe');
+  }
+
+  getCommonChromeArgs() {
+    return [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--hide-crash-restore-bubble',
@@ -401,7 +397,109 @@ class ProcessManager {
       '--disable-notifications',
       '--autoplay-policy=no-user-gesture-required'
     ];
+  }
 
+  async cleanupFailedCandidateProfileLock(nativeProfileDir, exePath) {
+    await new Promise((r) => setTimeout(r, 450));
+    try {
+      const slashProfile = String(nativeProfileDir || '').replace(/\\/g, '/');
+      const lingeringPid = findBundledChromePidByProfile(slashProfile, exePath);
+      if (lingeringPid && process.platform === 'win32') {
+        spawnSync('taskkill.exe', ['/PID', String(lingeringPid), '/T', '/F'], { windowsHide: true });
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      for (const lockName of ['lockfile', 'SingletonLock']) {
+        const lockPath = path.join(nativeProfileDir, lockName);
+        if (fs.existsSync(lockPath)) {
+          try { fs.unlinkSync(lockPath); } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+
+  async spawnDirectChromeWithExtension(nativeProfileDir, nativeExtPath, initialUrl) {
+    this.refreshResourcePaths();
+    const bundledExe = resolveChromePath({
+      repoRoot: resolveBinRoot(),
+      legacyBinChromePath: this.binChromePath,
+      preferSystemChrome: false
+    });
+    if (!bundledExe || !fs.existsSync(bundledExe)) {
+      throw new Error(`Không tìm thấy file Chrome đóng gói tại: ${bundledExe || this.binChromePath}`);
+    }
+    if (!fs.existsSync(path.join(nativeExtPath, 'manifest.json'))) {
+      throw new Error(`Không tìm thấy tiện ích CRM (manifest.json) tại: ${nativeExtPath}`);
+    }
+
+    await this.cleanupFailedCandidateProfileLock(nativeProfileDir, bundledExe);
+
+    const args = [
+      ...this.getCommonChromeArgs(),
+      `--user-data-dir=${nativeProfileDir}`,
+      `--disable-extensions-except=${nativeExtPath}`,
+      `--load-extension=${nativeExtPath}`,
+      initialUrl
+    ];
+
+    const child = spawn(bundledExe, args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false
+    });
+
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      child.once('error', (e) => {
+        if (!settled) { settled = true; reject(e); }
+      });
+      setTimeout(() => {
+        if (!settled) { settled = true; resolve(); }
+      }, 950);
+    });
+
+    const slashProfile = nativeProfileDir.replace(/\\/g, '/');
+    let activePid = child.pid;
+    let alive = false;
+    if (activePid) {
+      try { process.kill(activePid, 0); alive = true; } catch (_) { alive = false; }
+    }
+    if (!alive) {
+      const detectedPid = findBundledChromePidByProfile(slashProfile, bundledExe);
+      if (detectedPid) {
+        activePid = detectedPid;
+        alive = true;
+      }
+    }
+    if (!alive || !activePid) {
+      throw new Error('Tiến trình Chrome thoát ngay sau khi khởi chạy trực tiếp');
+    }
+
+    try { child.unref(); } catch (_) {}
+    console.log(`[ProcessManager] Đã mở Chrome trực tiếp (Direct Spawn --load-extension) [PID ${activePid}]: ${bundledExe}`);
+    return { child, pid: activePid, exe: bundledExe };
+  }
+
+  async launchBrowserWithExtension(absProfileDir, absExtPath) {
+    this.refreshResourcePaths();
+    const nativeProfileDir = path.resolve(absProfileDir);
+    const nativeExtPath = path.resolve(absExtPath || this.extensionPath);
+
+    if (!fs.existsSync(path.join(nativeExtPath, 'manifest.json'))) {
+      const extErr = `Không tìm thấy tiện ích CRM (manifest.json) tại: ${nativeExtPath}`;
+      this.lastLaunchError = extErr;
+      throw new Error(extErr);
+    }
+
+    let puppeteer;
+    try {
+      puppeteer = await getPuppeteer();
+    } catch (pupErr) {
+      const msg = `Lỗi nạp thư viện điều khiển Chrome (puppeteer-core): ${pupErr?.message || pupErr}`;
+      this.lastLaunchError = msg;
+      throw new Error(msg);
+    }
+
+    const baseArgs = this.getCommonChromeArgs();
     const bundledExe = resolveChromePath({
       repoRoot: resolveBinRoot(),
       legacyBinChromePath: this.binChromePath,
@@ -411,14 +509,15 @@ class ProcessManager {
 
     const candidates = [];
     if (bundledExe && fs.existsSync(bundledExe)) {
-      candidates.push({ label: 'Bundled Chrome (CDP installExtension)', exe: bundledExe, mode: 'cdp' });
-      candidates.push({ label: 'Bundled Chrome (--load-extension)', exe: bundledExe, mode: 'flag' });
+      candidates.push({ label: 'Bundled Chrome (CDP installExtension)', exe: bundledExe, mode: 'cdp', pipe: true });
+      candidates.push({ label: 'Bundled Chrome (--load-extension)', exe: bundledExe, mode: 'flag', pipe: true });
+      candidates.push({ label: 'Bundled Chrome (WebSocket --load-extension)', exe: bundledExe, mode: 'flag', pipe: false });
     }
     if (sysExe && fs.existsSync(sysExe) && sysExe !== bundledExe) {
-      candidates.push({ label: 'System Chrome (CDP installExtension)', exe: sysExe, mode: 'cdp' });
+      candidates.push({ label: 'System Chrome (CDP installExtension)', exe: sysExe, mode: 'cdp', pipe: true });
     }
     if (!candidates.length && bundledExe) {
-      candidates.push({ label: 'Fallback Chrome', exe: bundledExe, mode: 'cdp' });
+      candidates.push({ label: 'Fallback Chrome', exe: bundledExe, mode: 'cdp', pipe: true });
     }
 
     const errors = [];
@@ -426,19 +525,20 @@ class ProcessManager {
       let browser = null;
       try {
         const launchArgs = cand.mode === 'flag'
-          ? [...baseArgs, `--disable-extensions-except=${absExtPath}`, `--load-extension=${absExtPath}`]
+          ? [...baseArgs, `--disable-extensions-except=${nativeExtPath}`, `--load-extension=${nativeExtPath}`]
           : baseArgs;
         browser = await puppeteer.launch({
           executablePath: cand.exe,
           headless: false,
+          pipe: cand.pipe !== false,
           ignoreDefaultArgs: ['--enable-automation'],
-          userDataDir: absProfileDir,
+          userDataDir: nativeProfileDir,
           defaultViewport: null,
           enableExtensions: cand.mode === 'cdp',
           args: launchArgs
         });
         if (cand.mode === 'cdp') {
-          await browser.installExtension(absExtPath);
+          await browser.installExtension(nativeExtPath);
         }
         this.lastLaunchError = null;
         console.log(`[ProcessManager] Đã mở thành công qua ${cand.label}: ${cand.exe}`);
@@ -450,10 +550,11 @@ class ProcessManager {
         if (browser) {
           try { await browser.close(); } catch (_) {}
         }
+        await this.cleanupFailedCandidateProfileLock(nativeProfileDir, cand.exe);
       }
     }
 
-    const fullErr = errors.join(' | ') || 'Không tìm thấy trình duyệt Chrome khả dụng';
+    const fullErr = errors.join(' | ') || `Không tìm thấy trình duyệt Chrome khả dụng (đường dẫn: ${bundledExe || this.binChromePath})`;
     this.lastLaunchError = fullErr;
     throw new Error(fullErr);
   }
@@ -480,6 +581,8 @@ class ProcessManager {
 
   // Khởi chạy Chrome Portable hiển thị cho tài khoản FB
   async startAccountProcess(accountId, customProfileDir = null, options = {}) {
+    this.lastLaunchError = null;
+    this.refreshResourcePaths();
     const forceExtensionReload = options?.forceExtensionReload === true;
     if (this.processes.has(accountId)) {
       const existing = this.processes.get(accountId);
@@ -607,8 +710,36 @@ class ProcessManager {
       console.log(`[ProcessManager] Chrome Stable [PID ${child.pid}] đã tự cài extension cho account ${accountId}.`);
       return true;
     } catch (err) {
-      console.error(`[ProcessManager] Lỗi khởi chạy Chrome cho ${accountId}:`, err.message);
-      return false;
+      const primaryErr = this.lastLaunchError || err?.message || String(err);
+      console.error(`[ProcessManager] Lỗi khởi chạy Chrome qua Puppeteer cho ${accountId}:`, primaryErr);
+      try {
+        const direct = await this.spawnDirectChromeWithExtension(
+          path.resolve(profileDir),
+          path.resolve(this.extensionPath),
+          'https://www.facebook.com/messages/'
+        );
+        direct.child.on('exit', () => {
+          const entry = this.processes.get(accountId);
+          if (entry && entry.pid === direct.pid) {
+            this.processes.delete(accountId);
+          }
+        });
+        this.processes.set(accountId, {
+          process: direct.child,
+          browser: null,
+          profileDir: absProfileDir,
+          pid: direct.pid,
+          status: 'RUNNING',
+          displayMode: 'VISIBLE',
+          launchedByThisRun: true
+        });
+        this.lastLaunchError = null;
+        return true;
+      } catch (fallbackErr) {
+        this.lastLaunchError = `${primaryErr} | DirectSpawn: ${fallbackErr?.message || fallbackErr}`;
+        console.error(`[ProcessManager] Fallback mở Chrome trực tiếp cũng thất bại cho ${accountId}:`, this.lastLaunchError);
+        return false;
+      }
     }
   }
 
@@ -777,6 +908,8 @@ class ProcessManager {
 
   // Khởi chạy Chrome Portable cho phiên thêm tài khoản mới (pending session)
   async startNewAccountProcess(pendingKey) {
+    this.lastLaunchError = null;
+    this.refreshResourcePaths();
     const setupUrl = `https://www.facebook.com/messages/?crm_pending_key=${encodeURIComponent(pendingKey)}`;
     if (this.processes.has(pendingKey)) {
       console.log(`[ProcessManager] Phiên pending ${pendingKey} đã đang chạy.`);
@@ -872,13 +1005,54 @@ class ProcessManager {
       // pending-key capture runs on the first Facebook document.
       const pages = await browser.pages();
       const page = pages[0] || await browser.newPage();
-      await page.goto(setupUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.goto(setupUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(async (navErr) => {
+        console.warn(`[ProcessManager] Điều hướng setupUrl cảnh báo nhẹ (vẫn giữ Chrome mở cho ${pendingKey}):`, navErr?.message || navErr);
+        try {
+          const curUrl = page.url();
+          if (!curUrl || curUrl === 'about:blank') {
+            await page.evaluate((u) => { window.location.href = u; }, setupUrl).catch(() => {});
+          }
+        } catch (_) {}
+      });
 
       console.log(`[ProcessManager] Chrome Stable [PID ${child.pid}] đã tự cài extension và mở Facebook.`);
       return true;
     } catch (err) {
-      console.error(`[ProcessManager] Lỗi khởi chạy Chrome cho phiên ${pendingKey}:`, err.message);
-      return false;
+      const primaryErr = this.lastLaunchError || err?.message || String(err);
+      console.error(`[ProcessManager] Lỗi khởi chạy Chrome qua Puppeteer cho phiên ${pendingKey}:`, primaryErr);
+      try {
+        const direct = await this.spawnDirectChromeWithExtension(
+          path.resolve(profileDir),
+          path.resolve(this.extensionPath),
+          setupUrl
+        );
+        direct.child.on('exit', () => {
+          const entry = this.processes.get(pendingKey);
+          if (entry && entry.pid === direct.pid) {
+            console.log(`[ProcessManager] Chrome setup (Direct) [PID ${direct.pid}] cho ${pendingKey} đã đóng.`);
+            this.processes.delete(pendingKey);
+            if (typeof this.onPendingSessionAbandoned === 'function') {
+              try { this.onPendingSessionAbandoned(pendingKey); } catch (_) {}
+            }
+          }
+        });
+        this.processes.set(pendingKey, {
+          launchedByThisRun: true,
+          process: direct.child,
+          browser: null,
+          profileDir,
+          pid: direct.pid,
+          status: 'RUNNING',
+          displayMode: 'VISIBLE'
+        });
+        this.lastLaunchError = null;
+        console.log(`[ProcessManager] Fallback Direct Spawn thành công cho phiên ${pendingKey} [PID ${direct.pid}].`);
+        return true;
+      } catch (fallbackErr) {
+        this.lastLaunchError = `${primaryErr} | DirectSpawn: ${fallbackErr?.message || fallbackErr}`;
+        console.error(`[ProcessManager] Fallback mở Chrome trực tiếp thất bại cho phiên ${pendingKey}:`, this.lastLaunchError);
+        return false;
+      }
     }
   }
 

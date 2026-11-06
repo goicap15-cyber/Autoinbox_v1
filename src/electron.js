@@ -206,13 +206,32 @@ app.whenReady().then(async () => {
   appendDesktopLog(`[startup] app=${app.getVersion()} packaged=${app.isPackaged} resources=${process.resourcesPath}`);
   // Start Backend Express/WebSocket Server (ưu tiên bản hot-update nếu đã tải về)
   try {
-    const hotUpdateServer = process.resourcesPath
-      ? path.join(process.resourcesPath, 'hot-update', 'dist', 'server', 'index.js')
-      : '';
+    const hotUpdateDir = process.resourcesPath ? path.join(process.resourcesPath, 'hot-update') : '';
+    const hotUpdateServer = hotUpdateDir ? path.join(hotUpdateDir, 'dist', 'server', 'index.js') : '';
     const distServer = path.join(__dirname, '../dist/server/index.js');
     const srcServer = path.join(__dirname, 'server/index.js');
 
-    if (hotUpdateServer && fs.existsSync(hotUpdateServer)) {
+    let useHotUpdate = Boolean(hotUpdateServer && fs.existsSync(hotUpdateServer));
+    if (useHotUpdate) {
+      try {
+        const verFile = path.join(hotUpdateDir, 'version.json');
+        if (fs.existsSync(verFile)) {
+          const hotVer = String(JSON.parse(fs.readFileSync(verFile, 'utf8'))?.version || '0.0.0').replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+          const appVer = String(app.getVersion() || '0.0.0').replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+          for (let i = 0; i < 3; i++) {
+            if ((hotVer[i] || 0) > (appVer[i] || 0)) break;
+            if ((hotVer[i] || 0) < (appVer[i] || 0)) {
+              useHotUpdate = false;
+              appendDesktopLog(`[startup] Removing outdated hot-update (${hotVer.join('.')} < ${appVer.join('.')})`);
+              try { fs.rmSync(hotUpdateDir, { recursive: true, force: true }); } catch (_) {}
+              break;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (useHotUpdate) {
       console.log('[Electron] Loading hot-updated server from resources/hot-update/dist/server/index.js');
       appendDesktopLog(`[startup] Loading hot-update server: ${hotUpdateServer}`);
       backendRuntime = require(hotUpdateServer);

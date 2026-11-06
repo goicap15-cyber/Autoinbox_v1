@@ -7065,7 +7065,10 @@ app.post('/api/accounts/:id/start', async (req, res) => {
   const success = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: true });
   if (!success) {
     backgroundAfterConnectRequests.delete(accountId);
-    return res.json({ success: false });
+    return res.json({
+      success: false,
+      error: `Không thể mở Chrome: ${processManager.lastLaunchError || 'Không rõ nguyên nhân'}`
+    });
   }
 
   // If extension is already connected and background requested, hide immediately

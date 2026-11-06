@@ -1,8 +1,8 @@
 {
-  "version": "1.0.8",
-  "releasedAt": "2026-11-06T03:15:44.306Z",
-  "notes": "Sửa lỗi không mở được Chrome khi Thêm tài khoản trên PC khác (ưu tiên Chrome 153 đóng gói sẵn + tự động dự phòng)",
+  "version": "1.0.9",
+  "releasedAt": "2026-11-06T03:57:24.123Z",
+  "notes": "Sửa triệt để lỗi mở Chrome thêm tài khoản trên máy khách (nạp puppeteer từ app.asar, bắt lỗi chuyển hướng Facebook và mở Chrome trực tiếp)",
   "requiresRestart": true,
-  "sizeBytes": 2506443,
-  "sha256": "c88b0c5e09647f999aa1b95665e13726f2eb07facceaaccfc43bc8ecf2c61fa0"
+  "sizeBytes": 2508571,
+  "sha256": "09f1d1084d70076c9a85380c32738ad4cb459bd5c72c90c3d25983dac700ac53"
 }

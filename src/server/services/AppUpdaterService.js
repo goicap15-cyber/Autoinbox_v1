@@ -172,22 +172,27 @@ class AppUpdaterService {
   }
 
   getCurrentVersion() {
+    let hotVer = null;
+    let pkgVer = null;
     try {
       const resourcesPath = getResourcesPath();
       const hotVersionPath = path.join(resourcesPath, 'hot-update', 'version.json');
       if (fs.existsSync(hotVersionPath)) {
         const hotMeta = JSON.parse(fs.readFileSync(hotVersionPath, 'utf8'));
-        if (hotMeta?.version) return String(hotMeta.version).trim();
+        if (hotMeta?.version) hotVer = String(hotMeta.version).trim();
       }
     } catch (_) {}
     try {
       const pkgPath = path.resolve(__dirname, '../../../package.json');
       if (fs.existsSync(pkgPath)) {
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-        if (pkg?.version) return String(pkg.version).trim();
+        if (pkg?.version) pkgVer = String(pkg.version).trim();
       }
     } catch (_) {}
-    return '1.0.0';
+    if (hotVer && pkgVer) {
+      return compareSemver(hotVer, pkgVer) >= 0 ? hotVer : pkgVer;
+    }
+    return hotVer || pkgVer || '1.0.0';
   }
 
   emitStatus(patch = {}) {

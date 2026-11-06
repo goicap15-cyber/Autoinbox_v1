@@ -11,25 +11,14 @@ const crypto = require('crypto');
 const path = require('path');
 const { execFile } = require('child_process');
 const { resolveChromePath } = require('../../../chrome-bundling/resolveChromePath');
-const { resolveBinRoot } = require('../utils/appResourceRoot');
+const { resolveBinRoot, loadPuppeteer } = require('../utils/appResourceRoot');
 // Bộ quét Fanpage (UMD — chạy được cả trong Node): bóc JSON Comet từ HTML facebook.com/pages
 const FbPageDiscovery = require('../../extension/pageDiscovery');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-// puppeteer-core v25 là ESM thuần — nạp qua dynamic import (cùng cách
-// ProcessManager đã dùng, chạy được cả trong app.asar đóng gói).
-// puppeteer-extra/stealth KHÔNG dùng được với puppeteer-core ESM này.
-let puppeteerPromise = null;
 function getPuppeteer() {
-  if (!puppeteerPromise) {
-    let target = 'puppeteer-core';
-    try {
-      target = require('url').pathToFileURL(require.resolve('puppeteer-core')).href;
-    } catch (_) {}
-    puppeteerPromise = import(target).then((m) => m.default || m);
-  }
-  return puppeteerPromise;
+  return loadPuppeteer();
 }
 
 // ── Deps server.js bơm vào qua configurePageSetupAutomation() ──
