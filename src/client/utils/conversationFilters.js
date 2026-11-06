@@ -242,13 +242,28 @@ export function matchesConversationFilters(thread, filters, now = Date.now()) {
   if (!matchesArchiveScope(thread, clean.archiveScope, now)) return false;
   if (clean.sourceKeys.length) {
     // Determine source type: prefer explicit source_type from JOIN, then fall back by source_id presence.
-    // Personal threads: source_id = null AND source_type = null (no inbox_sources row).
+    // Personal threads: source_id = null (or src_personal_...) AND source_type = 'personal_messenger' / null.
     // Page threads: source_id = 'src_page_...' AND source_type = 'page_messenger'.
-    const threadSourceType = thread.source_type ||
-      (thread.source_id != null && String(thread.source_id).startsWith('src_page_') ? 'page_messenger' : 'personal_messenger');
+    // IMPORTANT: Page threads also carry thread.account_id (the owner Facebook account ID).
+    // A page thread must NEVER match an 'account:<id>' filter key (which only selects personal Messenger threads).
+    const isPageThread =
+      thread.source_type === 'page_messenger' ||
+      (thread.source_id != null && String(thread.source_id).startsWith('src_page_'));
+    const threadSourceType = isPageThread ? 'page_messenger' : 'personal_messenger';
     const typeKey = 'type:' + threadSourceType;
-    const idKey = thread.source_id != null ? 'source:' + thread.source_id : null;
-    const accountKey = thread.account_id != null ? 'account:' + thread.account_id : null;
+    const idKey = thread.source_id != null
+      ? 'source:' + thread.source_id
+      : (isPageThread && (thread.page_id || thread.source_external_id)
+        ? 'source:src_page_' + (thread.page_id || thread.source_external_id)
+        : null);
+    const personalAccountId = !isPageThread
+      ? (thread.account_id != null
+        ? String(thread.account_id)
+        : (thread.source_id != null && String(thread.source_id).startsWith('src_personal_')
+          ? String(thread.source_id).slice('src_personal_'.length)
+          : null))
+      : null;
+    const accountKey = personalAccountId ? 'account:' + personalAccountId : null;
     if (!clean.sourceKeys.some((key) => key === typeKey || (idKey && key === idKey) || (accountKey && key === accountKey))) return false;
   }
   if (clean.statusIds.length && !clean.statusIds.includes(String(thread.status_id ?? ''))) return false;

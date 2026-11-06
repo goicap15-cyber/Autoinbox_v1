@@ -87,17 +87,38 @@ export default function ConversationFilterPopover({ isOpen, appliedFilters, inbo
           const pageKeys = draftFilters.sourceKeys.filter((key) => key === SOURCE_TYPE_KEYS.PAGE || key.startsWith('source:'));
           const pageSources = inboxSources.filter((s) => s && s.source_type === 'page_messenger');
           const personalAccounts = accounts.filter((account) => account?.id != null);
+          const toggleSourceKey = (targetKey) => {
+            setDraftFilters((previous) => {
+              const current = previous.sourceKeys || [];
+              const exists = current.includes(targetKey);
+              if (exists) {
+                return { ...previous, sourceKeys: current.filter((item) => item !== targetKey) };
+              }
+              let next = [...current];
+              if (targetKey === SOURCE_TYPE_KEYS.PERSONAL) {
+                next = next.filter((item) => !item.startsWith('account:'));
+              } else if (targetKey.startsWith('account:')) {
+                next = next.filter((item) => item !== SOURCE_TYPE_KEYS.PERSONAL);
+              } else if (targetKey === SOURCE_TYPE_KEYS.PAGE) {
+                next = next.filter((item) => !item.startsWith('source:'));
+              } else if (targetKey.startsWith('source:')) {
+                next = next.filter((item) => item !== SOURCE_TYPE_KEYS.PAGE);
+              }
+              next.push(targetKey);
+              return { ...previous, sourceKeys: next };
+            });
+          };
           return <div className="space-y-1.5">
             <div className="grid grid-cols-2 gap-1.5">
               <ToggleOption
-                selected={expandedSourceGroup === 'personal'}
+                selected={expandedSourceGroup === 'personal' || personalKeys.length > 0}
                 onClick={() => setExpandedSourceGroup((current) => (current === 'personal' ? null : 'personal'))}
               >
                 <User size={12} />Cá nhân{personalKeys.length > 0 ? ` (${personalKeys.length})` : ''}
                 <ChevronDown size={12} className={'ml-auto transition-transform ' + (expandedSourceGroup === 'personal' ? 'rotate-180' : '')} />
               </ToggleOption>
               <ToggleOption
-                selected={expandedSourceGroup === 'page'}
+                selected={expandedSourceGroup === 'page' || pageKeys.length > 0}
                 onClick={() => setExpandedSourceGroup((current) => (current === 'page' ? null : 'page'))}
               >
                 <MessageCircle size={12} />Fanpage{pageKeys.length > 0 ? ` (${pageKeys.length})` : ''}
@@ -106,12 +127,12 @@ export default function ConversationFilterPopover({ isOpen, appliedFilters, inbo
             </div>
             {expandedSourceGroup === 'personal' && (
               <div className="space-y-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-1.5">
-                <ToggleOption selected={draftFilters.sourceKeys.includes(SOURCE_TYPE_KEYS.PERSONAL)} onClick={() => toggle('sourceKeys', SOURCE_TYPE_KEYS.PERSONAL)} className="w-full">
+                <ToggleOption selected={draftFilters.sourceKeys.includes(SOURCE_TYPE_KEYS.PERSONAL)} onClick={() => toggleSourceKey(SOURCE_TYPE_KEYS.PERSONAL)} className="w-full">
                   <User size={12} />Tất cả tài khoản cá nhân
                 </ToggleOption>
                 {personalAccounts.length === 0 && <p className="px-2 py-1 text-[11px] text-[var(--color-text-muted)]">Chưa có tài khoản cá nhân nào.</p>}
                 {personalAccounts.map((account) => (
-                  <ToggleOption key={'account:' + account.id} selected={draftFilters.sourceKeys.includes('account:' + account.id)} onClick={() => toggle('sourceKeys', 'account:' + account.id)} className="w-full">
+                  <ToggleOption key={'account:' + account.id} selected={draftFilters.sourceKeys.includes('account:' + account.id)} onClick={() => toggleSourceKey('account:' + account.id)} className="w-full">
                     <User size={11} /><span className="truncate">{account.name || account.id}</span><span className="ml-auto shrink-0 font-mono text-[10px] opacity-60">#{String(account.id).slice(-4)}</span>
                   </ToggleOption>
                 ))}
@@ -119,12 +140,12 @@ export default function ConversationFilterPopover({ isOpen, appliedFilters, inbo
             )}
             {expandedSourceGroup === 'page' && (
               <div className="space-y-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-surface)] p-1.5">
-                <ToggleOption selected={draftFilters.sourceKeys.includes(SOURCE_TYPE_KEYS.PAGE)} onClick={() => toggle('sourceKeys', SOURCE_TYPE_KEYS.PAGE)} className="w-full">
+                <ToggleOption selected={draftFilters.sourceKeys.includes(SOURCE_TYPE_KEYS.PAGE)} onClick={() => toggleSourceKey(SOURCE_TYPE_KEYS.PAGE)} className="w-full">
                   <MessageCircle size={12} />Tất cả Fanpage
                 </ToggleOption>
                 {pageSources.length === 0 && <p className="px-2 py-1 text-[11px] text-[var(--color-text-muted)]">Chưa có Fanpage nào kết nối.</p>}
                 {pageSources.map((source) => (
-                  <ToggleOption key={source.id} selected={draftFilters.sourceKeys.includes('source:' + source.id)} onClick={() => toggle('sourceKeys', 'source:' + source.id)} className="w-full">
+                  <ToggleOption key={source.id} selected={draftFilters.sourceKeys.includes('source:' + source.id)} onClick={() => toggleSourceKey('source:' + source.id)} className="w-full">
                     <span className="truncate">{source.display_name || source.name || source.external_id || 'Nguồn hội thoại'}</span>
                   </ToggleOption>
                 ))}

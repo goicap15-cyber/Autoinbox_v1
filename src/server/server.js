@@ -7008,7 +7008,18 @@ function ensureAccountNamesAndCookiesHealed() {
     if (fixed.changes > 0) {
       db.prepare("UPDATE inbox_sources SET display_name = 'Lê Văn Khang', avatar_url = '/api/avatars/avatar_account_100066325187762_c97ea7b4.jpg' WHERE id = 'src_personal_100066325187762'").run();
     }
-    const allAccs = db.prepare('SELECT id FROM accounts').all();
+    const decodeHtmlText = (str) => String(str || '')
+      .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+      .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+      .replace(/&amp;/g, '&');
+    const allAccs = db.prepare('SELECT id, name FROM accounts').all();
+    for (const acc of allAccs) {
+      if (acc.name && /&#/.test(acc.name)) {
+        const cleanName = decodeHtmlText(acc.name);
+        db.prepare('UPDATE accounts SET name = ? WHERE id = ?').run(cleanName, acc.id);
+        db.prepare('UPDATE inbox_sources SET display_name = ? WHERE id = ?').run(cleanName, 'src_personal_' + acc.id);
+      }
+    }
     setTimeout(() => {
       for (const a of allAccs) {
         if (!loadSavedAccountCookies(a.id)) {
