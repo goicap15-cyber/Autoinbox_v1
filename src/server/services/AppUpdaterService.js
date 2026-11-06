@@ -95,9 +95,10 @@ function fetchBuffer(url, headers = {}, maxRedirects = 5) {
 }
 
 class AppUpdaterService {
-  constructor({ db, io } = {}) {
+  constructor({ db, io, httpServer } = {}) {
     this.db = db;
     this.io = io;
+    this.httpServer = httpServer || null;
     this.status = {
       state: 'idle', // idle | checking | available | up_to_date | downloading | applying | restarting | error
       currentVersion: this.getCurrentVersion(),
@@ -506,12 +507,21 @@ class AppUpdaterService {
         } catch (_) {}
       }
 
-      const newVer = this.status.latestVersion || this.getCurrentVersion();
-      const needsAppRestart = Boolean(this.status.requiresRestart);
+      let zipRequiresRestart = false;
+      let zipVersion = null;
+      try {
+        const extractedMeta = JSON.parse(fs.readFileSync(path.join(hotUpdateDir, 'version.json'), 'utf8'));
+        zipRequiresRestart = Boolean(extractedMeta?.requiresRestart);
+        if (extractedMeta?.version) zipVersion = String(extractedMeta.version).trim();
+      } catch (_) {}
+
+      const newVer = zipVersion || this.status.latestVersion || this.getCurrentVersion();
+      const needsAppRestart = Boolean(this.status.requiresRestart || zipRequiresRestart);
       this.emitStatus({
         state: 'restarting',
         currentVersion: newVer,
         latestVersion: newVer,
+        requiresRestart: needsAppRestart,
         updateAvailable: false,
         progress: 100,
         message: needsAppRestart
@@ -522,14 +532,26 @@ class AppUpdaterService {
       if (needsAppRestart) {
         setTimeout(() => {
           try {
-            const electron = require('electron');
-            if (electron && electron.app && typeof electron.app.relaunch === 'function') {
-              electron.app.relaunch();
-              electron.app.exit(0);
-              return;
+            if (this.io) {
+              try { this.io.close(); } catch (_) {}
+            }
+            if (this.httpServer) {
+              try { this.httpServer.close(); } catch (_) {}
             }
           } catch (_) {}
-        }, 1100);
+          setTimeout(() => {
+            try {
+              const electron = require('electron');
+              if (electron && electron.app && typeof electron.app.relaunch === 'function') {
+                const relaunchArgs = process.argv.slice(1).filter((a) => a !== '--relaunch-after-update');
+                relaunchArgs.push('--relaunch-after-update');
+                electron.app.relaunch({ args: relaunchArgs });
+                electron.app.exit(0);
+                return;
+              }
+            } catch (_) {}
+          }, 300);
+        }, 850);
       } else {
         setTimeout(() => {
           this.emitStatus({

@@ -10,7 +10,25 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { execFile, spawn, spawnSync } = require('child_process');
+const childProcess = require('child_process');
+const { execFile, spawn, spawnSync } = childProcess;
+
+// Ghi đè tạm thời child_process.spawn khi gọi puppeteer.launch() vì @puppeteer/browsers
+// mặc định truyền windowsHide: true trên Windows làm cửa sổ Chrome bị ẩn hoàn toàn (SW_HIDE)!
+async function launchWithVisibleSpawn(fn) {
+  const origSpawn = childProcess.spawn;
+  childProcess.spawn = function visibleChromeSpawn(cmd, spawnArgs, opts) {
+    if (opts && typeof opts === 'object' && /chrome/i.test(String(cmd || ''))) {
+      opts = { ...opts, windowsHide: false };
+    }
+    return origSpawn.call(this, cmd, spawnArgs, opts);
+  };
+  try {
+    return await fn();
+  } finally {
+    childProcess.spawn = origSpawn;
+  }
+}
 const { resolveChromePath, findSystemChromePath } = require('../../../chrome-bundling/resolveChromePath');
 const { resolveBinRoot, loadPuppeteer } = require('../utils/appResourceRoot');
 const { APP_DATA_ROOT } = require('../utils/appDataRoot');
@@ -82,6 +100,18 @@ async function spawnVisibleChromeAndConnect(puppeteer, exePath, baseArgs) {
   const profileDir = path.join(profilesRoot, `page_auto_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
   fs.mkdirSync(profileDir, { recursive: true });
 
+  const cleanEnv = {
+    ...process.env,
+    HTTP_PROXY: '',
+    HTTPS_PROXY: '',
+    ALL_PROXY: '',
+    http_proxy: '',
+    https_proxy: '',
+    all_proxy: '',
+    NO_PROXY: '127.0.0.1,localhost',
+    no_proxy: '127.0.0.1,localhost',
+  };
+
   const child = spawn(exePath, [
     ...baseArgs,
     `--user-data-dir=${path.resolve(profileDir)}`,
@@ -91,6 +121,7 @@ async function spawnVisibleChromeAndConnect(puppeteer, exePath, baseArgs) {
     detached: true,
     stdio: 'ignore',
     windowsHide: false,
+    env: cleanEnv,
   });
 
   let spawnError = null;
@@ -160,6 +191,7 @@ async function launchAutomationChrome() {
     '--no-sandbox',
     '--disable-setuid-sandbox',
     '--lang=vi-VN',
+    '--window-position=80,50',
     '--window-size=1240,880',
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
@@ -186,8 +218,44 @@ async function launchAutomationChrome() {
 
   const errors = [];
 
-  // 1) Ưu tiên mở trực tiếp qua spawn (windowsHide: false) + kết nối DevToolsActivePort
-  //    Hoạt động 100% trên mọi máy khách Windows kể cả khi @puppeteer/browsers ẩn cửa sổ hoặc lỗi pipe
+  // 1) Ưu tiên số 1: puppeteer.launch với pipe: true + ép windowsHide: false (qua launchWithVisibleSpawn).
+  //    Dùng đường ống nhân hệ điều hành (anonymous pipe) nên KHÔNG mở cổng TCP 127.0.0.1,
+  //    miễn nhiễm 100% với Proxifier / VPN / Firewall trên máy khách VÀ mở cửa sổ Chrome nổi ngay lập tức!
+  for (const exe of exeList) {
+    const pipeProfile = path.join(APP_DATA_ROOT, 'profiles', `page_auto_pipe_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+    try {
+      fs.mkdirSync(pipeProfile, { recursive: true });
+      const browser = await launchWithVisibleSpawn(() => puppeteer.launch({
+        executablePath: exe,
+        headless: false,
+        pipe: true,
+        defaultViewport: null,
+        ignoreDefaultArgs: ['--enable-automation'],
+        userDataDir: pipeProfile,
+        args,
+      }));
+      const origClose = browser.close.bind(browser);
+      browser.close = async () => {
+        try { await origClose(); } catch (_) {}
+        setTimeout(() => {
+          try { fs.rmSync(pipeProfile, { recursive: true, force: true }); } catch (_) {}
+        }, 800);
+      };
+      const pid = browser.process?.()?.pid;
+      if (pid) {
+        setTimeout(() => showAutomationWindows(pid), 400);
+        setTimeout(() => showAutomationWindows(pid), 1400);
+        setTimeout(() => showAutomationWindows(pid), 2800);
+      }
+      DEPS.log(`Đã mở Chrome tự động hóa (Visible Pipe) thành công: ${exe}`);
+      return browser;
+    } catch (e) {
+      errors.push(`VisiblePipe(${path.basename(exe)}): ${e?.message || e}`);
+      try { fs.rmSync(pipeProfile, { recursive: true, force: true }); } catch (_) {}
+    }
+  }
+
+  // 2) Dự phòng số 2: mở trực tiếp qua spawn (windowsHide: false) + kết nối DevToolsActivePort
   for (const exe of exeList) {
     try {
       const browser = await spawnVisibleChromeAndConnect(puppeteer, exe, args);
@@ -198,10 +266,9 @@ async function launchAutomationChrome() {
     }
   }
 
-  // 2) Dự phòng qua puppeteer.launch (cả pipe: true và pipe: false) với profile riêng trong APP_DATA_ROOT
+  // 3) Dự phòng số 3: puppeteer.launch với pipe: false + ép windowsHide: false
   const launchCandidates = [];
   for (const exe of exeList) {
-    launchCandidates.push({ executablePath: exe, pipe: true });
     launchCandidates.push({ executablePath: exe, pipe: false });
   }
   launchCandidates.push({ channel: 'chrome', pipe: true });
@@ -210,18 +277,25 @@ async function launchAutomationChrome() {
     const fallbackProfile = path.join(APP_DATA_ROOT, 'profiles', `page_auto_pup_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
     try {
       fs.mkdirSync(fallbackProfile, { recursive: true });
-      const browser = await puppeteer.launch({
+      const browser = await launchWithVisibleSpawn(() => puppeteer.launch({
         headless: false,
         defaultViewport: null,
         ignoreDefaultArgs: ['--enable-automation'],
         userDataDir: fallbackProfile,
         args,
         ...cand,
-      });
+      }));
+      const origClose = browser.close.bind(browser);
+      browser.close = async () => {
+        try { await origClose(); } catch (_) {}
+        setTimeout(() => {
+          try { fs.rmSync(fallbackProfile, { recursive: true, force: true }); } catch (_) {}
+        }, 800);
+      };
       const pid = browser.process?.()?.pid;
       if (pid) {
-        setTimeout(() => showAutomationWindows(pid), 350);
-        setTimeout(() => showAutomationWindows(pid), 1200);
+        setTimeout(() => showAutomationWindows(pid), 400);
+        setTimeout(() => showAutomationWindows(pid), 1400);
       }
       return browser;
     } catch (e) {
@@ -672,15 +746,16 @@ function isFacebookLoginUrl(rawUrl) {
 // nổi lên trước mặt người dùng, chờ đăng nhập (tối đa 3 phút), lưu lại cookie vào DB
 // rồi điều hướng tiếp tới targetUrl!
 async function ensureLoggedInDevelopersPage(job, page, uid, targetUrl, sessionCookies) {
-  if (!isFacebookLoginUrl(page.url()) && Array.isArray(sessionCookies) && sessionCookies.length > 0) {
+  const curInitialUrl = String(page.url() || '');
+  if (!isFacebookLoginUrl(curInitialUrl) && !curInitialUrl.startsWith('chrome-error://')) {
     const checkCookies = await page.cookies('https://www.facebook.com', 'https://developers.facebook.com').catch(() => []);
-    if (checkCookies.some((c) => c.name === 'c_user' && c.value)) {
+    const hasCUser = checkCookies.some((c) => c.name === 'c_user' && String(c.value || '').trim() && String(c.value) !== '0');
+    const hasXs = checkCookies.some((c) => c.name === 'xs' && String(c.value || '').trim());
+    if (hasCUser && hasXs) {
       return;
     }
   }
-  if (!isFacebookLoginUrl(page.url())) {
-    const hasSession = (await page.cookies('https://www.facebook.com').catch(() => [])).some((c) => c.name === 'c_user' && c.value);
-    if (hasSession) return;
+  if (!isFacebookLoginUrl(curInitialUrl)) {
     await page.goto('https://www.facebook.com/login.php?next=' + encodeURIComponent(targetUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
   }
 

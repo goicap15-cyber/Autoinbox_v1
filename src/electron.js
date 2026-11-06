@@ -193,7 +193,16 @@ app.on('second-instance', () => {
 });
 
 app.whenReady().then(async () => {
-  if (!hasSingleInstanceLock) {
+  const isRelaunchAfterUpdate = process.argv.includes('--relaunch-after-update');
+  if (isRelaunchAfterUpdate) {
+    // Chờ tiến trình cũ nhả hẳn cổng 5050 tối đa 6 giây sau khi cập nhật nóng
+    const waitStart = Date.now();
+    while (Date.now() - waitStart < 6000) {
+      const stillBusy = await isBackendPortBusy(5050, 500);
+      if (!stillBusy) break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  } else if (!hasSingleInstanceLock) {
     const portBusy = await isBackendPortBusy(5050);
     if (portBusy) {
       appendDesktopLog('[startup] CRM đã chạy sẵn (cổng 5050 bận) - thoát bản vừa mở.');

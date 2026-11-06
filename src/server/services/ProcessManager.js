@@ -1,4 +1,20 @@
-const { spawn, exec, execFile, spawnSync } = require('child_process');
+const childProcess = require('child_process');
+const { spawn, exec, execFile, spawnSync } = childProcess;
+
+async function launchWithVisibleSpawn(fn) {
+  const origSpawn = childProcess.spawn;
+  childProcess.spawn = function visibleChromeSpawn(cmd, spawnArgs, opts) {
+    if (opts && typeof opts === 'object' && /chrome/i.test(String(cmd || ''))) {
+      opts = { ...opts, windowsHide: false };
+    }
+    return origSpawn.call(this, cmd, spawnArgs, opts);
+  };
+  try {
+    return await fn();
+  } finally {
+    childProcess.spawn = origSpawn;
+  }
+}
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
@@ -509,9 +525,9 @@ class ProcessManager {
 
     const candidates = [];
     if (bundledExe && fs.existsSync(bundledExe)) {
+      candidates.push({ label: 'Bundled Chrome (Visible Pipe --load-extension)', exe: bundledExe, mode: 'flag', pipe: true });
+      candidates.push({ label: 'Bundled Chrome (Visible Pipe CDP installExtension)', exe: bundledExe, mode: 'cdp', pipe: true });
       candidates.push({ label: 'Bundled Chrome (Direct Spawn + DevToolsActivePort)', exe: bundledExe, mode: 'direct-connect', pipe: false });
-      candidates.push({ label: 'Bundled Chrome (CDP installExtension)', exe: bundledExe, mode: 'cdp', pipe: true });
-      candidates.push({ label: 'Bundled Chrome (--load-extension)', exe: bundledExe, mode: 'flag', pipe: true });
       candidates.push({ label: 'Bundled Chrome (WebSocket --load-extension)', exe: bundledExe, mode: 'flag', pipe: false });
     }
     if (sysExe && fs.existsSync(sysExe) && sysExe !== bundledExe) {
@@ -563,7 +579,7 @@ class ProcessManager {
           const launchArgs = cand.mode === 'flag'
             ? [...baseArgs, `--disable-extensions-except=${nativeExtPath}`, `--load-extension=${nativeExtPath}`]
             : baseArgs;
-          browser = await puppeteer.launch({
+          browser = await launchWithVisibleSpawn(() => puppeteer.launch({
             executablePath: cand.exe,
             headless: false,
             pipe: cand.pipe !== false,
@@ -572,7 +588,7 @@ class ProcessManager {
             defaultViewport: null,
             enableExtensions: cand.mode === 'cdp',
             args: launchArgs
-          });
+          }));
           if (cand.mode === 'cdp') {
             await browser.installExtension(nativeExtPath);
           }

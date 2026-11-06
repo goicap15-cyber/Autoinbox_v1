@@ -324,10 +324,21 @@ app.post('/api/auth/logout', (req, res) => {
 // Desktop startup probes this endpoint before a user session or license exists.
 // Keep it ahead of both API protection middlewares so Electron can verify that
 // it is talking to the backend process started by this exact app instance.
+const SERVER_RUNTIME_VERSION = (() => {
+  try {
+    const p = path.resolve(__dirname, '../../package.json');
+    if (fs.existsSync(p)) {
+      return String(JSON.parse(fs.readFileSync(p, 'utf8'))?.version || '').trim() || '1.0.0';
+    }
+  } catch (_) {}
+  return '1.0.0';
+})();
+
 app.get('/api/health', (req, res) => res.json({
   status: 'OK', uptime: process.uptime(),
   db: 'SQLite WAL Mode', activeExtensions: extensionConnections.size,
   instance_token: process.env.CRM_INSTANCE_TOKEN || null,
+  runtime_version: SERVER_RUNTIME_VERSION,
   pid: process.pid
 }));
 
@@ -543,7 +554,7 @@ io.use((socket, next) => {
 });
 
 const AppUpdaterService = require('./services/AppUpdaterService');
-const appUpdater = new AppUpdaterService({ db, io });
+const appUpdater = new AppUpdaterService({ db, io, httpServer: server });
 
 app.get('/api/app-update/status', (req, res) => {
   const cfg = appUpdater.getConfig();

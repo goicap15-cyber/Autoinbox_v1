@@ -28,8 +28,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
   // Trạng thái job tự động hóa
   const [job, setJob] = useState(null); // {sync_id, status, message, error, kind}
   const [busy, setBusy] = useState(false);
-  // Chrome tự động hóa ẩn chạy ngầm (server tự ẩn sau khi mở); job mới = ẩn lại
-  const [chromeHidden, setChromeHidden] = useState(true);
+  const [needsBackendRestart, setNeedsBackendRestart] = useState(false);
 
   // Popup mật khẩu (Facebook re-auth) + popup đăng ký developer
   const [pwd, setPwd] = useState('');
@@ -72,7 +71,6 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
         const pre = new Set();
         (data.pages || []).forEach((p) => { if (p.has_token) pre.add(String(p.page_id)); });
         setSelectedIds(pre);
-        setErrorMsg('');
       } else {
         setErrorMsg(data.error || 'Không thể tải danh sách Fanpage');
       }
@@ -152,6 +150,23 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
   useEffect(() => {
     loadPages();
     loadConfig();
+    fetch('/api/health')
+      .then((r) => r.json())
+      .then((d) => {
+        const rv = String(d?.runtime_version || '').trim();
+        if (!rv) {
+          setNeedsBackendRestart(true);
+          return;
+        }
+        const parts = rv.split('.').map((n) => parseInt(n, 10) || 0);
+        const target = [1, 0, 11];
+        for (let i = 0; i < 3; i++) {
+          if ((parts[i] || 0) > target[i]) { setNeedsBackendRestart(false); return; }
+          if ((parts[i] || 0) < target[i]) { setNeedsBackendRestart(true); return; }
+        }
+        setNeedsBackendRestart(false);
+      })
+      .catch(() => {});
   }, [accountId]);
 
   // Realtime: trạng thái job từ socket.io + fallback poll khi job đang chạy
@@ -177,27 +192,6 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
     const t = setInterval(pollStatus, 3000);
     return () => clearInterval(t);
   }, [job?.sync_id, job?.status]);
-
-  // Job mới = Chrome automation quay lại trạng thái ẩn (server tự ẩn sau khi mở)
-  useEffect(() => {
-    if (job?.sync_id) setChromeHidden(true);
-  }, [job?.sync_id]);
-
-  const toggleAutomationChrome = async () => {
-    const nextVisible = chromeHidden;
-    try {
-      const res = await fetch('/api/page-api/chrome-visibility', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ visible: nextVisible })
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) throw new Error(data.error || 'Không đổi được trạng thái Chrome');
-      setChromeHidden(!nextVisible);
-    } catch (err) {
-      setErrorMsg(err.message);
-    }
-  };
 
   // Thông báo thành công tự tắt sau 8s (yêu cầu 2026-10-08: hiện xong đừng
   // đứng mãi trong modal) — muốn tắt sớm thì bấm dấu X trên banner.
@@ -553,6 +547,15 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
           </button>
         </div>
 
+        {needsBackendRestart && (
+          <div className="mx-5 mt-3 p-3 bg-amber-500/15 border border-amber-500/40 rounded-xl text-xs text-amber-200 flex items-start gap-2">
+            <AlertCircle size={15} className="text-amber-400 shrink-0 mt-0.5" />
+            <span>
+              <strong>Cần khởi động lại phần mềm 1 lần:</strong> Bản cập nhật mới đã tải xong nhưng nhân hệ thống cũ vẫn đang chạy. Vui lòng <strong>đóng hẳn FB Messenger CRM rồi mở lại</strong> để mở Chrome tạo App &amp; Webhook bình thường.
+            </span>
+          </div>
+        )}
+
         {/* Trạng thái job đang chạy */}
         {jobRunning && (
           <div className="mx-5 mt-3 p-2.5 bg-[var(--color-accent,#0ea5e9)]/10 border border-[var(--color-accent,#0ea5e9)]/30 rounded-xl text-xs text-[var(--color-text-secondary,#cbd5e1)] flex items-center gap-2">
@@ -561,10 +564,6 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
               <strong className="text-[var(--color-text-primary,#f8fafc)]">Đang chạy:</strong>{' '}
               {job.message || job.status}
             </span>
-            <button type="button" onClick={() => fetch('/api/page-api/chrome-visibility', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ visible: true }) }).catch(() => {})}
-              className="text-[10px] px-2 py-1 rounded-lg bg-sky-500/15 text-sky-300 border border-sky-500/30 hover:bg-sky-500/25 transition-colors shrink-0">
-              Hiện Chrome
-            </button>
             <button type="button" onClick={cancelJob} className="text-[10px] px-2 py-1 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors shrink-0">
               Hủy
             </button>
