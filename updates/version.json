@@ -1,8 +1,8 @@
 {
-  "version": "1.0.15",
-  "releasedAt": "2026-11-06T09:32:28.909Z",
-  "notes": "Sửa lỗi tự nạp tiện ích CRM và tự nhận tài khoản Facebook ngay khi đăng nhập",
+  "version": "1.0.16",
+  "releasedAt": "2026-11-06T10:06:17.376Z",
+  "notes": "Sửa lỗi xử lý REGISTER_ACCOUNT trên server làm treo bước chờ đăng nhập Facebook",
   "requiresRestart": true,
-  "sizeBytes": 3079823,
-  "sha256": "6acf627a0f46f9770c0bc427d27aca2d8468016b6d159a2d2bfe75b80b1144fc"
+  "sizeBytes": 3079863,
+  "sha256": "8c5bb4f934d55d49b0fd157a4b9e9af5d5e5f1c0e92d3fedca9aba475adc2861"
 }

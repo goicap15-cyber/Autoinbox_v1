@@ -2180,7 +2180,9 @@ wss.on('connection', (ws, req) => {
             db.prepare('DELETE FROM removed_accounts WHERE account_id = ?').run(String(account_id));
           }
           ws.lastRegisterAt = Date.now();
+          const effectivePendingKey = pending_key || readdPendingKey || null;
           const previousExtension = extensionConnections.get(account_id);
+          const isSameConnection = previousExtension === ws;
           // 2026-10-01 (Phase A - ke hoach ws-socket-adoption): LUON nhan socket
           // moi nhat. Truoc day socket moi bi tu choi khi socket cu van "OPEN"
           // phia server - nhung socket cu co the la zombie half-open sau khi
@@ -2217,7 +2219,6 @@ wss.on('connection', (ws, req) => {
             clearTimeout(existingDisconnectTimer);
             disconnectGraceTimers.delete(String(account_id));
           }
-          const isSameConnection = previousExtension === ws;
           ws.lastHeartbeatAt = Date.now();
           // Phase C (2026-10-01): socket moi = kenh tin cay moi, reset watchdog.
           dispatchStallWatchdog.noteRegistered(String(account_id));
@@ -2228,7 +2229,7 @@ wss.on('connection', (ws, req) => {
           if (!isSameConnection || !InboxSyncScheduler.accounts.has(String(account_id))) {
             InboxSyncScheduler.registerAccount(account_id);
           }
-          if (pending_key) {
+          if (effectivePendingKey) {
             newAccountBootstrapSyncs.set(String(account_id), { awaitingSetup: true, attempt: 0, timer: null });
           }
           // Only arm the replay-suppression window on a genuinely NEW socket.
@@ -2294,7 +2295,7 @@ wss.on('connection', (ws, req) => {
             ON CONFLICT(id) DO UPDATE SET
               name = COALESCE(excluded.name, accounts.name),
               profile_dir = CASE
-                WHEN excluded.profile_dir LIKE '%/pending_%' THEN excluded.profile_dir
+                WHEN excluded.profile_dir LIKE '%/pending_%' OR excluded.profile_dir LIKE '%\pending_%' THEN excluded.profile_dir
                 ELSE COALESCE(accounts.profile_dir, excluded.profile_dir)
               END,
               status = 'ACTIVE',
@@ -2345,7 +2346,7 @@ wss.on('connection', (ws, req) => {
           const backgroundRequestedAt = backgroundAfterConnectRequests.get(String(account_id));
           const backgroundRequestIsFresh = Number.isFinite(backgroundRequestedAt)
             && Date.now() - backgroundRequestedAt < 120000;
-          if (!pending_key && backgroundRequestIsFresh && !KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) {
+          if (!effectivePendingKey && backgroundRequestIsFresh && !KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) {
             backgroundAfterConnectRequests.delete(String(account_id));
             if (backgroundAfterConnectTimers.has(String(account_id))) {
               clearTimeout(backgroundAfterConnectTimers.get(String(account_id)));
@@ -2364,7 +2365,7 @@ wss.on('connection', (ws, req) => {
 
           // Gửi ACK về Extension xác nhận đăng ký thành công
           if (ws.readyState === WebSocket.OPEN) {
-            if (false && !pending_key && !reloadedExtensionsInThisServerRun.has(String(account_id))) {
+            if (false && !effectivePendingKey && !reloadedExtensionsInThisServerRun.has(String(account_id))) {
               reloadedExtensionsInThisServerRun.add(String(account_id));
               if (!processManager.wasLaunchedByThisRun(account_id)) {
                 console.log(`[WS] Yêu cầu Chrome đang chạy sẵn (account=${account_id}) reload extension bản mới nhất...`);
@@ -2374,10 +2375,10 @@ wss.on('connection', (ws, req) => {
             }
             ws.send(JSON.stringify({
               type: 'REGISTER_ACCOUNT_ACK',
-              data: { account_id, status: 'SUCCESS', pending_key }
+              data: { account_id, status: 'SUCCESS', pending_key: effectivePendingKey }
             }));
             const bootstrapState = newAccountBootstrapSyncs.get(String(account_id));
-            if (pending_key) {
+            if (effectivePendingKey) {
               scheduleNewAccountBootstrapSync(account_id);
             } else if (bootstrapState?.awaitingSetup) {
               newAccountBootstrapSyncs.delete(String(account_id));
