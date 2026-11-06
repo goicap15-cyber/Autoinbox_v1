@@ -620,8 +620,8 @@ async function typeIntoTaggedInput(page, tag, value) {
   await page.keyboard.press('Backspace').catch(() => {});
   const text = String(value || '').trim();
   if (text) {
-    await handle.type(text, { delay: 12 }).catch(async () => {
-      await page.keyboard.type(text, { delay: 12 }).catch(() => {});
+    await handle.type(text, { delay: 5 }).catch(async () => {
+      await page.keyboard.type(text, { delay: 5 }).catch(() => {});
     });
   }
   await page.evaluate((el, v) => {
@@ -637,7 +637,7 @@ async function typeIntoTaggedInput(page, tag, value) {
     }
     el.dispatchEvent(new Event('change', { bubbles: true }));
   }, handle, text).catch(() => {});
-  await sleep(250);
+  await sleep(120);
   return true;
 }
 
@@ -1767,25 +1767,44 @@ async function setupMessenger(job, page, appId) {
   const verifyToken = DEPS.getOrCreateVerifyToken();
 
   setStatus(job, 'adding_messenger', 'Đang mở dashboard và thêm sản phẩm Messenger…');
-  await page.goto(`https://developers.facebook.com/apps/${appId}/dashboard/`, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+  if (!new RegExp(`/apps/${appId}(/|$|\\?)`).test(page.url() || '')) {
+    await page.goto(`https://developers.facebook.com/apps/${appId}/dashboard/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+  }
 
-  // Bấm "Thiết lập" của Messenger nếu chưa thêm. Dashboard mới render card
-  // "Available products" với NÚT "Set up" (không còn <a href product_route=
-  // messenger> — reproduce 2026-10-08 12:0x: automation đứng ở bước này, nút
-  // Set up không được bấm). Phân biệt card Messenger với Instagram/WhatsApp
-  // bằng phạm vi tổ tiên chứa "Messenger" mà không chứa "Instagram/WhatsApp".
-  const link = await page.waitForSelector('a[href*="product_route=messenger"]', { timeout: 8000 }).catch(() => null);
-  if (link) {
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {}),
-      link.click().catch(() => page.evaluate((el) => el.click(), link)),
-    ]);
-  } else {
-    const clickedSetUp = await page
+  // Bấm "Thiết lập / Set up" của Messenger ngay khi xuất hiện (không chờ 8s selector cũ,
+  // không sleep 6s + waitForNavigation 90s gây treo sau khi bấm Set up).
+  const setupDeadline = Date.now() + 18000;
+  let clickedSetUp = false;
+  while (Date.now() < setupDeadline) {
+    if (/\/messenger(\/|$|\?)/i.test(page.url() || '')) break;
+    await dismissPopups(page);
+    const step = await page
       .evaluate(() => {
-        const vis = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
+        const vis = (el) => el && (el.offsetParent !== null || el.getClientRects().length > 0);
+        const fireClick = (el) => {
+          el.scrollIntoView({ block: 'center' });
+          const r = el.getBoundingClientRect();
+          const o = { bubbles: true, cancelable: true, view: window };
+          for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(t, o));
+          }
+          try { el.click(); } catch (_) {}
+          return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+        };
+
+        // Đã sang màn cài đặt Messenger (có heading Đặt cấu hình webhook / Configure webhooks)
+        const hasWebhookHeading = [...document.querySelectorAll('[role="heading"], h1, h2, h3')]
+          .some((h) => vis(h) && /đặt cấu hình webhook|configure webhooks|tạo mã truy cập|generate access token/i.test((h.innerText || '').trim()));
+        if (hasWebhookHeading) return { state: 'ready' };
+
+        const directLink = document.querySelector('a[href*="product_route=messenger"], a[href*="/messenger/"]');
+        if (directLink && vis(directLink)) {
+          const pos = fireClick(directLink);
+          return { state: 'clicked', ...pos };
+        }
+
         const btns = [...document.querySelectorAll('[role="button"], button, a')]
-          .filter((b) => vis(b) && /^(set up|thiết lập)$/i.test((b.innerText || '').trim()));
+          .filter((b) => vis(b) && /^(set up|thiết lập)$/i.test(String(b.innerText || '').replace(/[\u200b\ufeff]/g, '').trim()));
         for (const b of btns) {
           let anc = b;
           for (let up = 0; up < 10 && anc && anc !== document.body; up++) {
@@ -1793,22 +1812,42 @@ async function setupMessenger(job, page, appId) {
             if (!anc) break;
             const text = anc.innerText || '';
             if (/instagram|whatsapp/i.test(text)) break; // đi quá phạm vi card
-            if (/messenger/i.test(text)) { b.click(); return true; }
+            if (/messenger/i.test(text)) {
+              const pos = fireClick(b);
+              return { state: 'clicked', ...pos };
+            }
           }
         }
-        return false;
+        return { state: 'waiting' };
       })
-      .catch(() => false);
-    if (clickedSetUp) {
-      setStatus(job, 'adding_messenger', 'Đã bấm Set up Messenger — đợi Meta thêm sản phẩm…');
-      await sleep(6000);
-      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+      .catch(() => ({ state: 'waiting' }));
+
+    if (step.state === 'ready') break;
+    if (step.state === 'clicked') {
+      clickedSetUp = true;
+      setStatus(job, 'adding_messenger', 'Đã bấm Thiết lập Messenger — chuyển ngay sang cấu hình Webhook…');
+      // Nếu vừa click DOM mà vẫn đứng ở trang dashboard thì click chuột thật bồi thêm 1 nhịp
+      if (step.x && step.y && !/\/messenger(\/|$|\?)/i.test(page.url() || '')) {
+        await page.mouse.click(step.x, step.y).catch(() => {});
+      }
+      // Chờ ngắn (tối đa 3.2s, kiểm tra mỗi 250ms): hễ URL đổi sang /messenger hoặc hiện mục webhook là điền ngay!
+      const transitionDeadline = Date.now() + 3200;
+      while (Date.now() < transitionDeadline) {
+        if (/\/messenger(\/|$|\?)/i.test(page.url() || '')) break;
+        const readyNow = await page.evaluate(() => {
+          return /đặt cấu hình webhook|configure webhooks|url gọi lại|callback url/i.test(document.body?.innerText || '');
+        }).catch(() => false);
+        if (readyNow) break;
+        await sleep(250);
+      }
+      break;
     }
+    await sleep(300);
   }
 
-  // Đảm bảo đang ở trang cấu hình Messenger (URL thật: messenger_api_settings)
-  if (!/\/messenger/.test(page.url() || '')) {
-    await page.goto(`https://developers.facebook.com/apps/${appId}/messenger/messenger_api_settings/`, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+  // Đảm bảo đang ở trang cấu hình Messenger (URL thật: messenger_api_settings) — dùng domcontentloaded để vào ngay không chờ networkidle2
+  if (!/\/messenger(\/|$|\?)/i.test(page.url() || '')) {
+    await page.goto(`https://developers.facebook.com/apps/${appId}/messenger/messenger_api_settings/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
   }
 
   setStatus(job, 'filling_webhook', 'Đang điền URL gọi lại & mã xác minh webhook…');
@@ -1833,21 +1872,40 @@ async function setupMessenger(job, page, appId) {
   let errDialog = null;
   if (canSave) {
     setStatus(job, 'saving_webhook', 'Đang bấm "Xác minh và lưu"…');
-    const saved = await clickWhenEnabled(page, SAVE_WEBHOOK_RE, 30000);
+    const saved = await clickWhenEnabled(page, SAVE_WEBHOOK_RE, 20000);
     if (!saved) {
       await errorShot(page, 'sync-error.png');
       throw new Error('Nút "Xác minh và lưu" không bật được — Facebook có thể yêu cầu URL https public. Hãy kiểm tra Chrome.');
     }
 
-    // Facebook gọi webhook để xác minh — đợi kết quả / dialog lỗi
-    await sleep(20000);
-    errDialog = await page
-      .evaluate(() => {
-        const d = [...document.querySelectorAll('[role="dialog"]')].find((x) => x.offsetParent);
-        const t = d ? d.innerText || '' : '';
-        return /không thể|could not|unable to|failed|không xác minh/i.test(t) ? t.slice(0, 150) : null;
-      })
-      .catch(() => null);
+    // Đợi Facebook xác minh webhook thông minh (poll mỗi 400ms thay vì sleep cứng 20s):
+    // Hễ nút "Xác minh và lưu" biến mất/khóa lại (đã lưu xong) hoặc báo lỗi là đi tiếp ngay!
+    await sleep(1200);
+    const verifyDeadline = Date.now() + 9000;
+    while (Date.now() < verifyDeadline) {
+      const verifyState = await page
+        .evaluate(() => {
+          const vis = (el) => el && (el.offsetParent !== null || el.getClientRects().length > 0);
+          const d = [...document.querySelectorAll('[role="dialog"]')].find(vis);
+          const dt = d ? d.innerText || '' : '';
+          if (/không thể|could not|unable to|failed|không xác minh/i.test(dt)) {
+            return { done: true, err: dt.slice(0, 150) };
+          }
+          const saveBtns = [...document.querySelectorAll('[role="button"], button')]
+            .filter((b) => vis(b) && /^(xác minh và lưu|verify and save)$/i.test((b.innerText || '').trim()));
+          const activeSave = saveBtns.find((b) => b.getAttribute('aria-disabled') !== 'true' && !b.disabled);
+          if (!activeSave) {
+            return { done: true, err: null };
+          }
+          return { done: false, err: null };
+        })
+        .catch(() => ({ done: false, err: null }));
+      if (verifyState.done) {
+        errDialog = verifyState.err;
+        break;
+      }
+      await sleep(400);
+    }
     saveNote = errDialog
       ? `Facebook chưa xác minh được webhook (${errDialog.replace(/\n/g, ' ').slice(0, 120)}…) — kiểm tra URL public. `
       : 'Đã bấm "Xác minh và lưu" — Facebook xác minh thành công. ';
@@ -1857,10 +1915,10 @@ async function setupMessenger(job, page, appId) {
   /* ---- Giai đoạn 3: kết nối trang & đồng bộ danh sách fanpage ---- */
   setStatus(job, 'connecting_pages', 'Đang kết nối trang Facebook (mục "Tạo mã truy cập")…');
   // Mở rộng card "Tạo mã truy cập" nếu đang thu gọn (nút "Xem thêm")
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 6; i++) {
     const st = await expandCard(page, 'tạo mã truy cập|generate access token');
     if (st !== 'no-heading') break;
-    await sleep(1500);
+    await sleep(450);
   }
   await connectPagesFlow(job, page);
 
@@ -2366,6 +2424,15 @@ async function pollAndFillWebhook(page, cbUrl, vToken) {
           || inputs.find((el) => String(el.getAttribute('type') || '').toLowerCase() === 'url');
         if (!urlEl && inputs.length >= 2) urlEl = inputs[0];
         if (!urlEl) {
+          const vis = (el) => el && (el.offsetParent !== null || el.getClientRects().length > 0);
+          const fireClick = (el) => {
+            el.scrollIntoView({ block: 'center' });
+            const o = { bubbles: true, cancelable: true, view: window };
+            for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+              el.dispatchEvent(new MouseEvent(t, o));
+            }
+            try { el.click(); } catch (_) {}
+          };
           const heads = [...document.querySelectorAll('[role="heading"], h1, h2, h3')];
           const h = heads.find((x) => /đặt cấu hình webhook|configure webhooks/i.test((x.innerText || '').trim()));
           if (h) {
@@ -2375,7 +2442,10 @@ async function pollAndFillWebhook(page, cbUrl, vToken) {
               if (!node) break;
               const btn = [...node.querySelectorAll('[role="button"][aria-controls]')]
                 .find((b) => b.getAttribute('aria-expanded') === 'false');
-              if (btn) { btn.click(); break; }
+              if (btn) { fireClick(btn); break; }
+              const addCbBtn = [...node.querySelectorAll('[role="button"], button')]
+                .find((b) => vis(b) && /^(?:thêm url gọi lại|add callback url|chỉnh sửa url gọi lại|edit callback url)$/i.test((b.innerText || '').trim()));
+              if (addCbBtn) { fireClick(addCbBtn); break; }
             }
           }
           return { found: false };
@@ -2392,7 +2462,7 @@ async function pollAndFillWebhook(page, cbUrl, vToken) {
         };
       });
       if (!state.found) {
-        await sleep(1500);
+        await sleep(300);
         continue;
       }
       await typeIntoTaggedInput(page, 'webhook-url', cbUrl);
@@ -2404,7 +2474,7 @@ async function pollAndFillWebhook(page, cbUrl, vToken) {
       if (!/execution context|destroyed|target closed/i.test(String(e?.message || e))) {
         return { done: false, reason: String(e?.message || e) };
       }
-      await sleep(1500);
+      await sleep(300);
     }
   }
   return { done: false, reason: 'timeout — không thấy ô URL gọi lại' };
@@ -2435,7 +2505,7 @@ async function clickWhenEnabled(page, source, timeoutMs) {
       }, source)
       .catch(() => false);
     if (ok) return true;
-    await sleep(1200);
+    await sleep(300);
   }
   return false;
 }
@@ -2667,22 +2737,35 @@ function startPageSetup(appId, pageIds, uid, webhookUrl) {
   return { job };
 }
 
+const MAX_PARALLEL_TOKEN_TABS = 10;
+
+async function enableTabFocusEmulation(tab) {
+  try {
+    const cdp = await tab.createCDPSession();
+    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
+  } catch (_) {}
+}
+
 // Tab worker song song cho Lấy token: mở lại trang cấu hình app với cùng phiên
 // (cookie đã lấy sẵn) và mở rộng card "Tạo mã truy cập" chờ xử lý page riêng.
-async function openPageSetupWorkerTab(job, browser, cookies) {
+async function openPageSetupWorkerTab(job, browser, cookies, staggerMs = 0) {
+  if (staggerMs > 0) await sleep(staggerMs);
   const wp = await browser.newPage();
+  await enableTabFocusEmulation(wp);
   await wp.setUserAgent(UA);
   await wp.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
-  await injectSession(wp, { cookies });
+  if (Array.isArray(cookies) && cookies.length) {
+    await injectSession(wp, { cookies });
+  }
   await wp.goto(`https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
   if (/log_in|login\.php/.test(wp.url() || '')) {
     throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM.');
   }
-  await sleep(2500);
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 16; i++) {
     const st = await expandCard(wp, 'tạo mã truy cập|generate access token');
-    if (st !== 'no-heading') break;
-    await sleep(1500);
+    const hasRows = await wp.evaluate(() => document.querySelectorAll('tbody tr[role="row"]').length > 0).catch(() => false);
+    if (hasRows || (st !== 'no-heading' && i >= 2)) break;
+    await sleep(500);
   }
   return wp;
 }
@@ -2723,7 +2806,7 @@ async function waitPageSetupRow(tab, pageId, timeoutMs = 45000) {
       }
       if (!scrolled) window.scrollBy(0, 900);
     }).catch(() => {});
-    await sleep(1200);
+    await sleep(600);
   }
   return false;
 }
@@ -2740,6 +2823,7 @@ async function runPageSetup(job, uid) {
 
   const page = await getPrimaryAutomationPage(browser);
   job.page = page;
+  await enableTabFocusEmulation(page);
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
 
@@ -2749,23 +2833,23 @@ async function runPageSetup(job, uid) {
 
   const settingsUrl = `https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`;
   setStatus(job, 'loading_apps', 'Đang mở trang Cài đặt API Messenger (chỗ lấy token)…');
-  await page.goto(settingsUrl, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+  await page.goto(settingsUrl, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
   await ensureLoggedInDevelopersPage(job, page, uid, settingsUrl, sessionCookies);
 
   // Đảm bảo đang ở đúng trang messenger_api_settings (không nhảy sang /webhooks/?view=page)
   if (!/messenger_api_settings/.test(page.url() || '')) {
-    await page.goto(`https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`, { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+    await page.goto(`https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
   }
-  await sleep(2000);
+  await sleep(800);
 
   // Mở rộng thẳng card "2. Tạo mã truy cập / Generate access tokens"
   setStatus(job, 'scanning', 'Đang mở mục Tạo mã truy cập (Generate access tokens)…');
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 10; i++) {
     const st = await expandCard(page, 'tạo mã truy cập|generate access token');
     if (st !== 'no-heading') break;
-    await sleep(1200);
+    await sleep(600);
   }
-  await sleep(1500);
+  await sleep(700);
 
   // CÀO DANH SÁCH TRANG trong bảng (cập nhật pages.json — kể cả khi CRM đang rỗng)
   const tableDeadline = Date.now() + 25000;
@@ -2789,7 +2873,7 @@ async function runPageSetup(job, uid) {
       if (tableStable >= 2) break;
     }
     await expandCard(page, 'tạo mã truy cập|generate access token');
-    await sleep(1500);
+    await sleep(800);
   }
   if (tableRows.length) {
     const clean = tableRows.map((r) => ({
@@ -2810,38 +2894,90 @@ async function runPageSetup(job, uid) {
     throw new Error('App chưa kết nối trang Facebook nào. Hãy bấm "Connect" trong Chrome (mục 2. Generate access tokens) để kết nối trang, rồi chạy lại.');
   }
 
-  const results = [];
-  let doneCount = 0;
-
-  for (let idx = 0; idx < targets.length; idx++) {
-    if (!job.browser || ['success', 'error'].includes(job.status)) break;
-    const pageId = targets[idx];
-    try {
-      if (!await waitPageSetupRow(page, pageId)) {
-        try { DEPS.log('[pages] Không thấy hàng của trang ' + pageId + ' trong bảng token — bỏ qua.'); } catch (_) {}
-        results.push({ pageId, token: null });
-        doneCount += 1;
-        continue;
-      }
-      setStatus(job, 'subscribing', `Đang đăng ký webhook cho trang ${pageId} (${doneCount + 1}/${targets.length})…`);
-      await subscribePageFields(job, page, pageId);
-
-      setStatus(job, 'generating_token', `Đang tạo Page Access Token cho trang ${pageId} (${doneCount + 1}/${targets.length})…`);
-      const token = await generatePageToken(job, page, pageId);
-      results.push({ pageId, token: token || null });
-      doneCount += 1;
-      setStatus(job, 'generating_token', `Xong ${doneCount}/${targets.length} trang…`);
-    } catch (e) {
-      if (!job.browser) throw e;
-      try { DEPS.log('[pages] Lỗi xử lý trang ' + pageId + ': ' + ((e && e.message) || e)); } catch (_) {}
-      results.push({ pageId, token: null });
-      doneCount += 1;
+  // Mở song song tối đa 10 tab (vd chọn 10 page -> mở 10 tab, chọn 20 page -> mở 10 tab chia nhau chạy cuốn chiếu)
+  const desiredTabs = Math.min(MAX_PARALLEL_TOKEN_TABS, targets.length);
+  const workerTabs = [page];
+  if (desiredTabs > 1 && job.browser) {
+    setStatus(job, 'opening_tabs', `Đang mở ${desiredTabs} tab song song để lấy token cho ${targets.length} trang…`);
+    const liveCookies = await page.cookies('https://www.facebook.com', 'https://developers.facebook.com').catch(() => []);
+    const workerCookies = liveCookies.length ? liveCookies : sessionCookies;
+    const extraTabs = await Promise.all(
+      Array.from({ length: desiredTabs - 1 }, (_, i) =>
+        openPageSetupWorkerTab(job, browser, workerCookies, (i + 1) * 120).catch((e) => {
+          try { DEPS.log(`[pages] Không mở được tab phụ #${i + 2}: ${e?.message || e}`); } catch (_) {}
+          return null;
+        })
+      )
+    );
+    for (const t of extraTabs) {
+      if (t) workerTabs.push(t);
     }
   }
 
+  const results = new Array(targets.length);
+  let nextIdx = 0;
+  let doneCount = 0;
+  const activeTabCount = workerTabs.length;
+
+  const persistSinglePageToken = (pageId, token) => {
+    if (!token) return;
+    try {
+      const curPages = DEPS.listPages(job.uid);
+      const existing = curPages.find((x) => String(x.pageId) === String(pageId));
+      if (existing) existing.token = token;
+      else curPages.push({ pageId: String(pageId), name: 'Trang ' + pageId, token, connectedAt: new Date().toISOString() });
+      DEPS.savePages(job.uid, curPages);
+      const latestApp = DEPS.appGetLatest(job.uid);
+      if (latestApp && latestApp.appId === job.appId) {
+        DEPS.appUpdate(job.uid, job.appId, { pages: curPages });
+      }
+    } catch (_) {}
+  };
+
+  setStatus(job, 'generating_token', `Đang chạy ${activeTabCount} tab song song lấy token cho ${targets.length} trang…`);
+
+  await Promise.all(
+    workerTabs.map(async (tab) => {
+      while (job.browser && !['success', 'error'].includes(job.status)) {
+        const myIdx = nextIdx;
+        nextIdx += 1;
+        if (myIdx >= targets.length) break;
+        const pageId = targets[myIdx];
+        try {
+          if (!await waitPageSetupRow(tab, pageId)) {
+            try { DEPS.log('[pages] Không thấy hàng của trang ' + pageId + ' trong bảng token — bỏ qua.'); } catch (_) {}
+            results[myIdx] = { pageId, token: null };
+            doneCount += 1;
+            continue;
+          }
+          setStatus(job, 'subscribing', `Đang cấu hình & lấy token (${activeTabCount} tab song song — đang xử lý trang ${pageId}, xong ${doneCount}/${targets.length})…`);
+          await subscribePageFields(job, tab, pageId);
+
+          const token = await generatePageToken(job, tab, pageId);
+          results[myIdx] = { pageId, token: token || null };
+          if (token) persistSinglePageToken(pageId, token);
+          doneCount += 1;
+          setStatus(job, 'generating_token', `Đang lấy token (${activeTabCount} tab song song): xong ${doneCount}/${targets.length} trang…`);
+        } catch (e) {
+          if (!job.browser) throw e;
+          try { DEPS.log('[pages] Lỗi xử lý trang ' + pageId + ': ' + ((e && e.message) || e)); } catch (_) {}
+          results[myIdx] = { pageId, token: null };
+          doneCount += 1;
+        }
+      }
+    })
+  );
+
+  // Đóng các tab worker phụ sau khi hoàn tất
+  for (let i = 1; i < workerTabs.length; i++) {
+    try { await workerTabs[i].close(); } catch (_) {}
+  }
+
+  const finalResults = results.filter(Boolean);
+
   // Cập nhật token vào pages.json + bản ghi app mới nhất
   const allPages = DEPS.listPages(job.uid);
-  for (const r of results) {
+  for (const r of finalResults) {
     if (!r.token) continue;
     const p = allPages.find((x) => x.pageId === r.pageId);
     if (p) p.token = r.token;
@@ -2853,15 +2989,12 @@ async function runPageSetup(job, uid) {
     DEPS.appUpdate(job.uid, job.appId, { pages: allPages });
   }
 
-  // Đăng ký webhook qua Graph ngay với token vừa lấy — nếu bước DOM
-  // (subscribeAppToPageObject) fail âm thầm thì bước này cứu, và kết quả
-  // được BÁO RÕ cho user thay vì im lặng (báo lỗi 2026-10-06).
-  // Chạy 5 luồng cùng lúc — mỗi page là 1 POST Graph độc lập.
+  // Đăng ký webhook qua Graph ngay với token vừa lấy — chạy 10 luồng song song
   const subResults = [];
-  const tokenResults = results.filter((r) => r.token);
+  const tokenResults = finalResults.filter((r) => r.token);
   let subCursor = 0;
   setStatus(job, 'subscribing', `Đang đăng ký webhook qua Graph cho ${tokenResults.length} trang…`);
-  await Promise.all(Array.from({ length: Math.min(5, Math.max(1, tokenResults.length)) }, async () => {
+  await Promise.all(Array.from({ length: Math.min(10, Math.max(1, tokenResults.length)) }, async () => {
     while (subCursor < tokenResults.length && job.browser) {
       const r = tokenResults[subCursor];
       subCursor += 1;
@@ -2871,8 +3004,8 @@ async function runPageSetup(job, uid) {
     }
   }));
 
-  const okCount = results.filter((r) => r.token).length;
-  const summary = results.map((r) => {
+  const okCount = finalResults.filter((r) => r.token).length;
+  const summary = finalResults.map((r) => {
     const p = allPages.find((x) => x.pageId === r.pageId);
     const nm = p ? p.name : r.pageId;
     return `${nm}${r.token ? ' ✓' : ' (không lấy được token)'}`;
@@ -2918,7 +3051,15 @@ async function subscribePageFields(job, page, pageId) {
   log('nút Add subscription: ' + clicked + ' (page ' + pageId + ')');
   if (clicked !== 'clicked') return; // không có nút → có thể đã đăng ký, bỏ qua
 
-  await sleep(2500);
+  // Đợi hộp thoại Edit Page Subscriptions xuất hiện (poll mỗi 250ms, tối đa 3s thay vì sleep cứng 2.5s)
+  for (let w = 0; w < 12; w++) {
+    await sleep(250);
+    const hasBoxes = await page.evaluate(() => {
+      const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+      return [...document.querySelectorAll('[role="checkbox"], input[type="checkbox"]')].filter(vis).length >= 3;
+    }).catch(() => false);
+    if (hasBoxes) break;
+  }
 
   // Tick theo DOM thật của dialog "Edit Page Subscriptions": checkbox là
   // div[role=checkbox] (aria-checked), KHÔNG phải <input> — và text của hàng
@@ -2968,11 +3109,11 @@ async function subscribePageFields(job, page, pageId) {
 
   for (const t of layout.targets.filter((x) => !x.on)) {
     await page.mouse.click(t.x, t.y).catch(() => {});
-    await sleep(500);
+    await sleep(220);
   }
 
   // Xác minh trạng thái THẬT sau khi click
-  await sleep(1200);
+  await sleep(450);
   const verified = await page
     .evaluate((fields) => {
       const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
@@ -3026,11 +3167,10 @@ async function subscribePageFields(job, page, pageId) {
   } else {
     await clickWhenEnabled(page, CONFIRM_SUBSCRIBE_RE, 20000);
   }
-  await sleep(2500);
-  await page.screenshot({ path: path.join(DEPS.dataDir, `subscribe-debug-${pageId}.png`) }).catch(() => {});
+  await sleep(900);
   // Đóng dialog nếu còn
   await clickMatching(page, '^(?:đóng|close|x)$', '[role="button"], button');
-  await sleep(1000);
+  await sleep(350);
 }
 
 // Bấm "Tạo" → tick "Tôi hiểu" → bấm "Sao chép" → chụp token (hook clipboard + DOM)
@@ -3157,7 +3297,7 @@ async function generatePageToken(job, page, pageId) {
     log('Không tìm thấy nút Tạo/Generate cho trang ' + pageId);
     return null;
   }
-  await sleep(1200);
+  await sleep(450);
 
   // Chờ dialog xuất hiện; nếu cú click DOM chưa mở dialog thì click chuột thật qua CDP
   const hasDialogNow = await page.evaluate(() => {
@@ -3165,7 +3305,13 @@ async function generatePageToken(job, page, pageId) {
   }).catch(() => false);
   if (!hasDialogNow) {
     await page.mouse.click(genPos.x, genPos.y).catch(() => {});
-    await sleep(1800);
+    for (let w = 0; w < 8; w++) {
+      await sleep(250);
+      const okDlg = await page.evaluate(() => {
+        return [...document.querySelectorAll('[role="dialog"]')].some((d) => d.offsetParent !== null || d.getClientRects().length > 0);
+      }).catch(() => false);
+      if (okDlg) break;
+    }
   }
 
   // Vòng lặp chờ dialog Token Generation, tick quyền (nếu có), tick "Tôi hiểu / I understand" và đọc token
@@ -3185,13 +3331,14 @@ async function generatePageToken(job, page, pageId) {
         const btn = [...document.querySelectorAll('[role="button"], button')].filter(vis)
           .find((b) => /^(?:generate token|generate access token|tạo mã truy cập|tạo mã)$/i.test((b.innerText || '').trim()));
         if (!btn) return null;
+        try { btn.click(); } catch (_) {}
         const r = btn.getBoundingClientRect();
         return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
       })
       .catch(() => null);
     if (permGenBtn) {
       await page.mouse.click(permGenBtn.x, permGenBtn.y).catch(() => {});
-      await sleep(1800);
+      await sleep(750);
     }
 
     // 2. Tick "Tôi hiểu / I understand" bằng cả DOM click lẫn click chuột thật qua CDP
@@ -3226,7 +3373,7 @@ async function generatePageToken(job, page, pageId) {
 
     if (understandTarget && understandTarget.needMouse && understandTarget.pos) {
       await page.mouse.click(understandTarget.pos.x, understandTarget.pos.y).catch(() => {});
-      await sleep(700);
+      await sleep(350);
     }
 
     // 3. Bấm "Sao chép / Copy" nếu đã mở khóa
@@ -3246,7 +3393,7 @@ async function generatePageToken(job, page, pageId) {
       .catch(() => null);
     if (copyPos) {
       await page.mouse.click(copyPos.x, copyPos.y).catch(() => {});
-      await sleep(600);
+      await sleep(300);
     }
 
     // 4. Đọc token từ clipboard hook hoặc trực tiếp từ input/DOM của dialog
@@ -3273,10 +3420,12 @@ async function generatePageToken(job, page, pageId) {
       token = token.trim();
       break;
     }
-    await sleep(900);
+    await sleep(400);
   }
 
-  await page.screenshot({ path: path.join(DEPS.dataDir, `token-debug-${pageId}.png`) }).catch(() => {});
+  if (!valid(token)) {
+    await page.screenshot({ path: path.join(DEPS.dataDir, `token-debug-${pageId}.png`) }).catch(() => {});
+  }
 
   // Đóng dialog ("Done / Xong / Đóng / Close")
   const closePos = await page
@@ -3297,7 +3446,7 @@ async function generatePageToken(job, page, pageId) {
   } else {
     await clickMatching(page, '^(?:đóng|close|đã hiểu|got it|ok|x|done|xong)$', '[role="button"], button');
   }
-  await sleep(900);
+  await sleep(350);
   log('Kết quả lấy token trang ' + pageId + ': ' + (valid(token) ? 'OK' : 'FAIL'));
   return valid(token) ? token.trim() : null;
 }
