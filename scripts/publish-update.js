@@ -30,6 +30,7 @@ function addDirToZip(zip, fsDir, zipPrefix) {
   const args = process.argv.slice(2);
   const noBump = args.includes('--no-bump');
   const shouldPush = args.includes('--push');
+  const requiresRestart = args.includes('--restart');
   const noteArgs = args.filter((a) => !a.startsWith('--'));
   const releaseNotes = noteArgs.join(' ').trim() || 'Cập nhật tính năng và vá lỗi ổn định hệ thống.';
 
@@ -49,6 +50,7 @@ function addDirToZip(zip, fsDir, zipPrefix) {
     version: nextVersion,
     releasedAt: new Date().toISOString(),
     notes: releaseNotes,
+    requiresRestart,
   };
 
   console.log('2. Đang nén gói Hot-Update (updates/crm-update.zip)...');

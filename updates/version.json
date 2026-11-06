@@ -1,7 +1,8 @@
 {
-  "version": "1.0.7",
-  "releasedAt": "2026-11-05T10:53:44.158Z",
-  "notes": "Giao diện popup cập nhật ô vuông gọn đẹp chính giữa màn hình & Tự động cập nhật nhanh",
-  "sizeBytes": 2506239,
-  "sha256": "9d581b152480f7a4cbffaa0830ac763085b8b84fe91620391755e471f029b3b6"
+  "version": "1.0.8",
+  "releasedAt": "2026-11-06T03:15:44.306Z",
+  "notes": "Sửa lỗi không mở được Chrome khi Thêm tài khoản trên PC khác (ưu tiên Chrome 153 đóng gói sẵn + tự động dự phòng)",
+  "requiresRestart": true,
+  "sizeBytes": 2506443,
+  "sha256": "c88b0c5e09647f999aa1b95665e13726f2eb07facceaaccfc43bc8ecf2c61fa0"
 }

@@ -7914,7 +7914,7 @@ app.post('/api/accounts/new-session', async (req, res) => {
   console.log(`[API] Tạo phiên đăng ký tài khoản Facebook mới: ${pendingKey}`);
   const success = await processManager.startNewAccountProcess(pendingKey);
   if (!success) pendingAccountOwners.delete(pendingKey);
-  res.json({ success, pending_key: pendingKey });
+  res.json({ success, pending_key: pendingKey, error: success ? undefined : (`Không thể mở Chrome: ${processManager.lastLaunchError || "Lỗi không xác định"}`) });
 });
 // The AccountManagerModal polls this every 1.5s while a setup session is
 // open, as the fallback when the ACCOUNT_STATUS_CHANGED socket event is

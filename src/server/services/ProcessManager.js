@@ -2,7 +2,7 @@ const { spawn, exec, execFile, spawnSync } = require('child_process');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
-const { resolveChromePath } = require('../../../chrome-bundling/resolveChromePath');
+const { resolveChromePath, findSystemChromePath } = require('../../../chrome-bundling/resolveChromePath');
 const { resolveExtensionPath, resolveBinRoot } = require('../utils/appResourceRoot');
 const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 
@@ -373,15 +373,89 @@ class ProcessManager {
   }
 
   getInteractiveSetupChromeExecutable() {
-    // Facebook's encrypted-history/PIN setup has been observed hanging in the
-    // bundled Chrome for Testing 152 while the installed Stable browser loads
-    // it normally. Both account setup and later background connections use
-    // Stable; Puppeteer installs the extension through the debugging pipe.
+    // Ưu tiên Chrome for Testing 153 được đóng gói sẵn trong bộ cài (đảm bảo 100% tương thích
+    // cài extension tự động trên mọi PC khách mà không phụ thuộc bản Chrome trên máy khách).
     return resolveChromePath({
       repoRoot: resolveBinRoot(),
       legacyBinChromePath: this.binChromePath,
-      preferSystemChrome: true
+      preferSystemChrome: false
     });
+  }
+
+  async launchBrowserWithExtension(absProfileDir, absExtPath) {
+    const puppeteer = await getPuppeteer();
+    const baseArgs = [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--hide-crash-restore-bubble',
+      '--disable-session-crashed-bubble',
+      '--start-maximized',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-background-mode',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion',
+      '--disable-popup-blocking',
+      '--disable-notifications',
+      '--autoplay-policy=no-user-gesture-required'
+    ];
+
+    const bundledExe = resolveChromePath({
+      repoRoot: resolveBinRoot(),
+      legacyBinChromePath: this.binChromePath,
+      preferSystemChrome: false
+    });
+    const sysExe = findSystemChromePath();
+
+    const candidates = [];
+    if (bundledExe && fs.existsSync(bundledExe)) {
+      candidates.push({ label: 'Bundled Chrome (CDP installExtension)', exe: bundledExe, mode: 'cdp' });
+      candidates.push({ label: 'Bundled Chrome (--load-extension)', exe: bundledExe, mode: 'flag' });
+    }
+    if (sysExe && fs.existsSync(sysExe) && sysExe !== bundledExe) {
+      candidates.push({ label: 'System Chrome (CDP installExtension)', exe: sysExe, mode: 'cdp' });
+    }
+    if (!candidates.length && bundledExe) {
+      candidates.push({ label: 'Fallback Chrome', exe: bundledExe, mode: 'cdp' });
+    }
+
+    const errors = [];
+    for (const cand of candidates) {
+      let browser = null;
+      try {
+        const launchArgs = cand.mode === 'flag'
+          ? [...baseArgs, `--disable-extensions-except=${absExtPath}`, `--load-extension=${absExtPath}`]
+          : baseArgs;
+        browser = await puppeteer.launch({
+          executablePath: cand.exe,
+          headless: false,
+          ignoreDefaultArgs: ['--enable-automation'],
+          userDataDir: absProfileDir,
+          defaultViewport: null,
+          enableExtensions: cand.mode === 'cdp',
+          args: launchArgs
+        });
+        if (cand.mode === 'cdp') {
+          await browser.installExtension(absExtPath);
+        }
+        this.lastLaunchError = null;
+        console.log(`[ProcessManager] Đã mở thành công qua ${cand.label}: ${cand.exe}`);
+        return browser;
+      } catch (err) {
+        const msg = `${cand.label}: ${err?.message || err}`;
+        console.warn('[ProcessManager] Thử ứng viên Chrome thất bại -> chuyển ứng viên tiếp theo:', msg);
+        errors.push(msg);
+        if (browser) {
+          try { await browser.close(); } catch (_) {}
+        }
+      }
+    }
+
+    const fullErr = errors.join(' | ') || 'Không tìm thấy trình duyệt Chrome khả dụng';
+    this.lastLaunchError = fullErr;
+    throw new Error(fullErr);
   }
 
   cancelScheduledHides(accountId) {
@@ -492,31 +566,7 @@ class ProcessManager {
 
     console.log(`[ProcessManager] Khởi chạy Chrome Stable + tự cài extension cho account ${accountId} (Profile: ${absProfileDir})...`);
     try {
-      const puppeteer = await getPuppeteer();
-      const browser = await puppeteer.launch({
-        executablePath: chromeExecutable,
-        headless: false,
-        ignoreDefaultArgs: ['--enable-automation'],
-        userDataDir: absProfileDir,
-        defaultViewport: null,
-        enableExtensions: true,
-        args: [
-          '--hide-crash-restore-bubble',
-          '--disable-session-crashed-bubble',
-          '--start-maximized',
-          '--no-first-run',
-          '--no-default-browser-check',
-          '--disable-background-mode',
-          '--disable-background-timer-throttling',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding',
-          '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion',
-          '--disable-popup-blocking',
-          '--disable-notifications',
-          '--autoplay-policy=no-user-gesture-required'
-        ]
-      });
-      await browser.installExtension(absExtPath);
+      const browser = await this.launchBrowserWithExtension(absProfileDir, absExtPath);
       const child = browser.process();
       if (!child?.pid) throw new Error('Puppeteer không trả về PID Chrome');
 
@@ -734,7 +784,7 @@ class ProcessManager {
       try {
         if (existing?.browser?.connected) {
           const page = await existing.browser.newPage();
-          await page.goto(setupUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.goto(setupUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((navErr) => console.warn('[ProcessManager] Điều hướng setupUrl cảnh báo nhẹ (vẫn giữ Chrome mở):', navErr?.message));
         } else {
           spawn(this.getInteractiveSetupChromeExecutable(), [
             `--user-data-dir=${path.resolve(existing?.profileDir || path.join(APP_DATA_ROOT, `profiles/${pendingKey}`))}`,
@@ -791,31 +841,7 @@ class ProcessManager {
 
     console.log(`[ProcessManager] Khởi chạy Chrome Stable + tự cài extension cho phiên [${pendingKey}]: ${chromeExecutable}`);
     try {
-      const puppeteer = await getPuppeteer();
-      const browser = await puppeteer.launch({
-        executablePath: chromeExecutable,
-        headless: false,
-        ignoreDefaultArgs: ['--enable-automation'],
-        userDataDir: absProfileDir,
-        defaultViewport: null,
-        enableExtensions: true,
-        args: [
-          '--hide-crash-restore-bubble',
-          '--disable-session-crashed-bubble',
-          '--start-maximized',
-          '--no-first-run',
-          '--no-default-browser-check',
-          '--disable-background-mode',
-          '--disable-background-timer-throttling',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding',
-          '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion',
-          '--disable-popup-blocking',
-          '--disable-notifications',
-          '--autoplay-policy=no-user-gesture-required'
-        ]
-      });
-      await browser.installExtension(absExtPath);
+      const browser = await this.launchBrowserWithExtension(absProfileDir, absExtPath);
       const child = browser.process();
       if (!child?.pid) throw new Error('Puppeteer không trả về PID Chrome');
 

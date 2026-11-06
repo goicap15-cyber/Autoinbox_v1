@@ -301,6 +301,7 @@ class AppUpdaterService {
         latestVersion,
         updateAvailable: isNewer,
         releasedAt: manifest?.releasedAt || null,
+        requiresRestart: Boolean(manifest?.requiresRestart),
         notes: String(manifest?.notes || '').trim(),
         downloadUrl: String(manifest?.downloadUrl || '').trim(),
         progress: 0,
@@ -501,26 +502,41 @@ class AppUpdaterService {
       }
 
       const newVer = this.status.latestVersion || this.getCurrentVersion();
+      const needsAppRestart = Boolean(this.status.requiresRestart);
       this.emitStatus({
         state: 'restarting',
         currentVersion: newVer,
         latestVersion: newVer,
         updateAvailable: false,
         progress: 100,
-        message: `Đã cập nhật thành công lên v${newVer}! Đang làm mới giao diện ngay lập tức...`,
+        message: needsAppRestart
+          ? `Đã cập nhật hệ thống lên v${newVer}! Đang tự khởi động lại ứng dụng...`
+          : `Đã cập nhật thành công lên v${newVer}! Đang làm mới giao diện ngay lập tức...`,
       });
 
-      // Chuyển lại về trạng thái idle sau khi giao diện đã tự reload tại chỗ (không đóng cửa sổ app)
-      setTimeout(() => {
-        this.emitStatus({
-          state: 'up_to_date',
-          currentVersion: newVer,
-          latestVersion: newVer,
-          updateAvailable: false,
-          progress: 100,
-          message: `Bạn đang sử dụng phiên bản mới nhất (v${newVer}).`,
-        });
-      }, 2500);
+      if (needsAppRestart) {
+        setTimeout(() => {
+          try {
+            const electron = require('electron');
+            if (electron && electron.app && typeof electron.app.relaunch === 'function') {
+              electron.app.relaunch();
+              electron.app.exit(0);
+              return;
+            }
+          } catch (_) {}
+        }, 1100);
+      } else {
+        setTimeout(() => {
+          this.emitStatus({
+            state: 'up_to_date',
+            currentVersion: newVer,
+            latestVersion: newVer,
+            updateAvailable: false,
+            progress: 100,
+            message: `Bạn đang sử dụng phiên bản mới nhất (v${newVer}).`,
+          });
+        }, 2500);
+      }
 
       return this.status;
     } catch (err) {
