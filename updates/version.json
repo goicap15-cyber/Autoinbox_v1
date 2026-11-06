@@ -1,8 +1,8 @@
 {
-  "version": "1.0.13",
-  "releasedAt": "2026-11-06T07:56:04.175Z",
-  "notes": "Tăng tốc bấm Thiết lập Messenger điền Webhook ngay & mở song song tối đa 10 tab lấy token",
+  "version": "1.0.14",
+  "releasedAt": "2026-11-06T08:17:08.491Z",
+  "notes": "Sửa lỗi querySelectorAll khi trang Messenger đang tải và tăng tốc điền Webhook + lấy token 10 tab",
   "requiresRestart": true,
-  "sizeBytes": 3079049,
-  "sha256": "e8dbb9908fbe37913ee71cd9c62ec245b3d32634fa6a97ae6543ddc306dc23c8"
+  "sizeBytes": 3079243,
+  "sha256": "65ee74b797c5d7f91dc4acf610d4982a42ebdaedccb701530220f23990299fda"
 }

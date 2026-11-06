@@ -643,6 +643,7 @@ async function typeIntoTaggedInput(page, tag, value) {
 
 async function tagAppCreationInputs(page) {
   return page.evaluate(() => {
+    if (!document.body) return { hasName: false, hasEmail: false, emailValue: '' };
     const isFormInput = (el) => {
       if (!el || el.disabled || el.readOnly) return false;
       const r = el.getBoundingClientRect();
@@ -1726,6 +1727,7 @@ function waitUserPassword(job) {
 async function pollAndFill(page, appName, email) {
   const deadline = Date.now() + 90000;
   const startedAt = Date.now();
+  let lastErr = null;
   while (Date.now() < deadline) {
     try {
       await dismissPopups(page);
@@ -1749,13 +1751,15 @@ async function pollAndFill(page, appName, email) {
         return { done: true, emailFilled: false, needEmail: true };
       }
     } catch (e) {
-      if (!/execution context|destroyed|target closed/i.test(String(e?.message || e))) {
-        return { done: false, reason: String(e?.message || e) };
+      const msg = String(e?.message || e);
+      if (/target closed|session closed|browser has been closed/i.test(msg)) {
+        return { done: false, reason: msg };
       }
+      lastErr = msg;
     }
-    await sleep(800);
+    await sleep(600);
   }
-  return { done: false, reason: 'timeout' };
+  return { done: false, reason: lastErr || 'timeout' };
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -1780,6 +1784,7 @@ async function setupMessenger(job, page, appId) {
     await dismissPopups(page);
     const step = await page
       .evaluate(() => {
+        if (!document.body) return { state: 'waiting' };
         const vis = (el) => el && (el.offsetParent !== null || el.getClientRects().length > 0);
         const fireClick = (el) => {
           el.scrollIntoView({ block: 'center' });
@@ -1826,18 +1831,22 @@ async function setupMessenger(job, page, appId) {
     if (step.state === 'clicked') {
       clickedSetUp = true;
       setStatus(job, 'adding_messenger', 'Đã bấm Thiết lập Messenger — chuyển ngay sang cấu hình Webhook…');
-      // Nếu vừa click DOM mà vẫn đứng ở trang dashboard thì click chuột thật bồi thêm 1 nhịp
-      if (step.x && step.y && !/\/messenger(\/|$|\?)/i.test(page.url() || '')) {
-        await page.mouse.click(step.x, step.y).catch(() => {});
-      }
-      // Chờ ngắn (tối đa 3.2s, kiểm tra mỗi 250ms): hễ URL đổi sang /messenger hoặc hiện mục webhook là điền ngay!
-      const transitionDeadline = Date.now() + 3200;
+      // Chờ Meta thêm sản phẩm & tự chuyển sang /messenger (poll mỗi 250ms, tối đa 6.5s):
+      // Hễ URL đổi sang /messenger hoặc hiện mục webhook là điền ngay lập tức!
+      const transitionDeadline = Date.now() + 6500;
+      let retryMouseClicked = false;
+      const clickedAt = Date.now();
       while (Date.now() < transitionDeadline) {
         if (/\/messenger(\/|$|\?)/i.test(page.url() || '')) break;
         const readyNow = await page.evaluate(() => {
-          return /đặt cấu hình webhook|configure webhooks|url gọi lại|callback url/i.test(document.body?.innerText || '');
+          if (!document.body) return false;
+          return /đặt cấu hình webhook|configure webhooks|url gọi lại|callback url/i.test(document.body.innerText || '');
         }).catch(() => false);
         if (readyNow) break;
+        if (!retryMouseClicked && Date.now() - clickedAt > 1400 && step.x && step.y && !/\/messenger(\/|$|\?)/i.test(page.url() || '')) {
+          retryMouseClicked = true;
+          await page.mouse.click(step.x, step.y).catch(() => {});
+        }
         await sleep(250);
       }
       break;
@@ -1845,7 +1854,7 @@ async function setupMessenger(job, page, appId) {
     await sleep(300);
   }
 
-  // Đảm bảo đang ở trang cấu hình Messenger (URL thật: messenger_api_settings) — dùng domcontentloaded để vào ngay không chờ networkidle2
+  // Đảm bảo đang ở trang cấu hình Messenger (URL thật: messenger_api_settings)
   if (!/\/messenger(\/|$|\?)/i.test(page.url() || '')) {
     await page.goto(`https://developers.facebook.com/apps/${appId}/messenger/messenger_api_settings/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
   }
@@ -2375,9 +2384,11 @@ async function subscribeAppToPageObject(job, page) {
 
 async function pollAndFillWebhook(page, cbUrl, vToken) {
   const deadline = Date.now() + 60000;
+  let lastErr = null;
   while (Date.now() < deadline) {
     try {
       const state = await page.evaluate(() => {
+        if (!document.body) return { found: false };
         const isWebhookInput = (el) => {
           if (!el || el.disabled || el.readOnly) return false;
           const r = el.getBoundingClientRect();
@@ -2390,7 +2401,8 @@ async function pollAndFillWebhook(page, cbUrl, vToken) {
           return true;
         };
         const dlg = [...document.querySelectorAll('[role="dialog"], div[aria-modal="true"]')].find((d) => d.offsetParent !== null || d.getClientRects().length > 0);
-        const scope = dlg || document.body;
+        const scope = dlg || document.body || document.documentElement;
+        if (!scope || typeof scope.querySelectorAll !== 'function') return { found: false };
         const inputs = [...scope.querySelectorAll('input')].filter(isWebhookInput)
           .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
         const byHeading = (re) => {
@@ -2461,23 +2473,29 @@ async function pollAndFillWebhook(page, cbUrl, vToken) {
           hasToken: Boolean(tokenEl)
         };
       });
-      if (!state.found) {
+      if (!state || !state.found) {
         await sleep(300);
         continue;
       }
-      await typeIntoTaggedInput(page, 'webhook-url', cbUrl);
+      const okUrl = await typeIntoTaggedInput(page, 'webhook-url', cbUrl);
+      if (!okUrl) {
+        await sleep(300);
+        continue;
+      }
       if (state.hasToken) {
         await typeIntoTaggedInput(page, 'webhook-token', vToken);
       }
       return { done: true, tokenFilled: state.hasToken, unchanged: state.originalUrl === cbUrl };
     } catch (e) {
-      if (!/execution context|destroyed|target closed/i.test(String(e?.message || e))) {
-        return { done: false, reason: String(e?.message || e) };
+      const msg = String(e?.message || e);
+      if (/target closed|session closed|browser has been closed/i.test(msg)) {
+        return { done: false, reason: msg };
       }
+      lastErr = msg;
       await sleep(300);
     }
   }
-  return { done: false, reason: 'timeout — không thấy ô URL gọi lại' };
+  return { done: false, reason: lastErr || 'timeout — không thấy ô URL gọi lại' };
 }
 
 // Chờ nút (theo text) bật Enabled rồi bấm
@@ -3344,10 +3362,12 @@ async function generatePageToken(job, page, pageId) {
     // 2. Tick "Tôi hiểu / I understand" bằng cả DOM click lẫn click chuột thật qua CDP
     const understandTarget = await page
       .evaluate(() => {
+        if (!document.body) return null;
         const vis = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
         const center = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; };
         const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter(vis);
         const scope = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
+        if (!scope || typeof scope.querySelectorAll !== 'function') return null;
 
         // Tìm label hoặc phần tử chứa "Tôi hiểu" / "I understand"
         const cands = [...scope.querySelectorAll('label, span, div')]
@@ -3379,9 +3399,11 @@ async function generatePageToken(job, page, pageId) {
     // 3. Bấm "Sao chép / Copy" nếu đã mở khóa
     const copyPos = await page
       .evaluate(() => {
+        if (!document.body) return null;
         const vis = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
         const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter(vis);
         const scope = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
+        if (!scope || typeof scope.querySelectorAll !== 'function') return null;
         const btn = [...scope.querySelectorAll('[role="button"], button')].filter(vis)
           .find((b) => /^(?:sao chép|copy)$/i.test((b.innerText || '').trim())
             && !b.disabled && b.getAttribute('aria-disabled') !== 'true');
@@ -3403,7 +3425,7 @@ async function generatePageToken(job, page, pageId) {
           return window.__capturedToken.trim();
         }
         const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter((x) => x.offsetParent || x.getClientRects().length > 0);
-        const scopes = dlgs.length ? [...dlgs.reverse(), document.body] : [document.body];
+        const scopes = (dlgs.length ? [...dlgs.reverse(), document.body] : [document.body]).filter(Boolean);
         for (const scope of scopes) {
           const inputs = [...scope.querySelectorAll('input, textarea')]
             .map((i) => (i.value || '').trim())
@@ -3430,9 +3452,11 @@ async function generatePageToken(job, page, pageId) {
   // Đóng dialog ("Done / Xong / Đóng / Close")
   const closePos = await page
     .evaluate(() => {
+      if (!document.body) return null;
       const vis = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
       const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter(vis);
       const scope = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
+      if (!scope || typeof scope.querySelectorAll !== 'function') return null;
       const btn = [...scope.querySelectorAll('[role="button"], button')].filter(vis)
         .find((b) => /^(?:done|xong|đóng|close|đã hiểu|got it|ok)$/i.test((b.innerText || '').trim()));
       if (!btn) return null;
