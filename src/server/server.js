@@ -3256,12 +3256,13 @@ wss.on('connection', (ws, req) => {
               // Operator trả lời = đã đọc hội thoại: ghim -1 để chấm xanh
               // còn treo ở Messenger không đánh dấu lại "chưa đọc" khi sync.
               db.prepare('UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?').run(String(canonicalThreadId));
+              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 0, unread_manual: -1 });
             } else {
               // Tin mới của khách: bật chưa đọc + GẮN CỜ DÍNH, vì tab Facebook
               // có thể đang đậu đúng thread này nên Facebook tự báo "đã đọc"
               // vài giây sau qua sync sidebar - không được để nó tắt nhắc.
-              db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
+              db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
+              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 0, last_activity: new Date(incomingAt || Date.now()).toISOString() });
             }
           }
           ConversationRepository.upsertThread({
@@ -4718,7 +4719,7 @@ wss.on('connection', (ws, req) => {
                       AND (fb_message_id IS NULL OR fb_message_id NOT LIKE 'sidebar_preview_%')
                     ORDER BY timestamp_ms DESC, id DESC LIMIT 1
                   `).get(existingInternalThreadId);
-                  if (newestRealMessage) {
+                  if (newestRealMessage && !rowFresh && !unreadFlipped) {
                     const newestIsToday = Number(newestRealMessage.timestamp_ms) >= startOfTodayMs;
                     if (newestRealMessage.is_outgoing === 1 || !newestIsToday) syncUnread = 0;
                   }
@@ -4780,6 +4781,9 @@ wss.on('connection', (ws, req) => {
                   inbox_folder_verified: t.inbox_folder_verified === true
                 });
                 const canonicalThreadId = String(storedThread?.id || existingInternalThreadId);
+                if (previousThread && Number(previousThread.is_unread) === 1 && Number(syncUnread) === 0) {
+                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 0, unread_manual: 0 });
+                }
 
                 // Page thread bắt buộc phải mang page_id vào job, nếu không
                 // scheduler route nhầm sang lane cá nhân (tab Messenger cá
@@ -5002,7 +5006,7 @@ wss.on('connection', (ws, req) => {
                     isSystemNotice: changed.system_notice
                   });
                   if (allowFlip) {
-                    db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                    db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
                     io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: new Date().toISOString() });
                   } else {
                     syncDebug('UNREAD_GUARD_SKIP', { stage: 'PREVIEW_FLIP', thread: String(canonicalThreadId).substring(0, 24), content: sanitizeLog(previewContent, 40), manual: flipGuardManual?.unread_manual });
@@ -5077,7 +5081,7 @@ wss.on('connection', (ws, req) => {
                   });
                   if (allowBump && (isUnreadNow || !lastMsgMatches || changed.unread_flipped)) {
                     const bumpedAtIso = new Date().toISOString();
-                    db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                    db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
                     io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: bumpedAtIso });
                     syncDebug('PREVIEW_BUMP_REPEAT', { thread: String(canonicalThreadId).substring(0, 24), content: sanitizeLog(previewContent, 40), status: sync_status || null });
                   } else if (!allowBump) {
@@ -5098,7 +5102,7 @@ wss.on('connection', (ws, req) => {
                 });
                 if (allowMediaBump) {
                   const bumpedAtIso = new Date().toISOString();
-                  db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                  db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
                   io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: bumpedAtIso });
                   syncDebug('MEDIA_HINT', { thread: String(canonicalThreadId).substring(0, 24), status: sync_status || null });
                 } else {
@@ -8237,7 +8241,7 @@ app.post('/api/threads/:id/restore', (req, res) => {
 app.post('/api/threads/:id/unread', (req, res) => {
   try {
     const id = req.params.id;
-    const row = db.prepare('SELECT is_unread FROM threads WHERE id = ?').get(id);
+    const row = db.prepare('SELECT is_unread, unread_manual FROM threads WHERE id = ?').get(id);
     if (!row) return res.status(404).json({ error: 'Không tìm thấy hội thoại.' });
     const desired = req.body && req.body.unread !== undefined ? Number(req.body.unread) : null;
     const next = desired === null ? (Number(row.is_unread) ? 0 : 1) : (desired ? 1 : 0);
@@ -8251,8 +8255,10 @@ app.post('/api/threads/:id/unread', (req, res) => {
       // sẽ nổi chưa đọc trở lại (đúng triệu chứng user báo 2026-10-08).
       db.prepare('UPDATE threads SET unread_manual = -1 WHERE id = ?').run(id);
     }
-    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(id), is_unread: next });
-    res.json({ success: true, id: String(id), is_unread: next });
+    const nextManual = next ? 1 : -1;
+    db.prepare('UPDATE threads SET is_unread = ?, unread_manual = ? WHERE id = ?').run(next, nextManual, id);
+    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(id), is_unread: next, unread_manual: nextManual });
+    res.json({ success: true, id: String(id), is_unread: next, unread_manual: nextManual });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Không thể cập nhật trạng thái chưa đọc.' });
   }
@@ -9329,7 +9335,74 @@ function startServer() {
   // có tin cuối là TỪ MÁY GỬI hoặc từ TRƯỚC hôm nay. Idempotent — lần khởi
   // động sau gần như rỗng. Chạy TRƯỚC khi bật poller/watcher/sync.
   try {
+    const healNowMs = Date.now();
     const healStartOfTodayMs = new Date().setHours(0, 0, 0, 0);
+    // 1. Kéo các message có timestamp_ms tương lai (lỗi parse label ngày như '10 tháng 11') về mốc tin thật gần nhất trong thread
+    db.prepare(`
+      UPDATE messages
+      SET timestamp_ms = COALESCE(
+        (SELECT MAX(m2.timestamp_ms) FROM messages m2 WHERE m2.thread_id = messages.thread_id AND m2.timestamp_ms > 0 AND m2.timestamp_ms <= ?),
+        CAST(strftime('%s', messages.created_at) AS INTEGER) * 1000,
+        ?
+      )
+      WHERE timestamp_ms > ?
+    `).run(healNowMs + 60000, healNowMs, healNowMs + 60000);
+    // 2. Xóa các message rác của Page (quảng cáo, phản hồi bình luận, AI agent, hoặc rỗng không có media)
+    db.prepare(`
+      DELETE FROM messages
+      WHERE (media_url IS NULL OR TRIM(media_url) = '')
+        AND (media_type IS NULL OR media_type = 'text')
+        AND (
+          content IS NULL
+          OR TRIM(content) = ''
+          OR TRIM(content) LIKE '%đã trả lời một quảng cáo%'
+          OR TRIM(content) LIKE '%replied to an ad%'
+          OR TRIM(content) LIKE 'Bạn đang phản hồi bình luận của người dùng về bài viết trên%'
+          OR TRIM(content) LIKE 'You are replying to a user%comment on a post on%'
+          OR TRIM(content) LIKE 'Tác nhân AI sẽ phản hồi%'
+          OR TRIM(content) LIKE 'Bạn đã tiếp quản đoạn chat này từ tác nhân AI%'
+          OR TRIM(content) LIKE 'Đã tự động tạo hoạt động về khách hàng tiềm năng%'
+        )
+    `).run();
+    // 3. Làm sạch last_message rác trên bảng threads và đồng bộ lại từ tin nhắn thật mới nhất
+    db.prepare(`
+      UPDATE threads
+      SET last_message = COALESCE(
+        (
+          SELECT CASE
+            WHEN m.content IS NOT NULL AND TRIM(m.content) != '' THEN SUBSTR(TRIM(m.content), 1, 200)
+            WHEN m.media_type IS NOT NULL AND m.media_type != 'text' THEN '[Đính kèm]'
+            ELSE NULL
+          END
+          FROM messages m
+          WHERE m.thread_id = threads.id
+            AND (m.fb_message_id IS NULL OR m.fb_message_id NOT LIKE 'sidebar_preview_%')
+          ORDER BY COALESCE(m.timestamp_ms, 0) DESC, m.id DESC
+          LIMIT 1
+        ),
+        'Chưa có tin nhắn'
+      )
+      WHERE last_message IS NULL
+        OR TRIM(last_message) = ''
+        OR TRIM(last_message) = '[Đính kèm]'
+        OR TRIM(last_message) LIKE '%đã trả lời một quảng cáo%'
+        OR TRIM(last_message) LIKE '%replied to an ad%'
+        OR TRIM(last_message) LIKE 'Bạn đang phản hồi bình luận của người dùng về bài viết trên%'
+        OR TRIM(last_message) LIKE 'Tác nhân AI sẽ phản hồi%'
+    `).run();
+    // 4. Hội thoại Page rỗng (chỉ có stub quảng cáo/bình luận, chưa có tin nhắn thật nào) -> hạ xuống cuối và gỡ unread
+    db.prepare(`
+      UPDATE threads
+      SET is_unread = 0, unread_manual = 0, last_activity = '1970-01-01 00:00:00'
+      WHERE source_id LIKE 'src_page_%'
+        AND NOT EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.thread_id = threads.id
+            AND (m.fb_message_id IS NULL OR m.fb_message_id NOT LIKE 'sidebar_preview_%')
+        )
+    `).run();
+    // 5. Gỡ cờ unread_manual=1 tự động từ bản cũ để cho phép đồng bộ trạng thái đã đọc từ Messenger
+    db.prepare('UPDATE threads SET unread_manual = 0 WHERE unread_manual = 1').run();
     const REAL_MSG_FILTER = "(m.fb_message_id IS NULL OR m.fb_message_id NOT LIKE 'sidebar_preview_%')";
     const clamped = db.prepare(`
       UPDATE threads

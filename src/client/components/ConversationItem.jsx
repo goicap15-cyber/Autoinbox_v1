@@ -28,8 +28,8 @@ function ConversationItem({ thread, isSelected, onSelect, accounts = [], inboxSo
   // API nên sync cứ hâm lại trên hội thoại cũ (14/10). Badge/dot/bold chỉ
   // tính với hội thoại hoạt động HÔM NAY; trạng thái đánh tay (isThreadUnreadRow)
   // giữ nguyên không gate (2026-10-21).
-  const unreadVisible = unreadCount > 0 && isThreadActiveToday(thread);
-  const isThreadUnreadRow = unreadCount > 0 || Number(thread.unread_manual) === 1;
+  const unreadVisible = unreadCount > 0 && (isThreadActiveToday(thread) || Number(thread.unread_manual) === 1);
+  const isThreadUnreadRow = unreadVisible;
   const isPinned = Number(thread.pinned) === 1;
   const [ctxMenu, setCtxMenu] = useState(null);
   const [bellMenu, setBellMenu] = useState(null);

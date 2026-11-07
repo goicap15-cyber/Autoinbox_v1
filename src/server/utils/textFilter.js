@@ -29,6 +29,11 @@ const SYSTEM_PATTERNS = [
   // thành tin của khách mỗi lần initial sweep mở thread (reproduce 2026-10-07).
   /^Messages and calls are secured with end-to-end encryption\.?$/i,
   /^Messages and calls are end-to-end encrypted\.?$/i,
+  /^Bạn đang phản hồi bình luận của người dùng về bài viết trên\b/i,
+  /^You are replying to a user(?:'s)? comment on a post on\b/i,
+  /^[^\n]{1,80}\s+đã trả lời một quảng cáo\.?$/i,
+  /^[^\n]{1,80}\s+replied to an ad\.?$/i,
+  /^Tác nhân AI sẽ phản hồi\.?$/i,
   // Nhãn phân cách thời gian dạng tắt khi Messenger UI tiếng Anh ("9w",
   // "2d", "5h", "3m"...) - separator, không phải tin nhắn
   // (reproduce 2026-10-07: "9w" thành bubble rác trong hội thoại).
@@ -153,6 +158,10 @@ const SYSTEM_PATTERNS = [
   // Banner quảng cáo ghim đỉnh hội thoại lead + chip bật AI (harvest orphan
   // dễ nhặt nhầm - 2026-09-28)
   /^Đoạn chat này chứa tin trả lời quảng cáo/i,
+  /^Bạn đang phản hồi bình luận của người dùng về bài viết trên\b/i,
+  /^You are replying to a user(?:'s)? comment on a post on\b/i,
+  /^[^\n]{1,80}\s+đã trả lời một quảng cáo\.?$/i,
+  /^[^\n]{1,80}\s+replied to an ad\.?$/i,
   /^Bật tính năng phản hồi bằng AI$/i,
   /^Xem quảng cáo$/i,
   /^Người gửi:?$/i,
@@ -231,7 +240,12 @@ const SYSTEM_CONVERSATION_NOTICE_PATTERNS = [
   // Notice E2EE (bản tiếng Anh) - bộ heal sidebar (server.js SYNC_THREADS_RESULT)
   // cần nhận ra nó để gỡ unread sai cho thread chưa có tin khách thật.
   /^Messages and calls are secured with end-to-end encryption\.?$/i,
-  /^Messages and calls are end-to-end encrypted\.?$/i
+  /^Messages and calls are end-to-end encrypted\.?$/i,
+  /^Bạn đang phản hồi bình luận của người dùng về bài viết trên\b/i,
+  /^You are replying to a user(?:'s)? comment on a post on\b/i,
+  /^[^\n]{1,80}\s+đã trả lời một quảng cáo\.?$/i,
+  /^[^\n]{1,80}\s+replied to an ad\.?$/i,
+  /^Tác nhân AI sẽ phản hồi\.?$/i
 ];
 
 function isSystemConversationNotice(text) {

@@ -8178,13 +8178,21 @@ function scrapeFacebookSidebar() {
       let hasUnreadDot = rowContainer.querySelector('[data-testid="unread-count"], .unread') ? true : false;
       if (!hasUnreadDot) {
         for (const el of rowContainer.querySelectorAll('[aria-label]')) {
-          if (/chưa đọc|unread|tin nhắn mới|new message/i.test(el.getAttribute('aria-label') || '')) { hasUnreadDot = true; break; }
+          const lbl = (el.getAttribute('aria-label') || '').trim();
+          if (/^(?:đánh dấu(?: là)? chưa đọc|mark as unread)$/i.test(lbl)) { hasUnreadDot = false; break; }
+          if (/^(?:đánh dấu(?: là)? đã đọc|mark as read)$/i.test(lbl)) { hasUnreadDot = true; break; }
+          if (!/đánh dấu|mark as/i.test(lbl) && /chưa đọc|unread|tin nhắn mới|new message/i.test(lbl)) { hasUnreadDot = true; break; }
         }
       }
       if (!hasUnreadDot) {
         for (const el of rowContainer.querySelectorAll('div, span, i')) {
           const w = el.offsetWidth; const h = el.offsetHeight;
-          if (w < 6 || w > 16 || h < 6 || h > 16) continue;
+          if (w < 6 || w > 14 || h < 6 || h > 14 || Math.abs(w - h) > 2) continue;
+          if (el.children.length > 0 || (el.textContent || '').trim()) continue;
+          if (el.closest('svg, img, [role="img"], [role="button"], button')) continue;
+          const rTarget = typeof rowContainer !== 'undefined' ? rowContainer : row;
+          const rRect = rTarget && rTarget.getBoundingClientRect ? rTarget.getBoundingClientRect() : null;
+          if (rRect && rRect.width > 0 && el.getBoundingClientRect().left < rRect.left + rRect.width * 0.55) continue;
           const st = window.getComputedStyle(el);
           const radius = parseFloat(st.borderTopLeftRadius);
           if (!(Number.isFinite(radius) && radius >= Math.min(w, h) / 2)) continue;
@@ -8196,6 +8204,8 @@ function scrapeFacebookSidebar() {
         }
       }
 
+      const activeRowOnVisibleTab = (rowContainer.getAttribute?.('aria-current') === 'page' || Boolean(rowContainer.querySelector?.('[aria-current="page"]'))) && document.visibilityState === 'visible' && document.hasFocus?.();
+      if (activeRowOnVisibleTab) hasUnreadDot = false;
       // 4. Lấy đoạn tin nhắn cuối
       // "Trả lời?"... là span UI (nút/mENU trên row) chứ không phải tin nhắn —
       // snippet thật trống (media/poll) thì bỏ qua thay vì nhặt rác.
@@ -8334,11 +8344,19 @@ function scrapeMessageRequestsSidebar() {
         // dò chấm tròn xanh + aria-label.
         if (row.querySelector('[data-testid="unread-count"], .unread')) return true;
         for (const el of row.querySelectorAll('[aria-label]')) {
-          if (/chưa đọc|unread|tin nhắn mới|new message/i.test(el.getAttribute('aria-label') || '')) return true;
+          const lbl = (el.getAttribute('aria-label') || '').trim();
+          if (/^(?:đánh dấu(?: là)? chưa đọc|mark as unread)$/i.test(lbl)) return false;
+          if (/^(?:đánh dấu(?: là)? đã đọc|mark as read)$/i.test(lbl)) return true;
+          if (!/đánh dấu|mark as/i.test(lbl) && /chưa đọc|unread|tin nhắn mới|new message/i.test(lbl)) return true;
         }
         for (const el of row.querySelectorAll('div, span, i')) {
           const w = el.offsetWidth; const h = el.offsetHeight;
-          if (w < 6 || w > 16 || h < 6 || h > 16) continue;
+          if (w < 6 || w > 14 || h < 6 || h > 14 || Math.abs(w - h) > 2) continue;
+          if (el.children.length > 0 || (el.textContent || '').trim()) continue;
+          if (el.closest('svg, img, [role="img"], [role="button"], button')) continue;
+          const rTarget = typeof rowContainer !== 'undefined' ? rowContainer : row;
+          const rRect = rTarget && rTarget.getBoundingClientRect ? rTarget.getBoundingClientRect() : null;
+          if (rRect && rRect.width > 0 && el.getBoundingClientRect().left < rRect.left + rRect.width * 0.55) continue;
           const st = getComputedStyle(el);
           const radius = parseFloat(st.borderTopLeftRadius);
           if (!(Number.isFinite(radius) && radius >= Math.min(w, h) / 2)) continue;

@@ -15,7 +15,7 @@ export function threadActivityTime(thread) {
   // Server gắn last_msg_ts = timestamp của tin nhắn THẬT mới nhất. last_activity
   // bị sync/seen/mở hội thoại bump mà không có tin mới nên không đáng tin để xếp.
   const messageTs = Number(thread?.last_msg_ts);
-  if (Number.isFinite(messageTs) && messageTs > 0) return messageTs;
+  if (Number.isFinite(messageTs) && messageTs > 0 && messageTs <= Date.now() + 60000) return messageTs;
   const value = thread?.last_activity || thread?.updated_at || thread?.created_at || 0;
   const numeric = Number(value);
   if (typeof value !== 'string' && Number.isFinite(numeric)) return numeric;
@@ -57,7 +57,7 @@ function threadPinnedTime(thread) {
 // trả lời bằng API nên hội thoại cũ vẫn bị sync hâm cờ; chỉ coi là chưa đọc
 // khi hội thoại thực sự hoạt động hôm nay (2026-10-21).
 function isThreadUnread(thread) {
-  return Number(thread?.is_unread) === 1 && isThreadActiveToday(thread);
+  return Number(thread?.is_unread) === 1 && (isThreadActiveToday(thread) || Number(thread?.unread_manual) === 1);
 }
 
 // Thứ tự: ghim -> chưa đọc -> hoạt động gần nhất. Mở hội thoại (seen) gỡ

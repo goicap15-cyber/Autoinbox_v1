@@ -1,8 +1,8 @@
 {
-  "version": "1.0.17",
-  "releasedAt": "2026-11-06T11:03:13.296Z",
-  "notes": "Sửa bộ lọc Nguồn hội thoại (Cá nhân + Fanpage) không trộn lẫn các Page khác thuộc cùng tài khoản",
+  "version": "1.0.18",
+  "releasedAt": "2026-11-07T03:04:20.856Z",
+  "notes": "Sửa đồng bộ trạng thái đã đọc/chưa đọc từ Messenger, chuẩn hóa sắp xếp hội thoại và lọc bỏ tin nhắn hệ thống/quảng cáo rác",
   "requiresRestart": true,
-  "sizeBytes": 3080202,
-  "sha256": "57f0c9230f78d36ef3324896254edafbba9fcf1edc8a005dd77e7287bd52ea0f"
+  "sizeBytes": 3083270,
+  "sha256": "661562916542430cd53db840f241b3f39c4f961f439dd804c68ce0caa3301d15"
 }

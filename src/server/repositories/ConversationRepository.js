@@ -1,4 +1,4 @@
-﻿const crypto = require('crypto');
+const crypto = require('crypto');
 const { isInvalidContactName, cleanContactName, cleanMessageText, isSystemOrMetadataText, stripBizSentByAttribution, isBizSentByAttributionOnly, isBizFeedbackOnly } = require('../utils/textFilter');
 const { isKnownPageSystemNotice } = require('../utils/pageSystemNotice');
 const { isBlacklistedThreadId } = require('../utils/threadGuard');
@@ -382,6 +382,7 @@ class ConversationRepository {
             thread_url = COALESCE(?, thread_url),
             last_message = COALESCE(?, last_message),
             is_unread = COALESCE(?, is_unread),
+            unread_manual = CASE WHEN ? = 0 AND COALESCE(unread_manual, 0) = 1 THEN 0 ELSE unread_manual END,
             inbox_folder = CASE
               WHEN inbox_folder = 'INBOX'
                 AND ? IN ('MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')
@@ -396,7 +397,8 @@ class ConversationRepository {
           targetName,
           thread_url, 
           last_message, 
-          is_unread === undefined ? null : (is_unread ? 1 : 0), 
+          is_unread === undefined ? null : (is_unread ? 1 : 0),
+          is_unread === undefined ? null : (is_unread ? 1 : 0),
           normalizedInboxFolder,
           inboxFolderVerified,
           normalizedInboxFolder,
@@ -449,7 +451,7 @@ class ConversationRepository {
     const maxByThread = new Map(database.prepare(`
       SELECT thread_id, MAX(timestamp_ms) AS max_ts
       FROM messages
-      WHERE timestamp_ms > 0 AND thread_id IN (${ids.map(() => '?').join(',')})
+      WHERE timestamp_ms > 0 AND timestamp_ms <= ${Date.now() + 60000} AND thread_id IN (${ids.map(() => '?').join(',')})
       GROUP BY thread_id
     `).all(...ids).map((r) => [String(r.thread_id), Number(r.max_ts)]));
     for (const row of rows) {
@@ -608,7 +610,8 @@ class ConversationRepository {
           ? Number(msg.sequence_order ?? msg.dom_order)
           : null;
         let stableId = msg.fb_message_id || msg.messageId || msg.client_message_id || ConversationRepository.fingerprint(threadId, msg);
-        const observedTimestampMs = Number(msg.timestamp_ms || msg.timestamp || 0);
+        const rawObservedTs = Number(msg.timestamp_ms || msg.timestamp || 0);
+        const observedTimestampMs = (Number.isFinite(rawObservedTs) && rawObservedTs > 0 && rawObservedTs <= Date.now() + 60000) ? rawObservedTs : 0;
         const observedTimestampSource = msg.timestamp_source || 'sync';
         let content = msg.content ?? msg.text ?? msg.cleaned ?? null;
         const mediaType = msg.media_type || (msg.media_url ? 'image' : 'text');

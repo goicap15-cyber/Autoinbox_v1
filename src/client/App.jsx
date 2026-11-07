@@ -1205,7 +1205,10 @@ export default function App() {
         });
         if (idx >= 0) {
           const updated = [...prev];
-          updated[idx] = { ...updated[idx], ...(['source_id','source_type','source_name','source_status'].reduce((acc, key) => (newMsg[key] ? { ...acc, [key]: newMsg[key] } : acc), {})), thread_key: msgThreadKey || updated[idx].thread_key, last_message: newMsg.content, last_activity: newMsg.created_at || new Date().toISOString(), is_unread: true };
+          const isViewingThisThread = String(activeThreadIdRef.current) === tidStr;
+          const nextMsgTs = Number(newMsg.timestamp_ms) || Date.parse(newMsg.created_at || '') || Date.now();
+          const prevMsgTs = Number(updated[idx].last_msg_ts) || 0;
+          updated[idx] = { ...updated[idx], ...(['source_id','source_type','source_name','source_status'].reduce((acc, key) => (newMsg[key] ? { ...acc, [key]: newMsg[key] } : acc), {})), thread_key: msgThreadKey || updated[idx].thread_key, last_message: newMsg.content || updated[idx].last_message, last_activity: newMsg.created_at || new Date(nextMsgTs).toISOString(), last_msg_ts: Math.max(prevMsgTs, nextMsgTs), is_unread: (!newMsg.is_outgoing && !isViewingThisThread) ? 1 : 0, unread_manual: (newMsg.is_outgoing || isViewingThisThread) ? -1 : 0, unread_count: (!newMsg.is_outgoing && !isViewingThisThread) ? 1 : 0 };
           return sortThreadsByActivity(updated);
         }
         const summary = newMsg.thread_summary;
@@ -1666,7 +1669,7 @@ export default function App() {
       // đánh dấu đã đọc -> thread tụt về vị trí theo last_activity như Messenger.
       const nextActivity = typeof payload?.last_activity === 'string' ? payload.last_activity : null;
       setThreads((prev) => sortThreadsByActivity(prev.map((t) => (String(t.id) === tid
-        ? { ...t, is_unread: next ? 1 : 0, unread_manual: next ? 1 : -1, ...(nextActivity ? { last_activity: nextActivity } : {}) }
+        ? { ...t, is_unread: next ? 1 : 0, unread_manual: payload?.unread_manual !== undefined ? Number(payload.unread_manual) : (next ? 0 : -1), unread_count: next ? (Number(t.unread_count) || 1) : 0, ...(nextActivity ? { last_activity: nextActivity, last_msg_ts: Math.max(Number(t.last_msg_ts) || 0, Date.parse(nextActivity) || 0) } : {}) }
         : t))));
     });
     socket.on('THREAD_COMPLETED', () => loadThreadsRef.current());
@@ -1720,7 +1723,10 @@ export default function App() {
               contact_name: synced.contact_name || synced.name || updatedThreads[idx].contact_name,
               avatar_url: synced.avatar_url || updatedThreads[idx].avatar_url,
               phone: synced.phone || updatedThreads[idx].phone,
-              email: synced.email || updatedThreads[idx].email
+              email: synced.email || updatedThreads[idx].email,
+              ...(String(syncedIdStr) === String(activeThreadIdRef.current) || (Number(updatedThreads[idx].unread_manual) === -1 && !(Number(synced.last_msg_ts || 0) > Number(updatedThreads[idx].last_msg_ts || 0)))
+                ? { is_unread: 0, unread_manual: -1, unread_count: 0 }
+                : {})
             };
           } else {
             updatedThreads.push({
@@ -2087,12 +2093,18 @@ export default function App() {
   const activeMessages = activeThreadId ? (messages[String(activeThreadId)] || []) : [];
   const handleSelectThread = useCallback((threadId) => {
     const clickedThread = threads.find((thread) => String(thread.id) === String(threadId));
-    if (clickedThread && (Number(clickedThread.is_unread) === 1 || Number(clickedThread.unread_manual) === 1)) {
+    if (clickedThread) {
+      const tidStr = String(clickedThread.id || threadId);
+      setThreads((prev) => sortThreadsByActivity(prev.map((t) => (String(t.id) === tidStr
+        ? { ...t, is_unread: 0, unread_manual: -1, unread_count: 0 }
+        : t))));
+      if (Number(clickedThread.is_unread) === 1 || Number(clickedThread.unread_manual) === 1) {
       fetch('/api/threads/' + encodeURIComponent(String(threadId)) + '/unread', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ unread: 0 })
       }).catch(() => {});
+    }
     }
     requestThreadNavigation(clickedThread);
   }, [threads, requestThreadNavigation]);

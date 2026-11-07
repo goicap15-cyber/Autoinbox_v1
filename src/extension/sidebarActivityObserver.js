@@ -47,20 +47,42 @@
     return m ? decodeURIComponent(m[1]) : '';
   }
 
-  // 2026-10-03: FB bỏ data-testid="unread-count"/.unread trên row Messenger
-  // mới (đo DOM thật: 0 match, cả ngày 03-10). Chấm chưa đọc giờ là div tròn
-  // 6-16px nền xanh FB trong row - dò theo hình dạng+màu để không phụ thuộc
-  // class hash đổi liên tục, kèm biến thể aria-label (CSS i-flag không gập
-  // được Đ/đ nên so sánh bằng JS regex).
-  function detectRowUnread(row) {
-    if (row.querySelector('[data-testid="unread-count"], .unread')) return true;
-    for (const el of row.querySelectorAll('[aria-label]')) {
-      if (/chưa đọc|unread|tin nhắn mới|new message/i.test(el.getAttribute('aria-label') || '')) return true;
+  // 2026-10-03 / 2026-11-07: Dò trạng thái chưa đọc chính xác trên row sidebar Messenger:
+  // - Nếu user đang focus trực tiếp vào tab Messenger và mở đúng hội thoại này -> đã đọc (false).
+  // - Loại bỏ nút menu "Đánh dấu là chưa đọc" / "Mark as unread" (nút này chỉ có trên hội thoại ĐÃ ĐỌC!).
+  // - Chấm tròn xanh chỉ hợp lệ khi nằm ở nửa bên phải của row (tránh bắt nhầm badge xanh ở avatar bên trái).
+  function detectRowUnread(row, threadId) {
+    const activeUrlThreadId = extractThreadId(location.pathname);
+    const isRowActive = row.getAttribute?.('aria-current') === 'page'
+      || Boolean(row.querySelector?.('[aria-current="page"]'))
+      || Boolean(threadId && activeUrlThreadId && String(activeUrlThreadId) === String(threadId));
+    if (isRowActive && document.visibilityState === 'visible' && document.hasFocus?.()) {
+      return false;
     }
+
+    if (row.querySelector('[data-testid="unread-count"], .unread')) return true;
+
+    for (const el of row.querySelectorAll('[aria-label]')) {
+      const label = (el.getAttribute('aria-label') || '').trim();
+      if (!label) continue;
+      if (/^(?:đánh dấu(?: là)? chưa đọc|mark as unread)$/i.test(label)) return false;
+      if (/^(?:đánh dấu(?: là)? đã đọc|mark as read)$/i.test(label)) return true;
+      if (!/đánh dấu|mark as/i.test(label) && /chưa đọc|unread|tin nhắn mới|new message/i.test(label)) {
+        return true;
+      }
+    }
+
+    const rowRect = row.getBoundingClientRect ? row.getBoundingClientRect() : null;
     for (const el of row.querySelectorAll('div, span, i')) {
       const w = el.offsetWidth;
       const h = el.offsetHeight;
-      if (w < 6 || w > 16 || h < 6 || h > 16) continue;
+      if (w < 6 || w > 14 || h < 6 || h > 14 || Math.abs(w - h) > 2) continue;
+      if (el.children.length > 0 || (el.textContent || '').trim()) continue;
+      if (el.closest('svg, img, [role="img"], [role="button"], button')) continue;
+      if (rowRect && rowRect.width > 0) {
+        const elRect = el.getBoundingClientRect();
+        if (elRect.left < rowRect.left + rowRect.width * 0.55) continue;
+      }
       const st = getComputedStyle(el);
       const radius = parseFloat(st.borderTopLeftRadius);
       if (!(Number.isFinite(radius) && radius >= Math.min(w, h) / 2)) continue;
@@ -97,7 +119,7 @@
       if (!threadId || seen.has(threadId)) continue;
       seen.add(threadId);
       const row = link.closest('[role="row"], [role="listitem"], li') || link.parentElement || link;
-      const unread = detectRowUnread(row);
+      const unread = detectRowUnread(row, threadId);
       // Preserve the exact row while it is still mounted. Messenger can
       // virtualize it away between this mutation and background.executeScript.
       // The background parser remains primary; this snapshot is only its
@@ -188,10 +210,16 @@
     attributes: true,
     attributeFilter: ['aria-label', 'aria-current', 'class', 'href']
   });
+  window.addEventListener('focus', schedule);
+  document.addEventListener('visibilitychange', schedule);
+  document.addEventListener('click', schedule, true);
   const fallbackTimer = setInterval(emitIfChanged, 500);
   globalThis.__FB_CRM_SIDEBAR_ACTIVITY_OBSERVER__ = {
     disconnect() {
       observer.disconnect();
+      window.removeEventListener('focus', schedule);
+      document.removeEventListener('visibilitychange', schedule);
+      document.removeEventListener('click', schedule, true);
       clearInterval(fallbackTimer);
       if (debounceTimer) clearTimeout(debounceTimer);
       if (trailingTimer) clearTimeout(trailingTimer);
