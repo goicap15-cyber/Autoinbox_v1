@@ -10045,6 +10045,22 @@ function startServer() {
       db.prepare('UPDATE contacts SET name = ? WHERE thread_id = ?').run(cleaned, pt.id);
     }
 
+    // (4j-req) Trả các hội thoại hộp thư chính bị đẩy nhầm sang Tin nhắn chờ về lại INBOX
+    db.prepare(`
+      UPDATE threads
+      SET inbox_folder = 'INBOX'
+      WHERE inbox_folder IN ('MESSAGE_REQUEST_POSSIBLE', 'MESSAGE_REQUEST_SPAM')
+        AND (
+          thread_url IS NULL
+          OR (thread_url NOT LIKE '%/requests/%' AND thread_url NOT LIKE '%/spam/%')
+          OR contact_name IN ('Facebook user', 'Người dùng Facebook')
+          OR last_message LIKE 'Tôi:%'
+          OR last_message LIKE 'Bạn:%'
+          OR last_message LIKE 'Bạn đã gửi%'
+          OR EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = threads.id AND m.is_outgoing = 1)
+        )
+    `).run();
+
     // (4k) Gỡ trạng thái chưa đọc bị kẹt (unread_manual = 1 do lỗi quét lại bubble cũ) trên hội thoại cũ
     db.prepare(`
       UPDATE threads

@@ -384,7 +384,28 @@ class ConversationRepository {
       }
     }
 
+    const hasExplicitRequestUrl = /\/messages\/(?:(?:e2ee\/)?(?:requests|spam)|(?:requests|spam)\/e2ee)(?:\/|\?)/i.test(String(thread_url || ''));
+    let safeInboxFolder = normalizedInboxFolder;
+    if (['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(safeInboxFolder) && !hasExplicitRequestUrl) {
+      safeInboxFolder = existing ? null : 'INBOX';
+    }
+
     if (existing) {
+      const existingRow = database.prepare('SELECT inbox_folder, thread_url FROM threads WHERE id = ?').get(existing.id);
+      const existingFolder = existingRow?.inbox_folder || 'INBOX';
+      const existingUrl = String(existingRow?.thread_url || '');
+      const existingHasNormalInboxUrl = /\/messages\/(?:e2ee\/)?t\//i.test(existingUrl)
+        && !/\/messages\/(?:(?:e2ee\/)?(?:requests|spam)|(?:requests|spam)\/e2ee)(?:\/|\?)/i.test(existingUrl);
+      const hasExistingMessages = Boolean(
+        database.prepare('SELECT 1 FROM messages WHERE thread_id = ? LIMIT 1').get(existing.id)
+      );
+      // Hội thoại đã nằm ở INBOX (có URL hộp thư chính hoặc đã có tin nhắn trong DB)
+      // KHÔNG BAO GIỜ bị đẩy ngược sang Tin nhắn chờ.
+      const allowMoveToRequest = inboxFolderVerified === 1
+        && hasExplicitRequestUrl
+        && !existingHasNormalInboxUrl
+        && !hasExistingMessages;
+
       const existingIsInvalid = isInvalidContactName(existing.contact_name);
       let targetName = existing.contact_name;
       if (cleanIncomingName && cleanIncomingName !== 'Khách hàng') {
@@ -403,10 +424,10 @@ class ConversationRepository {
             is_unread = COALESCE(?, is_unread),
             unread_manual = CASE WHEN ? = 0 AND COALESCE(unread_manual, 0) = 1 THEN 0 ELSE unread_manual END,
             inbox_folder = CASE
-              WHEN inbox_folder = 'INBOX'
+              WHEN COALESCE(inbox_folder, 'INBOX') = 'INBOX'
                 AND ? IN ('MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')
                 AND ? = 0
-              THEN inbox_folder
+              THEN 'INBOX'
               ELSE COALESCE(?, inbox_folder)
             END
         WHERE id = ?
@@ -414,13 +435,13 @@ class ConversationRepository {
           external_thread_id, 
           source_id || null, 
           targetName,
-          thread_url, 
+           (existingHasNormalInboxUrl && ['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(normalizedInboxFolder)) ? existingUrl : thread_url, 
           last_message, 
           is_unread === undefined ? null : (is_unread ? 1 : 0),
           is_unread === undefined ? null : (is_unread ? 1 : 0),
-          normalizedInboxFolder,
-          inboxFolderVerified,
-          normalizedInboxFolder,
+          safeInboxFolder,
+          allowMoveToRequest ? 1 : 0,
+          safeInboxFolder,
           existing.id
       );
       return this.getThread(existing.id, database);
@@ -429,7 +450,7 @@ class ConversationRepository {
     database.prepare(`
       INSERT INTO threads (id, external_thread_id, account_id, source_id, thread_url, contact_name, last_message, is_unread, inbox_folder)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(preferredId, external_thread_id, account_id, source_id || null, thread_url, cleanIncomingName || 'Khách hàng', last_message, is_unread === undefined ? 1 : (is_unread ? 1 : 0), normalizedInboxFolder || 'INBOX');
+    `).run(preferredId, external_thread_id, account_id, source_id || null, thread_url, cleanIncomingName || 'Khách hàng', last_message, is_unread === undefined ? 1 : (is_unread ? 1 : 0), safeInboxFolder || 'INBOX');
     return this.getThread(preferredId, database);
   }
 

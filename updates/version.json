@@ -1,8 +1,8 @@
 {
-  "version": "1.0.20",
-  "releasedAt": "2026-11-07T04:13:55.152Z",
-  "notes": "Chuẩn hóa thứ tự tin nhắn theo Snowflake ID, sửa lỗi kẹt chưa đọc hội thoại cũ và làm sạch tên khách hàng",
+  "version": "1.0.21",
+  "releasedAt": "2026-11-07T04:31:31.989Z",
+  "notes": "Sửa lỗi hội thoại ở hộp thư chính bị đẩy nhầm sang Tin nhắn chờ khi mở tab Tin nhắn chờ",
   "requiresRestart": true,
-  "sizeBytes": 3084645,
-  "sha256": "499c92233b8a8a663f7063cd3e847ad6ae4518fe81ad0871c014d3dfc058ba58"
+  "sizeBytes": 3085241,
+  "sha256": "ac6f1537d2a5316bb2e68000bb69feedf489d1dbccaa04be6f0dcae8b9ff6bdc"
 }

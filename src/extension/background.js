@@ -2999,9 +2999,12 @@ async function ensureRoleMessengerTab(accountId, role, { freshOnly = false } = {
           }
         } catch (_) {}
       }
+      const initialRoleUrl = normalizedRole === 'requests'
+        ? 'https://www.facebook.com/messages/requests?crm_tab_role=requests'
+        : `https://www.facebook.com/messages?crm_tab_role=${encodeURIComponent(normalizedRole)}`;
       const created = await new Promise((resolve) => {
         chrome.tabs.create({
-          url: `https://www.facebook.com/messages?crm_tab_role=${encodeURIComponent(normalizedRole)}`,
+          url: initialRoleUrl,
           active: false
         }, resolve);
       });
@@ -7466,25 +7469,30 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
                 target: { tabId: target.tab.id },
                 func: scrapeMessageRequestsSidebar
               }).catch(() => []);
-              // The generic parser can also see the open conversation in the
-              // wide main panel. Accept its rows here only when Facebook put
-              // an explicit Requests/Spam segment in the URL; the scoped
-              // fallback owns canonical /messages/t links in the left list.
-              const scopedFallback = fallbackResults?.[0]?.result || [];
+              const isExplicitRequestUrl = (urlStr) =>
+                /\/messages\/(?:(?:e2ee\/)?(?:requests|spam)|(?:requests|spam)\/e2ee)(?:\/|\?)/i.test(String(urlStr || ''));
+              const isOutgoingPreview = (text) =>
+                /^(?:Bạn|Tôi|You)\s*:/iu.test(String(text || '').trim())
+                || /^(?:Bạn đã gửi|You sent)/iu.test(String(text || '').trim());
+              const scopedFallback = (fallbackResults?.[0]?.result || []).filter((thread) =>
+                isExplicitRequestUrl(thread?.thread_url)
+                && !isOutgoingPreview(thread?.last_message)
+                && !/^(?:Facebook user|Người dùng Facebook)$/i.test(String(thread?.name || '').trim())
+              );
               const scopedRequestIds = new Set(scopedFallback.map((thread) => String(thread?.thread_id || '')).filter(Boolean));
               const verifiedPrimary = primaryVisible.filter((thread) =>
-                scopedRequestIds.has(String(thread?.thread_id || ''))
-                && /\/messages\/(?:(?:e2ee\/)?(?:requests|spam)|(?:requests|spam)\/e2ee)(?:\/|\?)/i.test(String(thread?.thread_url || ''))
+                (scopedRequestIds.has(String(thread?.thread_id || '')) || isExplicitRequestUrl(thread?.thread_url))
+                && isExplicitRequestUrl(thread?.thread_url)
+                && !isOutgoingPreview(thread?.last_message)
+                && !/^(?:Facebook user|Người dùng Facebook)$/i.test(String(thread?.name || '').trim())
               );
               const combined = new Map();
-              // The scoped parser owns membership; the existing generic parser
-              // may only enrich those same visible request ids.
               for (const thread of [...scopedFallback, ...verifiedPrimary]) {
                 if (thread?.thread_id) combined.set(String(thread.thread_id), thread);
               }
               visible = [...combined.values()];
               if (round === 0) {
-                console.log(`[FB Engine] [REQUESTS] section=${target.requestSection} primary=${primaryVisible.length} verified_primary=${verifiedPrimary.length} fallback=${(fallbackResults?.[0]?.result || []).length}`);
+                console.log(`[FB Engine] [REQUESTS] section=${target.requestSection} primary=${primaryVisible.length} verified_primary=${verifiedPrimary.length} fallback=${scopedFallback.length}`);
               }
             }
             if (target.requestSection && visible.length === 0 && round < 10) {
@@ -8305,13 +8313,12 @@ function scrapeMessageRequestsSidebar() {
     });
   const extractThread = (rawHref) => {
     const href = String(rawHref || '');
+    // Chỉ chấp nhận link có chứa /requests/ hoặc /spam/ thật sự, TUYỆT ĐỐI
+    // không khớp link /messages/t/ hoặc /messages/e2ee/t/ của hộp thư chính!
     const pathMatch = href.match(/\/messages\/e2ee\/(?:requests(?:\/spam)?|spam)\/t\/([^\/?#]+)/i)
-      || href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/i);
+      || href.match(/\/messages\/(?:requests(?:\/spam)?|spam)\/(?:e2ee\/)?t\/([^\/?#]+)/i);
     if (pathMatch) return decodeURIComponent(pathMatch[1]);
-    try {
-      const url = new URL(href, location.origin);
-      return url.searchParams.get('thread_id') || url.searchParams.get('selected_item_id');
-    } catch (_) { return null; }
+    return null;
   };
   for (const control of controls) {
     const anchors = control.tagName === 'A' ? [control] : [...control.querySelectorAll('a[href]')];
