@@ -1964,6 +1964,7 @@ function relaySidebarActivityThreads(threads, origin, observedAt = 0) {
     name: thread.name || thread.contact_name,
     last_message: thread.last_message,
     is_unread: thread.is_unread,
+    user_read_on_fb: thread.user_read_on_fb === true,
     is_like: thread.is_like === true,
     preview_is_outgoing: thread.preview_is_outgoing === true,
     row_time_text: thread.row_time_text || '',
@@ -1974,7 +1975,7 @@ function relaySidebarActivityThreads(threads, origin, observedAt = 0) {
     source_type: 'personal_messenger',
     inbox_folder: 'INBOX'
   }));
-  const relaySig = lightweightThreads.map((t) => `${t.thread_id}|${t.is_unread ? 1 : 0}|${t.last_message || ''}|${t.row_time_text || ''}`).join('\n');
+  const relaySig = lightweightThreads.map((t) => `${t.thread_id}|${t.is_unread ? 1 : 0}|${t.user_read_on_fb ? 1 : 0}|${t.last_message || ''}|${t.row_time_text || ''}`).join('\n');
   const prevRelay = lastHintRelaySig.get(user_id);
   if (prevRelay && prevRelay.sig === relaySig && Date.now() - prevRelay.at < 8000) return false;
   lastHintRelaySig.set(user_id, { sig: relaySig, at: Date.now() });
@@ -8143,10 +8144,11 @@ function scrapeFacebookSidebar() {
       } catch (e) {}
       if (!thread_id || thread_id === 't' || thread_id === 'e2ee' || thread_id === 'requests' || thread_id === 'archived') continue;
       if (seen.has(thread_id)) continue;
-      seen.add(thread_id);
 
       // Tìm container row ở đúng phạm vi item (role="row", role="listitem" hoặc link)
       const rowContainer = link.closest('div[role="row"], div[role="listitem"]') || link;
+      if (!String(rowContainer.innerText || rowContainer.textContent || '').trim()) continue;
+      seen.add(thread_id);
 
       // 2. Trích xuất Tên (Name) thông minh
       const nameEl = rowContainer.querySelector('h2') ||
@@ -8187,12 +8189,12 @@ function scrapeFacebookSidebar() {
       if (!hasUnreadDot) {
         for (const el of rowContainer.querySelectorAll('div, span, i')) {
           const w = el.offsetWidth; const h = el.offsetHeight;
-          if (w < 6 || w > 14 || h < 6 || h > 14 || Math.abs(w - h) > 2) continue;
+          if (w < 6 || w > 16 || h < 6 || h > 16 || Math.abs(w - h) > 3) continue;
           if (el.children.length > 0 || (el.textContent || '').trim()) continue;
-          if (el.closest('svg, img, [role="img"], [role="button"], button')) continue;
+          if (el.closest('svg, img')) continue;
           const rTarget = typeof rowContainer !== 'undefined' ? rowContainer : row;
           const rRect = rTarget && rTarget.getBoundingClientRect ? rTarget.getBoundingClientRect() : null;
-          if (rRect && rRect.width > 0 && el.getBoundingClientRect().left < rRect.left + rRect.width * 0.55) continue;
+          if (rRect && rRect.width > 0 && el.getBoundingClientRect().left < rRect.left + rRect.width * 0.45) continue;
           const st = window.getComputedStyle(el);
           const radius = parseFloat(st.borderTopLeftRadius);
           if (!(Number.isFinite(radius) && radius >= Math.min(w, h) / 2)) continue;
@@ -8203,9 +8205,6 @@ function scrapeFacebookSidebar() {
           if (+bgM[3] >= 180 && +bgM[1] <= 90 && +bgM[2] >= 50 && +bgM[2] <= 170) { hasUnreadDot = true; break; }
         }
       }
-
-      const activeRowOnVisibleTab = (rowContainer.getAttribute?.('aria-current') === 'page' || Boolean(rowContainer.querySelector?.('[aria-current="page"]'))) && document.visibilityState === 'visible' && document.hasFocus?.();
-      if (activeRowOnVisibleTab) hasUnreadDot = false;
       // 4. Lấy đoạn tin nhắn cuối
       // "Trả lời?"... là span UI (nút/mENU trên row) chứ không phải tin nhắn —
       // snippet thật trống (media/poll) thì bỏ qua thay vì nhặt rác.
@@ -8351,12 +8350,12 @@ function scrapeMessageRequestsSidebar() {
         }
         for (const el of row.querySelectorAll('div, span, i')) {
           const w = el.offsetWidth; const h = el.offsetHeight;
-          if (w < 6 || w > 14 || h < 6 || h > 14 || Math.abs(w - h) > 2) continue;
+          if (w < 6 || w > 16 || h < 6 || h > 16 || Math.abs(w - h) > 3) continue;
           if (el.children.length > 0 || (el.textContent || '').trim()) continue;
-          if (el.closest('svg, img, [role="img"], [role="button"], button')) continue;
+          if (el.closest('svg, img')) continue;
           const rTarget = typeof rowContainer !== 'undefined' ? rowContainer : row;
           const rRect = rTarget && rTarget.getBoundingClientRect ? rTarget.getBoundingClientRect() : null;
-          if (rRect && rRect.width > 0 && el.getBoundingClientRect().left < rRect.left + rRect.width * 0.55) continue;
+          if (rRect && rRect.width > 0 && el.getBoundingClientRect().left < rRect.left + rRect.width * 0.45) continue;
           const st = getComputedStyle(el);
           const radius = parseFloat(st.borderTopLeftRadius);
           if (!(Number.isFinite(radius) && radius >= Math.min(w, h) / 2)) continue;

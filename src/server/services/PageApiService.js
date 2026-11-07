@@ -942,7 +942,7 @@ function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}
   // đẩy lên đầu danh sách (sort unread-first phía client). Backfill lịch sử
   // KHÔNG đánh dấu - import page không làm unread hàng loạt.
   if (shouldMarkUnread) {
-    database.prepare("UPDATE threads SET is_unread = 1, unread_manual = 0 WHERE id = ?").run(threadId);
+    database.prepare("UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?").run(threadId);
   } else if (isOutgoing && ts >= startOfTodayMs()) {
     database.prepare("UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?").run(threadId);
   }

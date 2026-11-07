@@ -159,7 +159,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
           return;
         }
         const parts = rv.split('.').map((n) => parseInt(n, 10) || 0);
-        const target = [1, 0, 18];
+        const target = [1, 0, 19];
         for (let i = 0; i < 3; i++) {
           if ((parts[i] || 0) > target[i]) { setNeedsBackendRestart(false); return; }
           if ((parts[i] || 0) < target[i]) { setNeedsBackendRestart(true); return; }

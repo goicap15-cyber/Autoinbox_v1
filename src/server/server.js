@@ -3234,12 +3234,12 @@ wss.on('connection', (ws, req) => {
               .get(String(canonicalThreadId), String(m.fb_message_id)))
             : false;
           if (!isReplayedObservation) {
+            const incomingAt = Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now();
             if (!isOutgoing) {
               // Khách nhắn = khách đang trong hội thoại = mọi tin operator
               // GỬI TRƯỚC tin này đã xem. Phải so thời gian: chỉ lấy tin đi
               // cũ hơn tin khách vừa gửi - tin operator gửi SAU (khách chưa
               // kịp đọc) tuyệt đối không được dán 'Đã xem'.
-              const incomingAt = Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now();
               const prevSeen = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(String(canonicalThreadId));
               const lastOut = db.prepare(`
                 SELECT id FROM messages
@@ -3261,8 +3261,8 @@ wss.on('connection', (ws, req) => {
               // Tin mới của khách: bật chưa đọc + GẮN CỜ DÍNH, vì tab Facebook
               // có thể đang đậu đúng thread này nên Facebook tự báo "đã đọc"
               // vài giây sau qua sync sidebar - không được để nó tắt nhắc.
-              db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
-              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 0, last_activity: new Date(incomingAt || Date.now()).toISOString() });
+              db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: new Date(incomingAt || Date.now()).toISOString() });
             }
           }
           ConversationRepository.upsertThread({
@@ -4711,20 +4711,35 @@ wss.on('connection', (ws, req) => {
                 // trước hôm nay — không được hâm cờ mỗi lần sync
                 // (2026-10-21: hội thoại 14/10 sync xong vẫn hiện chưa đọc).
                 // Cờ manual do user đánh tay ở dưới vẫn ưu tiên sau cùng.
-                let newestRealMessage = null;
+                const newestRealMessage = db.prepare(`
+                  SELECT is_outgoing, timestamp_ms FROM messages
+                  WHERE thread_id = ?
+                    AND (fb_message_id IS NULL OR fb_message_id NOT LIKE 'sidebar_preview_%')
+                  ORDER BY timestamp_ms DESC, id DESC LIMIT 1
+                `).get(existingInternalThreadId);
+                const hasTodayRealIncoming = Boolean(newestRealMessage)
+                  && Number(newestRealMessage.timestamp_ms) >= startOfTodayMs
+                  && Number(newestRealMessage.is_outgoing) !== 1;
+                const hintKey = account_id + ':' + threadId;
+                const prevHintWasUnread = hintUnreadTracker.wasUnread(hintKey);
+                const unreadFlippedToIncoming = hintUnreadTracker.flip(
+                  hintKey,
+                  t.is_unread,
+                  hasTodayRealIncoming
+                );
+                const unreadFlippedToRead = prevHintWasUnread && Number(t.is_unread) === 0;
+                const userReadOnFb = t.user_read_on_fb === true || unreadFlippedToRead;
+
                 if (Number(syncUnread) === 1) {
-                  newestRealMessage = db.prepare(`
-                    SELECT is_outgoing, timestamp_ms FROM messages
-                    WHERE thread_id = ?
-                      AND (fb_message_id IS NULL OR fb_message_id NOT LIKE 'sidebar_preview_%')
-                    ORDER BY timestamp_ms DESC, id DESC LIMIT 1
-                  `).get(existingInternalThreadId);
-                  if (newestRealMessage && !rowFresh && !unreadFlipped) {
+                  if (newestRealMessage && !rowFresh && !unreadFlippedToIncoming) {
                     const newestIsToday = Number(newestRealMessage.timestamp_ms) >= startOfTodayMs;
                     if (newestRealMessage.is_outgoing === 1 || !newestIsToday) syncUnread = 0;
                   }
                 }
-                if (previousThread) {
+                if (userReadOnFb) {
+                  syncUnread = 0;
+                  db.prepare('UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?').run(existingInternalThreadId);
+                } else if (previousThread) {
                   const manualRow = db.prepare('SELECT unread_manual FROM threads WHERE id = ?').get(existingInternalThreadId);
                   const manual = Number(manualRow?.unread_manual || 0);
                   if (manual === 1) syncUnread = 1;
@@ -4781,8 +4796,12 @@ wss.on('connection', (ws, req) => {
                   inbox_folder_verified: t.inbox_folder_verified === true
                 });
                 const canonicalThreadId = String(storedThread?.id || existingInternalThreadId);
-                if (previousThread && Number(previousThread.is_unread) === 1 && Number(syncUnread) === 0) {
-                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 0, unread_manual: 0 });
+                if ((previousThread && Number(previousThread.is_unread) === 1 && Number(syncUnread) === 0) || userReadOnFb) {
+                  io.emit('THREAD_UNREAD_CHANGED', {
+                    thread_id: String(canonicalThreadId),
+                    is_unread: 0,
+                    unread_manual: userReadOnFb ? -1 : 0
+                  });
                 }
 
                 // Page thread bắt buộc phải mang page_id vào job, nếu không
@@ -4791,20 +4810,6 @@ wss.on('connection', (ws, req) => {
                 // / page_locked_by_user_action lặp vô hạn, khách Page không
                 // bao giờ sync - reproduce 2026-09-30).
                 const boundPageSource = ConversationRepository.getThreadSource(canonicalThreadId);
-                // rowFresh/rowFreshNew đã tính ở trên (trước bộ dò). Flip
-                // chấm xanh FB 0->1 (theo hint sidebar, không phải DB) cũng
-                // là bằng chứng tin vừa đến; gắn vào push để nhánh bubble
-                // biết phải bump thread cả khi bong bóng provisional bị chặn.
-                // Dùng hint thật vì DB bị operator bấm đọc làm 1->0 -> "flip"
-                // giả ngay scan sau, badge hồi sinh (reproduce 2026-10-12).
-                const hasTodayRealIncoming = Boolean(newestRealMessage)
-                  && Number(newestRealMessage.timestamp_ms) >= startOfTodayMs
-                  && Number(newestRealMessage.is_outgoing) !== 1;
-                const unreadFlippedToIncoming = hintUnreadTracker.flip(
-                  account_id + ':' + threadId,
-                  t.is_unread,
-                  hasTodayRealIncoming
-                );
                 if (incomingPreviewChanged) {
                   changedUnreadThreads.push({
                     account_id,
@@ -5006,8 +5011,8 @@ wss.on('connection', (ws, req) => {
                     isSystemNotice: changed.system_notice
                   });
                   if (allowFlip) {
-                    db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
-                    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: new Date().toISOString() });
+                    db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: new Date().toISOString() });
                   } else {
                     syncDebug('UNREAD_GUARD_SKIP', { stage: 'PREVIEW_FLIP', thread: String(canonicalThreadId).substring(0, 24), content: sanitizeLog(previewContent, 40), manual: flipGuardManual?.unread_manual });
                   }
@@ -5081,8 +5086,8 @@ wss.on('connection', (ws, req) => {
                   });
                   if (allowBump && (isUnreadNow || !lastMsgMatches || changed.unread_flipped)) {
                     const bumpedAtIso = new Date().toISOString();
-                    db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
-                    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: bumpedAtIso });
+                    db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: bumpedAtIso });
                     syncDebug('PREVIEW_BUMP_REPEAT', { thread: String(canonicalThreadId).substring(0, 24), content: sanitizeLog(previewContent, 40), status: sync_status || null });
                   } else if (!allowBump) {
                     syncDebug('UNREAD_GUARD_SKIP', { stage: 'PREVIEW_BUMP', thread: String(canonicalThreadId).substring(0, 24), content: sanitizeLog(previewContent, 40), manual: readState?.unread_manual });
@@ -5102,8 +5107,8 @@ wss.on('connection', (ws, req) => {
                 });
                 if (allowMediaBump) {
                   const bumpedAtIso = new Date().toISOString();
-                  db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 0 WHERE id = ?').run(String(canonicalThreadId));
-                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: bumpedAtIso });
+                  db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: bumpedAtIso });
                   syncDebug('MEDIA_HINT', { thread: String(canonicalThreadId).substring(0, 24), status: sync_status || null });
                 } else {
                   syncDebug('UNREAD_GUARD_SKIP', { stage: 'MEDIA_HINT', thread: String(canonicalThreadId).substring(0, 24), manual: mediaGuardRow?.unread_manual });
@@ -9401,8 +9406,35 @@ function startServer() {
             AND (m.fb_message_id IS NULL OR m.fb_message_id NOT LIKE 'sidebar_preview_%')
         )
     `).run();
-    // 5. Gỡ cờ unread_manual=1 tự động từ bản cũ để cho phép đồng bộ trạng thái đã đọc từ Messenger
-    db.prepare('UPDATE threads SET unread_manual = 0 WHERE unread_manual = 1').run();
+    // 5. Khôi phục tên thật cho các hội thoại bị ghi đè thành 'Khách hàng (...)'
+    db.prepare(`
+      UPDATE threads
+      SET contact_name = (
+        SELECT c.name FROM contacts c
+        WHERE c.thread_id = threads.id
+          AND c.name IS NOT NULL
+          AND TRIM(c.name) != ''
+          AND c.name NOT LIKE 'Khách hàng%'
+          AND c.name != 'Người dùng Facebook'
+        LIMIT 1
+      )
+      WHERE (contact_name LIKE 'Khách hàng (%' OR contact_name = 'Khách hàng')
+        AND EXISTS (
+          SELECT 1 FROM contacts c
+          WHERE c.thread_id = threads.id
+            AND c.name IS NOT NULL
+            AND TRIM(c.name) != ''
+            AND c.name NOT LIKE 'Khách hàng%'
+            AND c.name != 'Người dùng Facebook'
+        )
+    `).run();
+    db.prepare(`
+      UPDATE threads
+      SET contact_name = 'Hai Anh'
+      WHERE id = '2586047698510699'
+        AND (contact_name LIKE 'Khách hàng%' OR contact_name IS NULL)
+    `).run();
+    db.prepare('UPDATE threads SET unread_manual = 0 WHERE COALESCE(is_unread, 0) = 0 AND unread_manual = 1').run();
     const REAL_MSG_FILTER = "(m.fb_message_id IS NULL OR m.fb_message_id NOT LIKE 'sidebar_preview_%')";
     const clamped = db.prepare(`
       UPDATE threads

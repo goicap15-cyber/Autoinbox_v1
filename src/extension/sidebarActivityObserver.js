@@ -9,6 +9,23 @@
   let lastEmitAt = 0;
   let trailingTimer = null;
   let debounceTimer = null;
+  const userReadThreads = new Map();
+
+  function markUserReadThread(threadId) {
+    if (!threadId) return;
+    userReadThreads.set(String(threadId), Date.now());
+  }
+
+  function isUserReadRecently(threadId) {
+    if (!threadId) return false;
+    const at = userReadThreads.get(String(threadId));
+    if (!at) return false;
+    if (Date.now() - at > 15000) {
+      userReadThreads.delete(String(threadId));
+      return false;
+    }
+    return true;
+  }
 
   // 2026-09-30: chuỗi hint từng lạnh hoàn toàn mà không có dấu vết (background
   // không log được thứ nào xuống composer-debug.log). Bắn kèm CONTENT_DEBUG
@@ -52,11 +69,7 @@
   // - Loại bỏ nút menu "Đánh dấu là chưa đọc" / "Mark as unread" (nút này chỉ có trên hội thoại ĐÃ ĐỌC!).
   // - Chấm tròn xanh chỉ hợp lệ khi nằm ở nửa bên phải của row (tránh bắt nhầm badge xanh ở avatar bên trái).
   function detectRowUnread(row, threadId) {
-    const activeUrlThreadId = extractThreadId(location.pathname);
-    const isRowActive = row.getAttribute?.('aria-current') === 'page'
-      || Boolean(row.querySelector?.('[aria-current="page"]'))
-      || Boolean(threadId && activeUrlThreadId && String(activeUrlThreadId) === String(threadId));
-    if (isRowActive && document.visibilityState === 'visible' && document.hasFocus?.()) {
+    if (isUserReadRecently(threadId)) {
       return false;
     }
 
@@ -76,12 +89,12 @@
     for (const el of row.querySelectorAll('div, span, i')) {
       const w = el.offsetWidth;
       const h = el.offsetHeight;
-      if (w < 6 || w > 14 || h < 6 || h > 14 || Math.abs(w - h) > 2) continue;
+      if (w < 6 || w > 16 || h < 6 || h > 16 || Math.abs(w - h) > 3) continue;
       if (el.children.length > 0 || (el.textContent || '').trim()) continue;
-      if (el.closest('svg, img, [role="img"], [role="button"], button')) continue;
+      if (el.closest('svg, img')) continue;
       if (rowRect && rowRect.width > 0) {
         const elRect = el.getBoundingClientRect();
-        if (elRect.left < rowRect.left + rowRect.width * 0.55) continue;
+        if (elRect.left < rowRect.left + rowRect.width * 0.45) continue;
       }
       const st = getComputedStyle(el);
       const radius = parseFloat(st.borderTopLeftRadius);
@@ -117,33 +130,27 @@
       const href = link.getAttribute('href') || link.href || '';
       const threadId = extractThreadId(href);
       if (!threadId || seen.has(threadId)) continue;
-      seen.add(threadId);
       const row = link.closest('[role="row"], [role="listitem"], li') || link.parentElement || link;
-      const unread = detectRowUnread(row, threadId);
-      // Preserve the exact row while it is still mounted. Messenger can
-      // virtualize it away between this mutation and background.executeScript.
-      // The background parser remains primary; this snapshot is only its
-      // empty-result fallback.
       const lines = String(row.innerText || row.textContent || '').split(/\n+/)
         .map(normalize).filter(Boolean);
+      if (!lines.length) continue;
+      seen.add(threadId);
+      const unread = detectRowUnread(row, threadId);
+      const userReadOnFb = isUserReadRecently(threadId);
       const name = lines[0] || `Khách hàng (${threadId.slice(0, 8)})`;
       const lastMessage = [...lines].reverse().find((line) => (
         line !== name && line.length < 200
         && !/^\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|y)(?:\s*(?:trước|ago))?$/iu.test(line)
       )) || '';
-      // 2026-10-09: fingerprint phải BỀN — text nguyên row trôi theo dòng thời
-      // gian ("Bây giờ"->"1 phút"), bubble "Đang soạn tin...", trạng thái đã xem
-      // khiến observer tưởng có thay đổi và relay ~10 lần/giây, đốt CPU cả chuỗi
-      // bg->server. fp chỉ gồm thread + chấm unread + tên + preview đã lọc
-      // typing; payload gửi đi vẫn giữ dữ liệu thô.
       const fpPreview = String(lastMessage || '').replace(/(?:đang soạn|đang nhập|typing)\S*/gi, '').slice(0, 120);
-      rows.push(`${threadId}|${unread ? 1 : 0}|${name.slice(0, 48)}|${fpPreview}`);
+      rows.push(`${threadId}|${unread ? 1 : 0}|${userReadOnFb ? 1 : 0}|${name.slice(0, 48)}|${fpPreview}`);
       const timeLine = [...lines].reverse().find((line) => TIME_LINE_RE.test(line)) || '';
       threads.push({
         thread_id: threadId,
         name: name.slice(0, 80),
         last_message: lastMessage,
         is_unread: unread,
+        user_read_on_fb: userReadOnFb,
         preview_is_outgoing: /^(?:Bạn|You)\s*:/i.test(lastMessage),
         row_time_text: timeLine.slice(0, 24),
         thread_url: (() => { try { return new URL(href, location.origin).toString(); } catch (_) { return href; } })(),
@@ -202,6 +209,16 @@
     debounceTimer = setTimeout(emitIfChanged, 45);
   }
 
+  function onPointerDown(e) {
+    if (!e || !e.isTrusted) return;
+    const link = e.target?.closest?.('a[href*="/t/"]');
+    const clickedThreadId = link ? extractThreadId(link.getAttribute('href') || link.href || '') : '';
+    const activeUrlThreadId = extractThreadId(location.pathname);
+    if (clickedThreadId) markUserReadThread(clickedThreadId);
+    else if (activeUrlThreadId) markUserReadThread(activeUrlThreadId);
+    schedule();
+  }
+
   const observer = new MutationObserver(schedule);
   observer.observe(document.documentElement, {
     childList: true,
@@ -212,6 +229,7 @@
   });
   window.addEventListener('focus', schedule);
   document.addEventListener('visibilitychange', schedule);
+  document.addEventListener('pointerdown', onPointerDown, true);
   document.addEventListener('click', schedule, true);
   const fallbackTimer = setInterval(emitIfChanged, 500);
   globalThis.__FB_CRM_SIDEBAR_ACTIVITY_OBSERVER__ = {
@@ -219,6 +237,7 @@
       observer.disconnect();
       window.removeEventListener('focus', schedule);
       document.removeEventListener('visibilitychange', schedule);
+      document.removeEventListener('pointerdown', onPointerDown, true);
       document.removeEventListener('click', schedule, true);
       clearInterval(fallbackTimer);
       if (debounceTimer) clearTimeout(debounceTimer);

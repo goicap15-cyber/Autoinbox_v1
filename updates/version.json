@@ -1,8 +1,8 @@
 {
-  "version": "1.0.18",
-  "releasedAt": "2026-11-07T03:04:20.856Z",
-  "notes": "Sửa đồng bộ trạng thái đã đọc/chưa đọc từ Messenger, chuẩn hóa sắp xếp hội thoại và lọc bỏ tin nhắn hệ thống/quảng cáo rác",
+  "version": "1.0.19",
+  "releasedAt": "2026-11-07T03:31:07.855Z",
+  "notes": "Sửa lỗi đồng bộ tin nhắn mới, khôi phục chấm chưa đọc và giữ nguyên tên khách hàng",
   "requiresRestart": true,
-  "sizeBytes": 3083270,
-  "sha256": "661562916542430cd53db840f241b3f39c4f961f439dd804c68ce0caa3301d15"
+  "sizeBytes": 3083158,
+  "sha256": "1fae0769a93a0f02fea3502e5af8a2f7657d325dfdffb7cccf5dcd22bafd7e28"
 }

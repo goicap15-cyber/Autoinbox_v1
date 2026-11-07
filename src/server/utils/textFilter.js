@@ -368,6 +368,7 @@ function isSidebarActivityNotification(text) {
 
 const INVALID_CONTACT_NAME_PATTERNS = [
   /^(?:Tất cả tin nhắn|Tất cả|All messages|All)$/i,
+  /^Khách hàng(?:\s*\([^)]*\))?$/i,
   /(?:Tất cả tin nhắn\s*){2,}/i,
   /(?:All messages\s*){2,}/i,
   /(?:Hộp thư đến\s*){2,}/i,
