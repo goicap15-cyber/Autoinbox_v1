@@ -74,6 +74,9 @@
     }
 
     if (row.querySelector('[data-testid="unread-count"], .unread')) return true;
+    if (/(?:Tin nhắn chưa đọc|Unread messages?)\s*:/iu.test(String(row.innerText || row.textContent || ''))) {
+      return true;
+    }
 
     for (const el of row.querySelectorAll('[aria-label]')) {
       const label = (el.getAttribute('aria-label') || '').trim();
@@ -131,8 +134,12 @@
       const threadId = extractThreadId(href);
       if (!threadId || seen.has(threadId)) continue;
       const row = link.closest('[role="row"], [role="listitem"], li') || link.parentElement || link;
-      const lines = String(row.innerText || row.textContent || '').split(/\n+/)
-        .map(normalize).filter(Boolean);
+      const rawRowText = String(row.innerText || row.textContent || '')
+        .replace(/((?:Tin nhắn chưa đọc|Unread messages?)\s*:)/giu, '\n$1\n')
+        .replace(/\s*[·•]\s*((?:\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y)(?:\s*(?:trước|ago))?|bây giờ|just now|vừa xong|hôm qua|yesterday))\b/giu, '\n$1');
+      const lines = rawRowText.split(/\n+/)
+        .map(normalize)
+        .filter((l) => l && !/^(?:Tin nhắn chưa đọc|Unread messages?)\s*:?$/iu.test(l));
       if (!lines.length) continue;
       seen.add(threadId);
       const unread = detectRowUnread(row, threadId);

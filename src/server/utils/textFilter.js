@@ -412,9 +412,12 @@ function isInvalidContactName(name) {
 
 function cleanContactName(rawName, fallback = 'Khách hàng') {
   if (!rawName || typeof rawName !== 'string') return fallback;
-  const trimmed = rawName.trim();
-  if (isInvalidContactName(trimmed)) return fallback;
-  return trimmed;
+  const stripped = rawName
+    .replace(/(?:Tin nhắn chưa đọc|Unread messages?)\s*:[\s\S]*$/iu, '')
+    .replace(/\s*[·•]\s*(?:\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y)(?:\s*(?:trước|ago))?|bây giờ|just now|vừa xong|hôm qua|yesterday)\s*$/iu, '')
+    .trim();
+  if (isInvalidContactName(stripped)) return fallback;
+  return stripped;
 }
 
 // 2026-09-29: Business Suite vẽ dòng attribution "Người gửi: <agent>" bên dưới

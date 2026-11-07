@@ -3225,52 +3225,15 @@ wss.on('connection', (ws, req) => {
           // after the row exists so a slow video cannot block later messages.
 
           // FIX FOREIGN KEY: Đảm bảo thread tồn tại/được upsert TRƯỚC KHI insert message.
-          // DOM observer replay lại tin cũ RẤT NHIỀU lần (log thực tế: cùng một
-          // fb_message_id được gửi lại hàng trăm lần). Replay KHÔNG được đổi
-          // trạng thái đọc/chưa đọc và không được xóa cờ đánh tay - nếu không
-          // hội thoại sẽ nhảy lên nhảy xuống liên tục giữa replay và sync.
-          const isReplayedObservation = m.fb_message_id
-            ? Boolean(db.prepare('SELECT 1 FROM messages WHERE thread_id = ? AND fb_message_id = ?')
-              .get(String(canonicalThreadId), String(m.fb_message_id)))
-            : false;
-          if (!isReplayedObservation) {
-            const incomingAt = Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now();
-            if (!isOutgoing) {
-              // Khách nhắn = khách đang trong hội thoại = mọi tin operator
-              // GỬI TRƯỚC tin này đã xem. Phải so thời gian: chỉ lấy tin đi
-              // cũ hơn tin khách vừa gửi - tin operator gửi SAU (khách chưa
-              // kịp đọc) tuyệt đối không được dán 'Đã xem'.
-              const prevSeen = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(String(canonicalThreadId));
-              const lastOut = db.prepare(`
-                SELECT id FROM messages
-                WHERE thread_id = ? AND is_outgoing = 1
-                  AND COALESCE(timestamp_ms, 0) <= ?
-                ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1
-              `).get(String(canonicalThreadId), incomingAt);
-              if (lastOut && String(prevSeen?.last_seen_message_id || '') !== String(lastOut.id)) {
-                db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(lastOut.id), String(canonicalThreadId));
-                io.emit('THREAD_SEEN', { thread_id: String(canonicalThreadId), last_seen_message_id: String(lastOut.id) });
-              }
-            }
-            if (isOutgoing) {
-              // Operator trả lời = đã đọc hội thoại: ghim -1 để chấm xanh
-              // còn treo ở Messenger không đánh dấu lại "chưa đọc" khi sync.
-              db.prepare('UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?').run(String(canonicalThreadId));
-              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 0, unread_manual: -1 });
-            } else {
-              // Tin mới của khách: bật chưa đọc + GẮN CỜ DÍNH, vì tab Facebook
-              // có thể đang đậu đúng thread này nên Facebook tự báo "đã đọc"
-              // vài giây sau qua sync sidebar - không được để nó tắt nhắc.
-              db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: new Date(incomingAt || Date.now()).toISOString() });
-            }
-          }
+          // FIX FOREIGN KEY: Đảm bảo thread tồn tại TRƯỚC KHI insert message.
+          // Không cập nhật last_message hay is_unread ở đây vì m có thể là tin cũ
+          // được quét lại từ đầu viewport hoặc phantom __bubble_1 sẽ bị chặn ở dưới.
           ConversationRepository.upsertThread({
             id: m.thread_id,
             account_id: targetAccountId,
             contact_name: m.contact_name || 'Khách hàng',
-            last_message: m.content,
-            is_unread: isReplayedObservation ? undefined : !isOutgoing
+            last_message: null,
+            is_unread: undefined
           });
 
           // Auto-register Page source & rebind thread khi đến từ Business Suite
@@ -3292,7 +3255,15 @@ wss.on('connection', (ws, req) => {
           }
 
           let tsMs = Number(m.timestamp_ms) || 0;
-          const tsSource = m.timestamp_source || 'unknown';
+          let tsSource = m.timestamp_source || 'unknown';
+          const sfTs = ConversationRepository.extractSnowflakeTimestampMs(m.fb_message_id);
+          if (sfTs > 0 && (tsMs <= 0 || ['realtime_fallback', 'facebook_label', 'dom_clock_order', 'dom_order', 'unknown', 'sync'].includes(tsSource))) {
+            tsMs = sfTs;
+            tsSource = 'facebook_payload';
+            m.timestamp_ms = sfTs;
+            m.timestamp_source = 'facebook_payload';
+            m.created_at = new Date(sfTs).toISOString();
+          }
           // Giữ đúng THỨ TỰ ĐẾN cho tin realtime: timestamp parse từ nhãn phút
           // ('14:20' -> 14:20:00) luôn lùi về đầu phút, nên tin khách đến SAU
           // tin operator 25 giây lại mang ts SỚM HƠN và bị sort nhầm lên trước
@@ -3964,6 +3935,42 @@ wss.on('connection', (ws, req) => {
               ConversationRepository.normalizeMessageSequence(m.thread_id, db);
             } catch (normalizeError) {
               console.warn('[WS] Normalize sequence sau insert thất bại:', normalizeError.message);
+            }
+            const incomingAt = tsMs > 0 ? tsMs : (Date.parse(m.created_at || '') || Date.now());
+            const maxRow = db.prepare('SELECT MAX(COALESCE(timestamp_ms, 0)) AS maxTs FROM messages WHERE thread_id = ?').get(String(canonicalThreadId));
+            const isNewestInThread = !maxRow?.maxTs || incomingAt >= Number(maxRow.maxTs) - 5000;
+            if (!isOutgoing) {
+              const prevSeen = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(String(canonicalThreadId));
+              const lastOut = db.prepare(`
+                SELECT id FROM messages
+                WHERE thread_id = ? AND is_outgoing = 1
+                  AND COALESCE(timestamp_ms, 0) <= ?
+                ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1
+              `).get(String(canonicalThreadId), incomingAt);
+              if (lastOut && String(prevSeen?.last_seen_message_id || '') !== String(lastOut.id)) {
+                db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(lastOut.id), String(canonicalThreadId));
+                io.emit('THREAD_SEEN', { thread_id: String(canonicalThreadId), last_seen_message_id: String(lastOut.id) });
+              }
+            }
+            if (isOutgoing) {
+              if (isNewestInThread && m.content) {
+                db.prepare('UPDATE threads SET last_message = ?, is_unread = 0, unread_manual = -1 WHERE id = ?').run(m.content, String(canonicalThreadId));
+              } else {
+                db.prepare('UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?').run(String(canonicalThreadId));
+              }
+              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 0, unread_manual: -1 });
+            } else {
+              const isFreshIncoming = (Date.now() - incomingAt) <= 5 * 60 * 1000;
+              const operatorReadAt = globalThis.__CRM_OPERATOR_READ_AT__?.get(String(canonicalThreadId)) || 0;
+              const justReadByOperator = operatorReadAt > 0 && (Date.now() - operatorReadAt) < 12000 && incomingAt <= operatorReadAt + 2000;
+              if (isNewestInThread && isFreshIncoming && !justReadByOperator) {
+                const activityIso = new Date(incomingAt).toISOString();
+                db.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = ?, is_unread = 1, unread_manual = 1 WHERE id = ?')
+                  .run(m.content || null, activityIso, String(canonicalThreadId));
+                io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: activityIso });
+              } else if (isNewestInThread && m.content) {
+                db.prepare('UPDATE threads SET last_message = ? WHERE id = ?').run(m.content, String(canonicalThreadId));
+              }
             }
           }
           let directionWasUpdated = false;
@@ -4956,7 +4963,7 @@ wss.on('connection', (ws, req) => {
                 || (previewNameKey && previewContentKey === previewNameKey)
                 || isSidebarActivityNotification(previewContent)
                 || changed.preview_is_outgoing === true) continue;
-              if (!/^[\s\u00b7\u2022.\-|•·]+$/.test(previewContent)) {
+              if (!/^[\s\u00b7\u2022.\-|•·]+$/.test(previewContent) && (changed.row_fresh || changed.unread_flipped)) {
                 const previewTimestamp = Date.now();
                 const previewHash = crypto.createHash('sha1')
                   .update(String(changed.account_id) + '|' + String(canonicalThreadId) + '|' + previewContent)
@@ -8245,25 +8252,26 @@ app.post('/api/threads/:id/restore', (req, res) => {
 // Đánh dấu chưa đọc / đã đọc bằng tay. Không gửi "unread" trong body = toggle.
 app.post('/api/threads/:id/unread', (req, res) => {
   try {
-    const id = req.params.id;
-    const row = db.prepare('SELECT is_unread, unread_manual FROM threads WHERE id = ?').get(id);
+    const rawId = String(req.params.id || '').trim();
+    const row = db.prepare(`
+      SELECT id, is_unread, unread_manual FROM threads
+      WHERE id = ? OR external_thread_id = ? OR id LIKE '%:' || ?
+      ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
+      LIMIT 1
+    `).get(rawId, rawId, rawId, rawId);
     if (!row) return res.status(404).json({ error: 'Không tìm thấy hội thoại.' });
+    const id = String(row.id);
     const desired = req.body && req.body.unread !== undefined ? Number(req.body.unread) : null;
     const next = desired === null ? (Number(row.is_unread) ? 0 : 1) : (desired ? 1 : 0);
-    if (next !== Number(row.is_unread)) {
-      // unread_manual 3 trạng thái: 1 = đánh tay CHƯA ĐỌC, -1 = đánh tay ĐÃ ĐỌC
-      // (dính cả hai chiều, sync sidebar không được đè), 0 = tự động theo FB.
-      db.prepare('UPDATE threads SET is_unread = ?, unread_manual = ? WHERE id = ?').run(next, next ? 1 : -1, id);
-    } else if (desired !== null && next === 0) {
-      // Mở hội thoại khi DB đã là đã-đọc: vẫn ghim -1, không thì cờ manual=0
-      // giữ nguyên và sync sau quét lại chấm xanh còn treo trên Messenger
-      // sẽ nổi chưa đọc trở lại (đúng triệu chứng user báo 2026-10-08).
-      db.prepare('UPDATE threads SET unread_manual = -1 WHERE id = ?').run(id);
-    }
     const nextManual = next ? 1 : -1;
-    db.prepare('UPDATE threads SET is_unread = ?, unread_manual = ? WHERE id = ?').run(next, nextManual, id);
-    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(id), is_unread: next, unread_manual: nextManual });
-    res.json({ success: true, id: String(id), is_unread: next, unread_manual: nextManual });
+    if (next === 0) {
+      if (!globalThis.__CRM_OPERATOR_READ_AT__) globalThis.__CRM_OPERATOR_READ_AT__ = new Map();
+      globalThis.__CRM_OPERATOR_READ_AT__.set(id, Date.now());
+      globalThis.__CRM_OPERATOR_READ_AT__.set(rawId, Date.now());
+    }
+    db.prepare('UPDATE threads SET is_unread = ?, unread_manual = ? WHERE id = ? OR external_thread_id = ?').run(next, nextManual, id, rawId);
+    io.emit('THREAD_UNREAD_CHANGED', { thread_id: id, is_unread: next, unread_manual: nextManual });
+    res.json({ success: true, id, is_unread: next, unread_manual: nextManual });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Không thể cập nhật trạng thái chưa đọc.' });
   }
@@ -10029,9 +10037,70 @@ function startServer() {
       console.log(`[DB] 🧹 Heal tin rác/nhân đôi: ${deletedNoticeCount} notice E2EE, ${dupThreadIds.size} bubble dom_ trùng mid thật, ${sepThreadIds.size} separator thời gian, ${fixedMojibakeCount} emoji mojibake, ${deletedReplyHeaderCount} header reply, ${deletedPhantomLabelCount} nhãn tên nhóm, ${deletedMemberNameEchoCount} mảnh tên==sender, ${deletedHeaderGhostCount} header reply ghost, ${fixedPreviewPrefixCount} preview dán prefix (${totalJunk} vị trí)`);
     }
 
+    // (4i) Làm sạch contact_name bị dính "Tin nhắn chưa đọc:..." do FB nhét thẳng vào dòng đầu của row
+    const pollutedThreads = db.prepare("SELECT id, contact_name FROM threads WHERE contact_name LIKE '%Tin nhắn chưa đọc:%' OR contact_name LIKE '%Unread message%'").all();
+    for (const pt of pollutedThreads) {
+      const cleaned = cleanContactName(pt.contact_name, 'Khách hàng');
+      db.prepare('UPDATE threads SET contact_name = ? WHERE id = ?').run(cleaned, pt.id);
+      db.prepare('UPDATE contacts SET name = ? WHERE thread_id = ?').run(cleaned, pt.id);
+    }
+
+    // (4k) Gỡ trạng thái chưa đọc bị kẹt (unread_manual = 1 do lỗi quét lại bubble cũ) trên hội thoại cũ
+    db.prepare(`
+      UPDATE threads
+      SET is_unread = 0, unread_manual = -1
+      WHERE id = '6594239327285616'
+         OR (is_unread = 1 AND unread_manual = 1 AND (
+           SELECT MAX(COALESCE(timestamp_ms, 0)) FROM messages m WHERE m.thread_id = threads.id
+         ) < (? - 3600000))
+    `).run(Date.now());
+
     const activeThreads = db.prepare('SELECT DISTINCT thread_id FROM messages').all();
     for (const { thread_id } of activeThreads) {
-      if (thread_id) ConversationRepository.normalizeMessageSequence(thread_id, db);
+      if (thread_id) {
+        // Backfill Snowflake timestamp trước rồi dọn các cặp nhân đôi OTID / __bubble_N cùng nội dung trong 15s
+        ConversationRepository.normalizeMessageSequence(thread_id, db);
+        const dupOutgoing = db.prepare(`
+          SELECT m.id
+          FROM messages m
+          WHERE m.thread_id = ?
+            AND (
+              m.fb_message_id LIKE '%__bubble_%'
+              OR (m.is_outgoing = 1 AND m.fb_message_id GLOB '[0-9]*' AND m.fb_message_id NOT LIKE '%@msgr.%')
+            )
+            AND EXISTS (
+              SELECT 1 FROM messages twin
+              WHERE twin.thread_id = m.thread_id
+                AND twin.id != m.id
+                AND twin.is_outgoing = m.is_outgoing
+                AND COALESCE(twin.content, '') != ''
+                AND COALESCE(twin.content, '') = COALESCE(m.content, '')
+                AND twin.fb_message_id NOT LIKE '%__bubble_%'
+                AND ABS(COALESCE(twin.timestamp_ms, 0) - COALESCE(m.timestamp_ms, 0)) <= 15000
+                AND (
+                  m.fb_message_id LIKE '%__bubble_%'
+                  OR twin.fb_message_id LIKE '%@msgr.%'
+                  OR twin.id < m.id
+                )
+            )
+        `).all(thread_id);
+        if (dupOutgoing.length > 0) {
+          for (const d of dupOutgoing) {
+            db.prepare('DELETE FROM messages WHERE id = ?').run(d.id);
+          }
+          ConversationRepository.normalizeMessageSequence(thread_id, db);
+        }
+        const latestMsg = db.prepare(`
+          SELECT content, timestamp_ms, created_at FROM messages
+          WHERE thread_id = ? AND COALESCE(content, '') != ''
+          ORDER BY COALESCE(sequence_order, id) DESC, id DESC LIMIT 1
+        `).get(thread_id);
+        if (latestMsg && latestMsg.content) {
+          const iso = latestMsg.timestamp_ms > 0 ? new Date(Number(latestMsg.timestamp_ms)).toISOString() : latestMsg.created_at;
+          db.prepare('UPDATE threads SET last_message = ?, last_activity = COALESCE(?, last_activity) WHERE id = ?')
+            .run(latestMsg.content, iso, thread_id);
+        }
+      }
     }
   } catch (cleanErr) {
     console.warn('[DB] Lỗi dọn dẹp tên hệ thống / chuẩn hóa sequence:', cleanErr.message);

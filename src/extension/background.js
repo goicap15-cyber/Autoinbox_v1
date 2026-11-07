@@ -8157,9 +8157,12 @@ function scrapeFacebookSidebar() {
         rowContainer.querySelector('span[style*="font-weight"]') ||
         rowContainer.querySelector('span');
 
-      let rawName = String(rowContainer.innerText || nameEl?.innerText || nameEl?.textContent || '').split(/\n+/)[0].trim();
+      let rawName = String(rowContainer.innerText || nameEl?.innerText || nameEl?.textContent || '')
+        .replace(/(?:Tin nhắn chưa đọc|Unread messages?)\s*:[\s\S]*$/iu, '')
+        .split(/\n+/)[0]
+        .trim();
       rawName = rawName.replace(/(?:Tin nhắn và cuộc gọi|Em chào chị|Bạn và|Các bạn|được bảo mật|hoạt động|vừa xong).*$/i, '').trim();
-      rawName = rawName.replace(/\s*\d+\s*(?:ngày|giờ|phút|năm|s|m|h|d|y)\s*$/i, '').trim();
+      rawName = rawName.replace(/\s*[·•]?\s*\d+\s*(?:ngày|giờ|phút|năm|s|m|h|d|y).*$/i, '').trim();
 
       const PRESENCE_EXACT = /^(?:Đang|Đang hoạt động.*|Hoạt động(?:\s+\d+.*)?|Đã hoạt động.*|Active now|Active recently|Active \d+.*|Online|Offline)$/i;
       let name = rawName.substring(0, 60).trim();
@@ -8177,7 +8180,8 @@ function scrapeFacebookSidebar() {
       // data-testid="unread-count"/.unread). Chấm chưa đọc mới là div tròn
       // 6-16px nền xanh FB - dò hình dạng+màu, kèm aria-label (so JS regex
       // vì CSS i-flag không gập Đ/đ).
-      let hasUnreadDot = rowContainer.querySelector('[data-testid="unread-count"], .unread') ? true : false;
+      const rawContainerText = String(rowContainer.innerText || rowContainer.textContent || '');
+      let hasUnreadDot = (rowContainer.querySelector('[data-testid="unread-count"], .unread') || /(?:Tin nhắn chưa đọc|Unread messages?)\s*:/iu.test(rawContainerText)) ? true : false;
       if (!hasUnreadDot) {
         for (const el of rowContainer.querySelectorAll('[aria-label]')) {
           const lbl = (el.getAttribute('aria-label') || '').trim();

@@ -77,7 +77,26 @@ function rememberGeometryFlip(stableMessageId, committedOutgoing) {
 
 class ConversationRepository {
   static bubbleFamilyId(messageId) {
-    return String(messageId || '').replace(/__bubble_\d+$/, '');
+    return String(messageId || '')
+      .replace(/__bubble_\d+$/, '')
+      .replace(/^[^@]+@msgr\.(\d{15,22})$/, '$1');
+  }
+
+  static extractSnowflakeBigInt(fbMessageId) {
+    const raw = String(fbMessageId || '').replace(/__bubble_\d+$/, '').trim();
+    const m = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
+    if (!m) return null;
+    try {
+      const sf = BigInt(m[1]);
+      const ts = Number(sf >> 22n);
+      if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return sf;
+    } catch (_) {}
+    return null;
+  }
+
+  static extractSnowflakeTimestampMs(fbMessageId) {
+    const sf = ConversationRepository.extractSnowflakeBigInt(fbMessageId);
+    return sf !== null ? Number(sf >> 22n) : 0;
   }
 
   // Facebook may group several real, consecutive bubbles under one native
@@ -611,8 +630,13 @@ class ConversationRepository {
           : null;
         let stableId = msg.fb_message_id || msg.messageId || msg.client_message_id || ConversationRepository.fingerprint(threadId, msg);
         const rawObservedTs = Number(msg.timestamp_ms || msg.timestamp || 0);
-        const observedTimestampMs = (Number.isFinite(rawObservedTs) && rawObservedTs > 0 && rawObservedTs <= Date.now() + 60000) ? rawObservedTs : 0;
-        const observedTimestampSource = msg.timestamp_source || 'sync';
+        const snowflakeTs = ConversationRepository.extractSnowflakeTimestampMs(stableId);
+        let observedTimestampMs = (Number.isFinite(rawObservedTs) && rawObservedTs > 0 && rawObservedTs <= Date.now() + 60000) ? rawObservedTs : 0;
+        let observedTimestampSource = msg.timestamp_source || 'sync';
+        if (snowflakeTs > 0 && (observedTimestampMs <= 0 || ['realtime_fallback', 'facebook_label', 'dom_clock_order', 'dom_order', 'unknown', 'sync'].includes(observedTimestampSource))) {
+          observedTimestampMs = snowflakeTs;
+          observedTimestampSource = 'facebook_payload';
+        }
         let content = msg.content ?? msg.text ?? msg.cleaned ?? null;
         const mediaType = msg.media_type || (msg.media_url ? 'image' : 'text');
         const mediaUrl = msg.media_url || null;
@@ -1005,9 +1029,27 @@ class ConversationRepository {
       WHERE thread_id = ?
     `).all(threadId);
 
+    if (rows.length === 0) return 0;
+
+    // Backfill timestamp_ms từ E2EE Snowflake ID nếu tin nhắn bị thiếu timestamp_ms (= 0)
+    // hoặc bị đóng dấu nhầm bằng giờ quét lại (lệch > 2 giây so với giờ gốc trên server FB).
+    const updateTsStmt = database.prepare("UPDATE messages SET timestamp_ms = ?, timestamp_source = 'facebook_payload' WHERE id = ?");
+    for (const row of rows) {
+      const sfTs = ConversationRepository.extractSnowflakeTimestampMs(row.fb_message_id);
+      if (sfTs > 0) {
+        const curTs = Number(row.timestamp_ms || 0);
+        if (curTs <= 0 || Math.abs(curTs - sfTs) > 2000) {
+          row.timestamp_ms = sfTs;
+          try { updateTsStmt.run(sfTs, row.id); } catch (_) {}
+        }
+      }
+    }
+
     if (rows.length < 2) return rows.length;
 
     function parseSafeUtcTimestamp(row) {
+      const sfTs = ConversationRepository.extractSnowflakeTimestampMs(row?.fb_message_id);
+      if (sfTs > 0) return sfTs;
       const ms = Number(row?.timestamp_ms || 0);
       if (Number.isFinite(ms) && ms > 0) return ms;
       if (!row?.created_at) return 0;
@@ -1017,18 +1059,22 @@ class ConversationRepository {
     }
 
     rows.sort((a, b) => {
-      // 6 byte giữa của mid.$ là entropy ngẫu nhiên của Facebook, KHÔNG tăng
-      // dần theo thời gian - so hash trước đây là nguyên nhân chính khiến tin
-      // 23/09 nhảy lên trước tin 22/09. Timestamp là tiêu chí chính.
+      const sfA = ConversationRepository.extractSnowflakeBigInt(a?.fb_message_id);
+      const sfB = ConversationRepository.extractSnowflakeBigInt(b?.fb_message_id);
+      if (sfA !== null && sfB !== null && sfA !== sfB) {
+        return sfA < sfB ? -1 : 1;
+      }
+
       const tsA = parseSafeUtcTimestamp(a);
       const tsB = parseSafeUtcTimestamp(b);
+      if ((sfA !== null || sfB !== null) && tsA > 0 && tsB > 0 && tsA !== tsB) {
+        return tsA - tsB;
+      }
       const minuteA = tsA > 0 ? Math.floor(tsA / 60000) : 0;
       const minuteB = tsB > 0 ? Math.floor(tsB / 60000) : 0;
       if (minuteA > 0 && minuteB > 0 && minuteA !== minuteB) {
         return minuteA - minuteB;
       }
-      // Tin không còn thời gian nào hợp lệ (cả timestamp_ms lẫn created_at)
-      // đứng sau mọi tin đã biết thời gian, giữ thứ tự cũ trong nhóm của nó.
       if ((minuteA > 0) !== (minuteB > 0)) {
         return minuteA > 0 ? -1 : 1;
       }
