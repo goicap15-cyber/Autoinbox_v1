@@ -2448,14 +2448,50 @@ wss.on('connection', (ws, req) => {
           console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_RESULT_RECEIVED', thread_id: String(thread_id), client_message_id, success: !!success, official_fb_id: !!officialFbId, error_code: error_code || null, error: error || null, at: new Date().toISOString() }));
           
           if (success && officialFbId) {
-            db.prepare(`
-              UPDATE messages 
-              SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL
+            const currentRow = db.prepare(`
+              SELECT id, thread_id, fb_message_id, delivery_status
+              FROM messages
               WHERE client_message_id = ? OR fb_message_id = ?
-            `).run(officialFbId, client_message_id, `pending_${client_message_id}`);
+              ORDER BY id DESC LIMIT 1
+            `).get(client_message_id, `pending_${client_message_id}`);
+            let effectiveFbId = String(officialFbId);
+            if (currentRow) {
+              const currentFbId = String(currentRow.fb_message_id || '');
+              const currentIsCanonical = currentFbId.startsWith('mid.') || currentFbId.includes('@msgr.');
+              const incomingIsBareNumeric = /^\d+$/.test(effectiveFbId);
+              if (currentIsCanonical && incomingIsBareNumeric) {
+                effectiveFbId = currentFbId;
+              }
+              const bareSf = OutboundDomCorrelationService.bareSnowflakePart(effectiveFbId);
+              const conflictingRow = db.prepare(`
+                SELECT id, fb_message_id FROM messages
+                WHERE id <> ? AND (
+                  fb_message_id = ?
+                  OR (? IS NOT NULL AND thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%@msgr.' || ?))
+                )
+                LIMIT 1
+              `).get(currentRow.id, effectiveFbId, bareSf, currentRow.thread_id, bareSf, bareSf);
+              if (conflictingRow) {
+                if (String(conflictingRow.fb_message_id || '').includes('@msgr.')) {
+                  effectiveFbId = String(conflictingRow.fb_message_id);
+                }
+                db.prepare('DELETE FROM messages WHERE id = ?').run(conflictingRow.id);
+              }
+              db.prepare(`
+                UPDATE messages
+                SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL
+                WHERE id = ?
+              `).run(effectiveFbId, currentRow.id);
+            } else {
+              db.prepare(`
+                UPDATE OR IGNORE messages
+                SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL
+                WHERE client_message_id = ? OR fb_message_id = ?
+              `).run(effectiveFbId, client_message_id, `pending_${client_message_id}`);
+            }
             updateQueueStatusFromClientMessage(client_message_id, 'sent');
 
-            io.emit('MESSAGE_SENT', { thread_id, client_message_id, success: true, fb_message_id: officialFbId, status: 'sent' });
+            io.emit('MESSAGE_SENT', { thread_id, client_message_id, success: true, fb_message_id: effectiveFbId, status: 'sent' });
           } else if (error_code === 'COMPOSER_DISPATCHED') {
             // Check if DOM/network confirmation already arrived before this result
             const existingRow = db.prepare(`SELECT id, fb_message_id, media_type, delivery_status, delivery_error FROM messages WHERE client_message_id = ? OR fb_message_id = ?`).get(client_message_id, `pending_${client_message_id}`);
@@ -3334,7 +3370,7 @@ wss.on('connection', (ws, req) => {
                 isOutgoing: true,
                 mediaType: m.media_type || 'text',
                 content: m.content,
-                observedAt: Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now(),
+                observedAt: tsMs || Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now(),
                 confirmationSource: m.source === 'page_dom_observer' ? 'page_dom' : 'personal_dom'
               }, { database: db });
 
@@ -3347,19 +3383,35 @@ wss.on('connection', (ws, req) => {
               }
 
               // Rich recovery had first chance above. If this official id is
-              // still already present, it is now a true duplicate and must
-              // not fall through to another insert.
+              // still already present (exact or same bare Snowflake ID in thread),
+              // it is now a true duplicate and must not fall through to another insert.
               if (m.fb_message_id) {
-                const existingFbId = db.prepare('SELECT id, is_outgoing, delivery_status, direction_status FROM messages WHERE fb_message_id = ?').get(m.fb_message_id);
+                const bareSf = OutboundDomCorrelationService.bareSnowflakePart(m.fb_message_id);
+                const existingFbId = db.prepare(`
+                  SELECT id, fb_message_id, client_message_id, is_outgoing, delivery_status, direction_status
+                  FROM messages
+                  WHERE fb_message_id = ?
+                     OR (? IS NOT NULL AND thread_id = ? AND is_outgoing = 1 AND (fb_message_id = ? OR fb_message_id LIKE '%@msgr.' || ?))
+                  ORDER BY id DESC LIMIT 1
+                `).get(m.fb_message_id, bareSf, canonicalThreadId, bareSf, bareSf);
                 if (existingFbId && existingFbId.is_outgoing === 1 && existingFbId.delivery_status === 'sent') {
-                  if (existingFbId.direction_status === 'pending') {
-                    // Fix B đánh pending cho outgoing yếu chứng, nhưng mọi echo
-                    // sau đều bị chặn tại đây nên reconcile 2-strike không bao
-                    // giờ chạy -> pending kẹt vĩnh viễn, tin mình render như
-                    // tin khách (reproduce 2026-11-03). Observation trusted này
-                    // là lượt xác nhận thứ hai: confirm chiều + đẩy row mới.
+                  const shouldUpgradeId = String(m.fb_message_id).includes('@msgr.') && !String(existingFbId.fb_message_id || '').includes('@msgr.');
+                  if (shouldUpgradeId) {
+                    db.prepare('UPDATE OR IGNORE messages SET fb_message_id = ?, direction_status = ? WHERE id = ?')
+                      .run(m.fb_message_id, 'confirmed', existingFbId.id);
+                  } else if (existingFbId.direction_status === 'pending') {
                     db.prepare("UPDATE messages SET direction_status = 'confirmed' WHERE id = ? AND direction_status = 'pending'").run(existingFbId.id);
+                  }
+                  if (shouldUpgradeId || existingFbId.direction_status === 'pending') {
                     const confirmedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(existingFbId.id);
+                    if (confirmedRow?.client_message_id) {
+                      io.emit('MESSAGE_SENT', {
+                        thread_id: canonicalThreadId,
+                        client_message_id: confirmedRow.client_message_id,
+                        fb_message_id: confirmedRow.fb_message_id,
+                        status: 'sent'
+                      });
+                    }
                     io.emit('NEW_MESSAGE', withAttachmentAccessUrl({
                       ...confirmedRow,
                       thread_id: canonicalThreadId,
@@ -3368,7 +3420,7 @@ wss.on('connection', (ws, req) => {
                       direction_status: 'confirmed',
                       status: confirmedRow.delivery_status || 'sent'
                     }));
-                    console.log(`[WS] ✅ Confirm chiều outgoing cho row pending ${existingFbId.id} (fb_message_id ${m.fb_message_id}).`);
+                    console.log(`[WS] ✅ Đồng bộ/nâng cấp row outgoing ${existingFbId.id} (${existingFbId.fb_message_id} -> ${m.fb_message_id}).`);
                   } else {
                     console.log(`[WS] Known confirmed fb_message_id (${m.fb_message_id}); pending recovery found no candidate.`);
                   }
@@ -3377,37 +3429,31 @@ wss.on('connection', (ws, req) => {
               }
 
               const isMediaConfirmation = OutboundDomCorrelationService.isMediaConfirmationEvent(m);
-              // Spec 039/040: a plain text-content match only proves the caption
-              // rendered on Facebook, not that an attachment/manifest riding
-              // alongside it actually attached and sent (live testing showed
-              // Facebook can post just the caption while the file silently
-              // fails to attach). Excluding queue rows with attachment_id/
-              // manifest_id here forces such dispatches through the explicit
-              // media-confirmation path instead, so they fail safe to
-              // 'unknown' on timeout rather than falsely reporting 'sent'.
               const observedMediaKind = (m.media_type && m.media_type !== 'text')
                 ? (String(m.media_type).startsWith('video') ? 'video' : 'image')
                 : (m.media_url ? 'image' : 'any');
 
               let pending = isMediaConfirmation
-                ? OutboundDomCorrelationService.matchPendingImageOutbound(db, internalThreadId, observedMediaKind)
+                ? OutboundDomCorrelationService.matchPendingImageOutbound(db, internalThreadId, observedMediaKind, tsMs, m.fb_message_id)
                 : db.prepare(`
-                    SELECT outbound.id, outbound.client_message_id FROM messages outbound
+                    SELECT outbound.id, outbound.client_message_id, outbound.thread_id, outbound.attachment_id, outbound.media_type FROM messages outbound
                     LEFT JOIN outbound_attempts attempt ON outbound.latest_attempt_id = attempt.id
                     LEFT JOIN message_queue queued ON (
                       outbound.client_message_id = 'queue_' || queued.id
                       OR attempt.id = queued.outbound_attempt_id
                     )
                     WHERE outbound.thread_id = ? AND outbound.content = ? AND outbound.is_outgoing = 1
-                      AND outbound.delivery_status = 'pending'
+                      AND (
+                        outbound.delivery_status = 'pending'
+                        OR outbound.fb_message_id LIKE 'pending_%'
+                        OR (outbound.fb_message_id GLOB '[0-9]*' AND outbound.fb_message_id NOT LIKE '%@msgr.%')
+                      )
+                      AND datetime(outbound.created_at) >= datetime('now', '-120 seconds')
                       AND outbound.attachment_id IS NULL AND (outbound.media_type IS NULL OR outbound.media_type = 'text')
                       AND (queued.id IS NULL OR (queued.attachment_id IS NULL AND queued.manifest_id IS NULL))
                     ORDER BY outbound.id ASC LIMIT 1
                   `).get(internalThreadId, m.content);
 
-              if (!pending) {
-                pending = OutboundDomCorrelationService.matchPendingImageOutbound(db, internalThreadId, observedMediaKind);
-              }
               if (pending) {
                 const confirmed = OutboundDomCorrelationService.confirmPendingOutbound(db, io, pending, {
                   fbMessageId: m.fb_message_id,
@@ -3421,26 +3467,39 @@ wss.on('connection', (ws, req) => {
                 }
               }
 
-              // Feature 020: Facebook sometimes assigns an outgoing message a
-              // temporary, non-"mid.$" numeric fb_message_id first, then a
-              // permanent "mid.$..." id on a later scan once fully confirmed.
-              // The pending-match above only bridges the FIRST id-arrival (it
-              // consumes the pending row, flipping it to 'sent'); the second
-              // id-arrival finds no pending row left and no existing row
-              // under its own id, so without this check it falls through to
-              // a plain insert - a real duplicate row for the same send.
-              // Recognize "already sent, same content, different id, very
-              // recent" as an id upgrade and update in place instead.
-               // Text rows carry a CRM client_message_id through their whole lifecycle.
-               // Do not use content-based temporary-id upgrades for text:
-               // two identical sends are two independent messages.
-               const observedAsMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
-               if (m.fb_message_id && observedAsMedia) {
-                 const recentSent = OutboundDomCorrelationService.findTemporaryIdUpgrade(
-                   db, canonicalThreadId, { ...m, timestamp_ms: tsMs, created_at: createdAt }, true
-                 );
+              const observedAsMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
+              if (m.fb_message_id) {
+                const recentSent = OutboundDomCorrelationService.findTemporaryIdUpgrade(
+                  db, canonicalThreadId, { ...m, timestamp_ms: tsMs, created_at: createdAt }, observedAsMedia
+                );
                 if (recentSent) {
-                  db.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?').run(m.fb_message_id, recentSent.id);
+                  const upgradeSfTs = ConversationRepository.extractSnowflakeTimestampMs(m.fb_message_id);
+                  db.prepare(`
+                    UPDATE OR IGNORE messages
+                    SET fb_message_id = ?,
+                        delivery_status = 'sent',
+                        timestamp_ms = CASE WHEN ? > 0 THEN ? ELSE timestamp_ms END,
+                        timestamp_source = CASE WHEN ? > 0 THEN 'facebook_payload' ELSE timestamp_source END
+                    WHERE id = ?
+                  `).run(m.fb_message_id, upgradeSfTs, upgradeSfTs, upgradeSfTs, recentSent.id);
+                  const upgradedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(recentSent.id);
+                  if (upgradedRow) {
+                    if (upgradedRow.client_message_id) {
+                      io.emit('MESSAGE_SENT', {
+                        thread_id: canonicalThreadId,
+                        client_message_id: upgradedRow.client_message_id,
+                        fb_message_id: upgradedRow.fb_message_id,
+                        status: 'sent'
+                      });
+                    }
+                    io.emit('NEW_MESSAGE', withAttachmentAccessUrl({
+                      ...upgradedRow,
+                      thread_id: canonicalThreadId,
+                      account_id: targetAccountId,
+                      is_outgoing: true,
+                      status: upgradedRow.delivery_status || 'sent'
+                    }));
+                  }
                   console.log(`[WS] Nâng cấp fb_message_id tạm ${recentSent.fb_message_id} -> ${m.fb_message_id} (id ${recentSent.id}), cùng 1 tin gửi đi`);
                   console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_ID_UPGRADED', thread_id: String(canonicalThreadId), from_fb_message_id: recentSent.fb_message_id, to_fb_message_id: m.fb_message_id, at: new Date().toISOString() }));
                   break;
@@ -3488,7 +3547,7 @@ wss.on('connection', (ws, req) => {
 
             if (isMedia) {
               outgoingMatch = db.prepare(`
-                SELECT id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
+                SELECT id, fb_message_id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
                 WHERE thread_id = ? AND is_outgoing = 1
                   AND (attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))
                   AND datetime(created_at) >= datetime('now', '-300 seconds')
@@ -3503,17 +3562,31 @@ wss.on('connection', (ws, req) => {
               // page_dom_observer/composer_confirmation giữ khớp nội dung vì
               // DOM Business Suite dùng id khác Graph API, không so được.
               const obsEchoMid = String(m.fb_message_id || '');
+              const obsEchoBareSf = OutboundDomCorrelationService.bareSnowflakePart(obsEchoMid);
               const obsEchoHasRealMid = m.source === 'dom_observer' && obsEchoMid
                 && !/^(?:dom_|pending_|history_)/.test(obsEchoMid)
                 && !/__bubble_\d+$/.test(obsEchoMid);
               outgoingMatch = obsEchoHasRealMid
                 ? db.prepare(`
-                    SELECT id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
-                    WHERE thread_id = ? AND is_outgoing = 1 AND fb_message_id = ?
+                    SELECT id, fb_message_id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
+                    WHERE thread_id = ? AND is_outgoing = 1
+                      AND (
+                        fb_message_id = ?
+                        OR (? IS NOT NULL AND (fb_message_id = ? OR fb_message_id LIKE '%@msgr.' || ?))
+                        OR (
+                          content = ?
+                          AND (
+                            fb_message_id LIKE 'pending_%'
+                            OR delivery_status = 'pending'
+                            OR (fb_message_id GLOB '[0-9]*' AND fb_message_id NOT LIKE '%@msgr.%')
+                          )
+                          AND datetime(created_at) >= datetime('now', '-120 seconds')
+                        )
+                      )
                     ORDER BY id DESC LIMIT 1
-                  `).get(canonicalThreadId, obsEchoMid)
+                  `).get(canonicalThreadId, obsEchoMid, obsEchoBareSf, obsEchoBareSf, obsEchoBareSf, m.content)
                 : db.prepare(`
-                    SELECT id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
+                    SELECT id, fb_message_id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
                     WHERE thread_id = ? AND content = ? AND is_outgoing = 1
                       AND datetime(created_at) >= datetime('now', '-300 seconds')
                     ORDER BY id DESC LIMIT 1
@@ -3522,7 +3595,14 @@ wss.on('connection', (ws, req) => {
 
             if (outgoingMatch) {
               console.log(`[WS] 🚫 Anti-ghost FINAL: DOM observer bắt lại tin outgoing (id=${outgoingMatch.id}, status=${outgoingMatch.delivery_status}). Discard hoàn toàn.`);
-              if (outgoingMatch.delivery_status === 'pending') {
+              const matchFbId = String(outgoingMatch.fb_message_id || '');
+              const needsIdUpgrade = m.fb_message_id && (
+                outgoingMatch.delivery_status === 'pending'
+                || matchFbId.startsWith('pending_')
+                || matchFbId.includes('__bubble_')
+                || (/^\d+$/.test(matchFbId) && String(m.fb_message_id).includes('@msgr.'))
+              );
+              if (needsIdUpgrade) {
                 OutboundDomCorrelationService.confirmPendingOutbound(db, io, outgoingMatch, {
                   fbMessageId: m.fb_message_id,
                   tsMs,
@@ -10074,12 +10154,19 @@ function startServer() {
     const activeThreads = db.prepare('SELECT DISTINCT thread_id FROM messages').all();
     for (const { thread_id } of activeThreads) {
       if (thread_id) {
-        // Backfill Snowflake timestamp trước rồi dọn các cặp nhân đôi OTID / __bubble_N cùng nội dung trong 15s
+        // Backfill Snowflake timestamp trước rồi gộp các cặp nhân đôi tạm -> chính thức (ảnh + text)
         ConversationRepository.normalizeMessageSequence(thread_id, db);
+        try {
+          OutboundDomCorrelationService.collapseStoredTemporaryIdUpgrades(db, thread_id);
+          OutboundDomCorrelationService.collapseStoredMediaCompanions(db, thread_id);
+        } catch (_) {}
         const dupOutgoing = db.prepare(`
           SELECT m.id
           FROM messages m
           WHERE m.thread_id = ?
+            AND m.attachment_id IS NULL
+            AND m.latest_attempt_id IS NULL
+            AND NOT EXISTS (SELECT 1 FROM outbound_attempts oa WHERE oa.message_id = m.id)
             AND (
               m.fb_message_id LIKE '%__bubble_%'
               OR (m.is_outgoing = 1 AND m.fb_message_id GLOB '[0-9]*' AND m.fb_message_id NOT LIKE '%@msgr.%')
@@ -10104,8 +10191,8 @@ function startServer() {
           for (const d of dupOutgoing) {
             db.prepare('DELETE FROM messages WHERE id = ?').run(d.id);
           }
-          ConversationRepository.normalizeMessageSequence(thread_id, db);
         }
+        ConversationRepository.normalizeMessageSequence(thread_id, db);
         const latestMsg = db.prepare(`
           SELECT content, timestamp_ms, created_at FROM messages
           WHERE thread_id = ? AND COALESCE(content, '') != ''

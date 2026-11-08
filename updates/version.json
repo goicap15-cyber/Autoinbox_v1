@@ -1,8 +1,8 @@
 {
-  "version": "1.0.21",
-  "releasedAt": "2026-11-07T04:31:31.989Z",
-  "notes": "Sửa lỗi hội thoại ở hộp thư chính bị đẩy nhầm sang Tin nhắn chờ khi mở tab Tin nhắn chờ",
+  "version": "1.0.22",
+  "releasedAt": "2026-11-08T06:31:40.135Z",
+  "notes": "Sửa triệt để lỗi nhân đôi ảnh và nhân đôi tin nhắn khi gửi trên Messenger cá nhân",
   "requiresRestart": true,
-  "sizeBytes": 3085241,
-  "sha256": "ac6f1537d2a5316bb2e68000bb69feedf489d1dbccaa04be6f0dcae8b9ff6bdc"
+  "sizeBytes": 3085777,
+  "sha256": "975d4b42212e00f0909af147a888f3682a19a77ddd0306ccb6d00a2318e4959d"
 }

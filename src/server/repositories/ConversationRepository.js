@@ -596,7 +596,7 @@ class ConversationRepository {
         sender_name = COALESCE(excluded.sender_name, messages.sender_name),
         content = CASE WHEN excluded.content IS NOT NULL AND excluded.content <> '' THEN excluded.content ELSE messages.content END,
         media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
-        media_url = COALESCE(excluded.media_url, messages.media_url),
+        media_url = CASE WHEN messages.attachment_id IS NOT NULL AND messages.media_url IS NOT NULL THEN messages.media_url ELSE COALESCE(excluded.media_url, messages.media_url) END,
         -- Một lần quét lại thiếu thông tin thời gian (ts <= 0) không được xóa
         -- timestamp đã lưu - tin cũ bị "mất thời gian" sẽ bị normalize xếp nhầm ngày.
         -- Quét lại cũng không được đẩy timestamp đã lưu tiến lên: DOM/sidebar
@@ -837,22 +837,92 @@ class ConversationRepository {
             }
           } catch (_) { /* non-fatal: fall through to normal insert path */ }
         }
-        if (!existing && isOutgoing && msg.fb_message_id && String(msg.fb_message_id).startsWith('mid.') && content) {
+        if (!existing && isOutgoing && msg.fb_message_id) {
           try {
-            const pendingCandidate = database.prepare(`
-              SELECT id, fb_message_id, client_message_id FROM messages
-              WHERE thread_id = ? AND is_outgoing = 1
-                AND (fb_message_id LIKE 'pending_%' OR delivery_status = 'pending')
-                AND COALESCE(content, '') = COALESCE(?, '')
-                AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 120000)
-              ORDER BY id DESC LIMIT 1
-            `).get(threadId, content, observedTimestampMs, observedTimestampMs);
-            if (pendingCandidate) {
-              database.prepare(
-                'UPDATE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\') WHERE id = ?'
-              ).run(String(msg.fb_message_id), pendingCandidate.id);
-              stableId = String(msg.fb_message_id);
-              existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+            const cleanedFbId = String(msg.fb_message_id)
+              .replace(/::[^:]+$/, '')
+              .replace(/_media$/, '')
+              .replace(/__bubble_\d+$/, '')
+              .trim();
+            const bareSfMatch = cleanedFbId.match(/^(?:\d+@msgr\.)?(\d{15,21})$/);
+            const bareSf = bareSfMatch ? bareSfMatch[1] : null;
+            if (bareSf) {
+              const sfCandidate = database.prepare(`
+                SELECT id, fb_message_id FROM messages
+                WHERE thread_id = ? AND is_outgoing = 1
+                  AND (fb_message_id = ? OR fb_message_id LIKE '%@msgr.' || ?)
+                ORDER BY id DESC LIMIT 1
+              `).get(threadId, bareSf, bareSf);
+              if (sfCandidate) {
+                if (String(msg.fb_message_id).includes('@msgr.') && !String(sfCandidate.fb_message_id).includes('@msgr.')) {
+                  database.prepare('UPDATE OR IGNORE messages SET fb_message_id = ? WHERE id = ?')
+                    .run(String(msg.fb_message_id), sfCandidate.id);
+                  stableId = String(msg.fb_message_id);
+                } else {
+                  stableId = String(sfCandidate.fb_message_id);
+                }
+                existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+              }
+            }
+            const isCanonicalIncomingId = String(msg.fb_message_id).startsWith('mid.')
+              || String(msg.fb_message_id).includes('@msgr.')
+              || /^\d{15,21}$/.test(String(msg.fb_message_id));
+            if (!existing && isCanonicalIncomingId && !/__bubble_\d+$/.test(String(msg.fb_message_id))) {
+              if (mediaType === 'text' && !mediaUrl && content) {
+                const pendingCandidate = database.prepare(`
+                  SELECT id, fb_message_id, client_message_id FROM messages
+                  WHERE thread_id = ? AND is_outgoing = 1
+                    AND (
+                      fb_message_id LIKE 'pending_%'
+                      OR delivery_status = 'pending'
+                      OR (fb_message_id GLOB '[0-9]*' AND fb_message_id NOT LIKE '%@msgr.%')
+                    )
+                    AND COALESCE(content, '') = COALESCE(?, '')
+                    AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 120000)
+                  ORDER BY id DESC LIMIT 1
+                `).get(threadId, content, observedTimestampMs, observedTimestampMs);
+                if (pendingCandidate) {
+                  database.prepare(
+                    'UPDATE OR IGNORE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\') WHERE id = ?'
+                  ).run(String(msg.fb_message_id), pendingCandidate.id);
+                  stableId = String(msg.fb_message_id);
+                  existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+                }
+              } else if (mediaType !== 'text' || mediaUrl) {
+                const mediaCandidate = database.prepare(`
+                  SELECT id, fb_message_id, client_message_id, created_at, timestamp_ms FROM messages
+                  WHERE thread_id = ? AND is_outgoing = 1
+                    AND (attachment_id IS NOT NULL OR client_message_id IS NOT NULL)
+                    AND (
+                      fb_message_id LIKE 'pending_%'
+                      OR delivery_status = 'pending'
+                      OR fb_message_id LIKE '%__bubble_%'
+                      OR (fb_message_id GLOB '[0-9]*' AND fb_message_id NOT LIKE '%@msgr.%')
+                    )
+                    AND (attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))
+                    AND datetime(created_at) >= datetime('now', '-180 seconds')
+                  ORDER BY id DESC LIMIT 1
+                `).get(threadId);
+                if (mediaCandidate) {
+                  try {
+                    const OutboundConfirmationService = require('../services/OutboundConfirmationService');
+                    OutboundConfirmationService.confirmObservation({
+                      threadId,
+                      fbMessageId: String(msg.fb_message_id),
+                      isOutgoing: true,
+                      mediaType: mediaType !== 'text' ? mediaType : 'image',
+                      content: content || '',
+                      observedAt: observedTimestampMs || Date.now(),
+                      confirmationSource: 'history_sync'
+                    }, { database });
+                  } catch (_) {}
+                  database.prepare(
+                    'UPDATE OR IGNORE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\'), delivery_error = NULL WHERE id = ?'
+                  ).run(String(msg.fb_message_id), mediaCandidate.id);
+                  stableId = String(msg.fb_message_id);
+                  existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+                }
+              }
             }
           } catch (_) { /* non-fatal */ }
         }
@@ -1045,18 +1115,37 @@ class ConversationRepository {
 
   static normalizeMessageSequence(threadId, database = getDefaultDb()) {
     const rows = database.prepare(`
-      SELECT id, fb_message_id, timestamp_ms, created_at, sequence_order
+      SELECT id, fb_message_id, client_message_id, attachment_id, timestamp_ms, created_at, sequence_order
       FROM messages
       WHERE thread_id = ?
     `).all(threadId);
 
     if (rows.length === 0) return 0;
 
+    function parseRowCreatedMs(row) {
+      if (!row?.created_at) return 0;
+      const s = String(row.created_at).trim();
+      if (s.endsWith('Z') || s.includes('T')) return Date.parse(s) || 0;
+      return Date.parse(s.replace(' ', 'T') + 'Z') || 0;
+    }
+
     // Backfill timestamp_ms từ E2EE Snowflake ID nếu tin nhắn bị thiếu timestamp_ms (= 0)
     // hoặc bị đóng dấu nhầm bằng giờ quét lại (lệch > 2 giây so với giờ gốc trên server FB).
+    // Ngoại lệ: row do CRM tạo (client_message_id / attachment_id) bị gắn nhầm anchor cũ __bubble_N
+    // không bao giờ được lùi timestamp_ms về ngày hôm qua theo anchor cũ.
     const updateTsStmt = database.prepare("UPDATE messages SET timestamp_ms = ?, timestamp_source = 'facebook_payload' WHERE id = ?");
     for (const row of rows) {
+      const createdMs = parseRowCreatedMs(row);
+      const isCrmRowWithBubbleAnchor = Boolean(row.client_message_id || row.attachment_id)
+        && /__bubble_\d+$/.test(String(row.fb_message_id || ''));
       const sfTs = ConversationRepository.extractSnowflakeTimestampMs(row.fb_message_id);
+      if (isCrmRowWithBubbleAnchor && createdMs > 0 && sfTs > 0 && sfTs < createdMs - 30000) {
+        if (Math.abs(Number(row.timestamp_ms || 0) - createdMs) > 2000) {
+          row.timestamp_ms = createdMs;
+          try { updateTsStmt.run(createdMs, row.id); } catch (_) {}
+        }
+        continue;
+      }
       if (sfTs > 0) {
         const curTs = Number(row.timestamp_ms || 0);
         if (curTs <= 0 || Math.abs(curTs - sfTs) > 2000) {
@@ -1069,14 +1158,16 @@ class ConversationRepository {
     if (rows.length < 2) return rows.length;
 
     function parseSafeUtcTimestamp(row) {
+      const createdMs = parseRowCreatedMs(row);
+      const isCrmRowWithBubbleAnchor = Boolean(row?.client_message_id || row?.attachment_id)
+        && /__bubble_\d+$/.test(String(row?.fb_message_id || ''));
       const sfTs = ConversationRepository.extractSnowflakeTimestampMs(row?.fb_message_id);
-      if (sfTs > 0) return sfTs;
+      if (sfTs > 0 && !(isCrmRowWithBubbleAnchor && createdMs > 0 && sfTs < createdMs - 30000)) {
+        return sfTs;
+      }
       const ms = Number(row?.timestamp_ms || 0);
       if (Number.isFinite(ms) && ms > 0) return ms;
-      if (!row?.created_at) return 0;
-      const s = String(row.created_at).trim();
-      if (s.endsWith('Z')) return Date.parse(s) || 0;
-      return Date.parse(s.replace(' ', 'T') + 'Z') || 0;
+      return createdMs;
     }
 
     rows.sort((a, b) => {
@@ -1741,7 +1832,7 @@ class ConversationRepository {
           ELSE messages.content
         END,
         media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
-        media_url = COALESCE(excluded.media_url, messages.media_url),
+        media_url = CASE WHEN messages.attachment_id IS NOT NULL AND messages.media_url IS NOT NULL THEN messages.media_url ELSE COALESCE(excluded.media_url, messages.media_url) END,
         timestamp_ms = CASE WHEN ? = 1 THEN excluded.timestamp_ms ELSE messages.timestamp_ms END,
         timestamp_source = CASE WHEN ? = 1 THEN excluded.timestamp_source ELSE messages.timestamp_source END,
         is_outgoing = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.is_outgoing ELSE messages.is_outgoing END,
