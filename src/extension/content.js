@@ -446,6 +446,48 @@
     } catch (_) {}
   }
   const isDedicatedBackgroundTab = /(?:[?&])crm_tab_role=(?:requests|request_action)\b/i.test(window.location.search);
+  function extractMidTimestampMs(nativeId) {
+    const raw = String(nativeId || '').replace(/__bubble_\d+$/, '').replace(/_media(?:_\d+)?$/, '').trim();
+    const midMatch = raw.match(/^mid\.\$([A-Za-z0-9_-]{20,44})$/);
+    if (midMatch) {
+      try {
+        const b64 = midMatch[1].replace(/-/g, '+').replace(/_/g, '/');
+        const bin = atob(b64);
+        if (bin.length >= 16) {
+          let last8 = 0n;
+          for (let i = bin.length - 8; i < bin.length; i++) {
+            last8 = (last8 << 8n) | BigInt(bin.charCodeAt(i) & 0xff);
+          }
+          const sf = (last8 & 0x03ffffffffffffffn) << 6n;
+          const ts = Number(sf >> 22n);
+          if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return ts;
+        }
+      } catch (_) {}
+    }
+    const sfMatch = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
+    if (sfMatch) {
+      try {
+        const ts = Number(BigInt(sfMatch[1]) >> 22n);
+        if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return ts;
+      } catch (_) {}
+    }
+    return 0;
+  }
+  function isChatScrolledAwayFromBottom() {
+    try {
+      const log = document.querySelector('div[role="main"] [role="log"]') || document.querySelector('div[role="main"]');
+      if (!log) return false;
+      let probe = log;
+      while (probe && probe !== document.body) {
+        if (probe.scrollHeight > probe.clientHeight + 8) {
+          const dist = Math.max(0, probe.scrollHeight - probe.clientHeight - probe.scrollTop);
+          return dist > 160;
+        }
+        probe = probe.parentElement;
+      }
+    } catch (_) {}
+    return false;
+  }
   // Direction ledger: Messenger may replay a rendered outgoing bubble as an
   // incoming DOM row while React hydrates its aria metadata.
   const recentObservedOutgoing = new Map();
@@ -1011,7 +1053,21 @@
     // hiÃ¡Â»Æ’n thÃ¡Â»â€¹ caption vÃƒÂ  <img> dÃ†Â°Ã¡Â»â€ºi dÃ¡ÂºÂ¡ng 2 node con riÃƒÂªng biÃ¡Â»â€¡t cÃ¡Â»Â§a cÃƒÂ¹ng 1
     // article; MutationObserver chÃ¡Â»â€° bÃƒÂ¡o node vÃ¡Â»Â«a thÃƒÂªm (thÃ†Â°Ã¡Â»Âng là node caption
     // nhÃ¡Â»Â), nÃƒÂªn phÃ¡ÂºÂ£i leo lÃƒÂªn article mÃ¡Â»â€ºi thÃ¡ÂºÂ¥y Ã„â€˜Ã†Â°Ã¡Â»Â£c cÃ¡ÂºÂ£ <img> anh em của nó.
-    const directRowMatch = node.closest?.('div[role="article"]') || node.closest?.('div[role="row"]');
+    const directArticleOrUnit = node.closest?.('div[role="article"]') || node.closest?.('[data-message-id]');
+    if (!directArticleOrUnit && node.querySelectorAll) {
+      const nestedUnits = Array.from(node.querySelectorAll('div[role="article"], [data-message-id]')).filter((unit) => {
+        const parentUnit = unit.parentElement?.closest?.('div[role="article"], [data-message-id]');
+        return !parentUnit || !node.contains(parentUnit);
+      });
+      if (nestedUnits.length > 1) {
+        let combined = [];
+        for (const unit of nestedUnits) {
+          combined = combined.concat(parseMessagesFromDOMNode(unit, isRealtime));
+        }
+        return combined;
+      }
+    }
+    const directRowMatch = directArticleOrUnit || node.closest?.('div[role="row"]');
     if (!directRowMatch) {
       // node isn't itself scoped to a single row - check whether it's a bulk
       // container holding MULTIPLE separate rows (e.g. Facebook mounting a
@@ -1230,6 +1286,9 @@
     }
 
     let finalBubbles = leafBubbles;
+    if (finalBubbles.length > 1 && finalBubbles.some((b) => !b.closest('a[href]'))) {
+      finalBubbles = finalBubbles.filter((b) => !b.closest('a[href]'));
+    }
     if (isRealtime) {
       // Filter visual bubbles to avoid clones, hidden texts, or accessibility wrappers
       finalBubbles = leafBubbles.filter(b => {
@@ -1483,6 +1542,9 @@
       let caption = '';
       const MEDIA_PLACEHOLDER_RE = /^\[?(?:Ảnh|Photo|Image|Video|Tệp|File|Mở ảnh|Xem ảnh|Open photo|View photo|Attachment)\]?$/i;
       for (const bubble of finalBubbles) {
+      if (!bubble._crmPerNativeMap) {
+        finalBubbles._crmPerNativeMap = finalBubbles._crmPerNativeMap || new Map();
+      }
         const cleaned = cleanBubbleText(bubble.textContent);
         if (!cleaned || cleaned.length > 1000) continue;
         if (isClockMinuteFragment(cleaned, effectiveLabel)) continue;
@@ -1553,6 +1615,9 @@
     const REPLY_HEADER_BUBBLE_RE = /^[^?！?\n]{1,48}\s(?:đã trả lời|replied to)\s(?!(?:.*\s)?(?:chưa|rồi|xong|sao|đâu|gì|à|hả|nhỉ|nha|nhé|thôi|luôn|vậy|đấy|đó|ạ|nhá|rùi|nè|được|yet|already|right|now|ok|okay)\s*[?！?.!…]*$)[^?！?\n]{1,60}$/iu;
     let bubble_idx = 0;
     for (const bubble of finalBubbles) {
+      if (!bubble._crmPerNativeMap) {
+        finalBubbles._crmPerNativeMap = finalBubbles._crmPerNativeMap || new Map();
+      }
       const textContent = cleanBubbleText(bubble.textContent);
       // Keep icon ownership scoped to this exact bubble.
       const emojiContent = extractBubbleEmoji(bubble);
@@ -1611,10 +1676,17 @@
         content: cleanText,
         is_outgoing,
         direction_evidence,
-        native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
+        native_id: (bubble.closest?.('[data-message-id], [data-id], [id^="mid."]') || nativeIdEl)?.getAttribute?.('data-message-id') || (bubble.closest?.('[data-message-id], [data-id], [id^="mid."]') || nativeIdEl)?.getAttribute?.('data-id') || (bubble.closest?.('[data-message-id], [data-id], [id^="mid."]') || nativeIdEl)?.getAttribute?.('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
         effective_label: effectiveLabel,
         is_valid: true,
-        bubble_idx,
+        bubble_idx: (() => {
+          const bNatEl = bubble.closest?.('[data-message-id], [data-id], [id^="mid."]') || nativeIdEl;
+          const bNatId = bNatEl?.getAttribute?.('data-message-id') || bNatEl?.getAttribute?.('data-id') || bNatEl?.getAttribute?.('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || '__no_native__';
+          const map = finalBubbles._crmPerNativeMap || (finalBubbles._crmPerNativeMap = new Map());
+          const idx = map.get(bNatId) || 0;
+          map.set(bNatId, idx + 1);
+          return idx;
+        })(),
         reply_quote_text: replyQuoteText || null
       });
       bubble_idx++;
@@ -1916,13 +1988,15 @@
         const fbMessageId = verdict.id;
         const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
         const observationSignature = domObservationSignature(parsed);
-        const needsQuoteForward = Boolean(parsed.reply_quote_text) && !quotedReplyForwarded.has(fbMessageId);
+        const needsQuoteForward = Boolean(parsed.reply_quote_text) && !quotedReplyForwarded.has(String(fbMessageId).replace(/__bubble_\d+$/, ''));
         if (verdict.duplicate && !needsQuoteForward) continue;
         if (lastObservedMessages.get(fbMessageId) === observationSignature && !needsQuoteForward) continue;
         lastObservedMessages.set(fbMessageId, observationSignature);
         bubbleFamilyTracker.markSeen(verdict.key);
+        if (isChatScrolledAwayFromBottom()) return;
+        bubbleFamilyTracker.markSeen(verdict.key);
 
-        const timestampMs = parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || row), false);
+        const timestampMs = extractMidTimestampMs(fbMessageId || parsed.native_id) || parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || row), false);
 
         try {
           chrome.runtime.sendMessage({
@@ -1949,7 +2023,7 @@
               contact_avatar: extractContactAvatarFromNode(row) || ''
             }
           });
-          if (parsed.reply_quote_text) quotedReplyForwarded.add(fbMessageId);
+          if (parsed.reply_quote_text) quotedReplyForwarded.add(String(fbMessageId).replace(/__bubble_\d+$/, ''));
         } catch (_) {}
       }
     }
@@ -2086,7 +2160,8 @@
     let tsSource = 'realtime_fallback';
     // Ngày lấy từ divider FB gần nhất phía trên bubble; không thấy divider
     // (hội thoại mới / tin vừa đến) mới fallback ngày máy.
-    const labelTsMs = parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || null));
+    const midTsMs = extractMidTimestampMs(fbMessageId || parsed.native_id);
+    const labelTsMs = midTsMs || parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || null), (Date.now() - lastThreadAttachAt) > 3000 && !isChatScrolledAwayFromBottom());
     if (labelTsMs) {
       tsMs = labelTsMs;
       tsSource = 'facebook_label';
@@ -2123,7 +2198,7 @@
             contact_avatar: contactAvatar || ''
           }
         });
-        if (parsed.reply_quote_text) quotedReplyForwarded.add(fbMessageId);
+        if (parsed.reply_quote_text) quotedReplyForwarded.add(String(fbMessageId).replace(/__bubble_\d+$/, ''));
       }
     } catch (err) {}
   }
@@ -2214,7 +2289,7 @@
         // reconcile/hysteresis path (spec 019) can settle it, rather than a new
         // duplicate row being created or the correction being silently dropped.
         const observationSignature = domObservationSignature(parsed);
-        const needsQuoteForward = Boolean(parsed.reply_quote_text) && !quotedReplyForwarded.has(fbMessageId);
+        const needsQuoteForward = Boolean(parsed.reply_quote_text) && !quotedReplyForwarded.has(String(fbMessageId).replace(/__bubble_\d+$/, ''));
         if (verdict.duplicate) {
           // Row CÓ quote chưa forward vẫn đi tiếp: server backfill theo
           // fb_message_id, drift guard phía server chặn id trôi thành ghost.
@@ -2294,12 +2369,16 @@
               if (lastObservedMessages.get(idToUse) !== deferredSignature) {
                 lastObservedMessages.set(idToUse, deferredSignature);
                 lastObservedMessages.set(fbMessageId, observationSignature);
+        bubbleFamilyTracker.markSeen(verdict.key);
+        if (isChatScrolledAwayFromBottom()) return;
                 bubbleFamilyTracker.markSeen(deferredVerdict ? deferredVerdict.key : verdict.key);
                 forwardIncomingDomObservation(thread_id, toForward, idToUse, contactAvatar, positionToUse);
               }
             } catch (_) {
               try {
                 lastObservedMessages.set(fbMessageId, observationSignature);
+        bubbleFamilyTracker.markSeen(verdict.key);
+        if (isChatScrolledAwayFromBottom()) return;
                 forwardIncomingDomObservation(thread_id, parsed, fbMessageId, contactAvatar, domPosition);
               } catch (_) {}
             }
@@ -2307,6 +2386,8 @@
           return;
         }
         lastObservedMessages.set(fbMessageId, observationSignature);
+        bubbleFamilyTracker.markSeen(verdict.key);
+        if (isChatScrolledAwayFromBottom()) return;
         bubbleFamilyTracker.markSeen(verdict.key);
         if (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
         forwardIncomingDomObservation(thread_id, parsed, fbMessageId, contactAvatar, domPosition);
@@ -2320,6 +2401,7 @@
   // of the active log and only confirmed incoming bubbles; the existing
   // baseline/dedupe map prevents old history from being replayed.
   function reconcileLatestIncomingMessages() {
+    if (observerPaused || isDedicatedBackgroundTab || isChatScrolledAwayFromBottom()) return;
     if (observerPaused) return;
     const thread_id = extractThreadIdFromUrl();
     if (!thread_id || !/^\d+$/.test(thread_id) || thread_id !== currentBaselineThreadId) return;
@@ -2362,11 +2444,13 @@
         const fbMessageId = verdict.id;
         const domPosition = getDomMessagePosition(row, thread_id, fbMessageId);
         const observationSignature = domObservationSignature(parsed);
-        const needsQuoteForward = Boolean(parsed.reply_quote_text) && !quotedReplyForwarded.has(fbMessageId);
+        const needsQuoteForward = Boolean(parsed.reply_quote_text) && !quotedReplyForwarded.has(String(fbMessageId).replace(/__bubble_\d+$/, ''));
         if (verdict.duplicate && !needsQuoteForward) continue;
         if (lastObservedMessages.get(fbMessageId) === observationSignature && !needsQuoteForward) continue;
-        const tsMs = parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || row), false);
+        const tsMs = extractMidTimestampMs(fbMessageId || parsed.native_id) || parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || row), false);
         lastObservedMessages.set(fbMessageId, observationSignature);
+        bubbleFamilyTracker.markSeen(verdict.key);
+        if (isChatScrolledAwayFromBottom()) return;
         bubbleFamilyTracker.markSeen(verdict.key);
         try {
           if (chrome?.runtime?.id) chrome.runtime.sendMessage({
@@ -2394,7 +2478,7 @@
               contact_avatar: extractContactAvatarFromNode(row) || ''
             }
           });
-          if (parsed.reply_quote_text) quotedReplyForwarded.add(fbMessageId);
+          if (parsed.reply_quote_text) quotedReplyForwarded.add(String(fbMessageId).replace(/__bubble_\d+$/, ''));
         } catch (_) {}
       }
     }

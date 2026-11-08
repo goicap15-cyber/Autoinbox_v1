@@ -1,8 +1,8 @@
 {
-  "version": "1.0.25",
-  "releasedAt": "2026-11-08T08:04:36.324Z",
-  "notes": "Tăng tốc độ bắt và đồng bộ tin nhắn tức thì khi nhiều khách hàng nhắn tin cùng lúc (Messenger cá nhân & Fanpage)",
+  "version": "1.0.26",
+  "releasedAt": "2026-11-08T09:51:47.515Z",
+  "notes": "Fix triệt để nhân bản tin nhắn cũ (link card drive.google.com, quote reply, nhãn Đã chỉnh sửa), giải mã chuẩn timestamp gốc từ mid.$ để sắp xếp lịch sử chính xác 100%, cơ chế chống đồng bộ lặp tin đã lưu và lọc sạch bong bóng 'đã gửi 1 ảnh' (v1.0.26)",
   "requiresRestart": true,
-  "sizeBytes": 3082101,
-  "sha256": "8769241f589e7288c45e700aa5fafaf66ae51abfd7e62f4d4100433c1178dbd9"
+  "sizeBytes": 3086919,
+  "sha256": "ba74a87283ad53b2f1c6d387fd406d4d5096f858a8e4b30c018fdfc79753be1b"
 }

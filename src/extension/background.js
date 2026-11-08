@@ -9766,7 +9766,10 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           // Pill ngày EN ("Oct 16, 2026, 10:49 AM") + mảnh pill cắt DOM
           // ("58 AM by Khang") - DOM history nhặt thành tin rác (2026-11-03).
           /^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}(?:,?\s+\d{1,2}:\d{2}\s*(?:AM|PM)?)?$/i,
-          /^\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s+by\s+[A-ZÀ-ỸĐ][\p{L}\p{M}\s.]{0,40}$/u
+          /^\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s+by\s+[A-ZÀ-ỸĐ][\p{L}\p{M}\s.]{0,40}$/u,
+          /^(?:(?:Bạn|Tôi|You|[^\n]{1,80})\s+)?(?:đã gửi|sent|shared)\s+(?:(?:một|\d+|an?|one)\s+)?(?:ảnh|bức ảnh|photo|photos|image|images|video|videos|tệp|file|files|tập tin|nhãn dán|sticker|GIF|tin nhắn thoại|file âm thanh|voice message|audio)(?:\s+đính kèm)?\.?$/iu,
+          /^(?:[^\n]{1,60}[\s\u00a0]*[·•][\s\u00a0]*)?(?:Đã chỉnh sửa|Edited)\.?$/iu,
+          /^(?:drive\.google\.com|docs\.google\.com|Google Docs|Google Drive|youtube\.com|youtu\.be|facebook\.com|fb\.watch|tiktok\.com|vt\.tiktok\.com|instagram\.com|zalo\.me|shopee\.vn|lazada\.vn|tiki\.vn|maps\.app\.goo\.gl|goo\.gl|bit\.ly)$/i
         ];
 
         function isSystemText(txt) {
@@ -9899,6 +9902,33 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         }
 
         const messages = [];
+        function extractMidTimestampMs(nativeId) {
+          const raw = String(nativeId || '').replace(/__bubble_\d+$/, '').replace(/_media(?:_\d+)?$/, '').trim();
+          const midMatch = raw.match(/^mid\.\$([A-Za-z0-9_-]{20,44})$/);
+          if (midMatch) {
+            try {
+              const b64 = midMatch[1].replace(/-/g, '+').replace(/_/g, '/');
+              const bin = atob(b64);
+              if (bin.length >= 16) {
+                let last8 = 0n;
+                for (let i = bin.length - 8; i < bin.length; i++) {
+                  last8 = (last8 << 8n) | BigInt(bin.charCodeAt(i) & 0xff);
+                }
+                const sf = (last8 & 0x03ffffffffffffffn) << 6n;
+                const ts = Number(sf >> 22n);
+                if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return ts;
+              }
+            } catch (_) {}
+          }
+          const sfMatch = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
+          if (sfMatch) {
+            try {
+              const ts = Number(BigInt(sfMatch[1]) >> 22n);
+              if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return ts;
+            } catch (_) {}
+          }
+          return 0;
+        }
         const boundaryIds = new Set([cursor?.newest_message_id, cursor?.oldest_message_id].filter(Boolean));
         const occurrencesMap = {};
         const nativeIdCounts = new Map();
@@ -10025,6 +10055,9 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (b.closest(COMPOSER_EXCLUDE)) return false;
             return !b.querySelector('div[dir="auto"], span[dir="auto"]');
           });
+          if (leafBubbles.length > 1 && leafBubbles.some((b) => !b.closest('a[href]'))) {
+            leafBubbles = leafBubbles.filter((b) => !b.closest('a[href]'));
+          }
 
           const videoElements = Array.from(row.querySelectorAll('video')).filter((element) => !element.closest(COMPOSER_EXCLUDE));
           const videoElement = videoElements[0] || null;
@@ -10083,11 +10116,14 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (['AM', 'SA', 'SÁNG'].includes(clockSuffix) && clockHour === 12) clockHour = 0;
             clockMinutes = clockHour * 60 + Number(clockMatch[2]);
           }
-          const timestampHasExplicitDate = /(?:hôm qua|yesterday|thứ\s+(?:hai|ba|tư|năm|sáu|bảy)|chủ nhật|\bT[2-7]\b|\bCN\b|\d{1,2}\s*tháng\s*\d{1,2}|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b)/i.test(timestampLabel);
-          let tsMs = unixSeconds > 0
-            ? unixSeconds * 1000
-            : (dateTimeValue && Number.isFinite(Date.parse(dateTimeValue)) ? Date.parse(dateTimeValue) : parseTimeFromLabel(timestampLabel, lastFallbackTime || null, false));
-          let tsSource = tsMs ? (unixSeconds > 0 || dateTimeValue ? 'facebook_timestamp' : 'facebook_label') : 'fallback';
+          const rowMidTs = extractMidTimestampMs(nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id'));
+          const timestampHasExplicitDate = Boolean(rowMidTs > 0) || /(?:hôm qua|yesterday|thứ\s+(?:hai|ba|tư|năm|sáu|bảy)|chủ nhật|\bT[2-7]\b|\bCN\b|\d{1,2}\s*tháng\s*\d{1,2}|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b)/i.test(timestampLabel);
+          let tsMs = rowMidTs > 0
+            ? rowMidTs
+            : (unixSeconds > 0
+              ? unixSeconds * 1000
+              : (dateTimeValue && Number.isFinite(Date.parse(dateTimeValue)) ? Date.parse(dateTimeValue) : parseTimeFromLabel(timestampLabel, lastFallbackTime || null, false)));
+          let tsSource = rowMidTs > 0 ? 'facebook_payload' : (tsMs ? (unixSeconds > 0 || dateTimeValue ? 'facebook_timestamp' : 'facebook_label') : 'fallback');
 
           if (tsMs) {
             lastFallbackTime = tsMs;
@@ -10397,9 +10433,19 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             }
 
             if (!messages.some(m => m.fb_message_id === deterministicId)) {
-              // Preserve Facebook DOM order for messages with the same minute.
-              // A bounded offset is deterministic within the canonical oldest→newest pass.
-              const finalTsMs = tsMs ? tsMs + dom_order : 0;
+              const bubbleMidTs = extractMidTimestampMs(nativeId) || tsMs;
+              const finalTsMs = bubbleMidTs ? bubbleMidTs + dom_order : 0;
+              let replyQuoteText = null;
+              const quoteRootEl = ownArticleEl || row;
+              const quoteEls = quoteRootEl?.querySelectorAll?.('[aria-label]') || [];
+              for (const qEl of quoteEls) {
+                const qAria = String(qEl.getAttribute('aria-label') || '');
+                if (/tin nhắn (đã trả lời|gốc)|replied-to message|original message/i.test(qAria)) {
+                  const qRaw = String(qEl.textContent || '').replace(/\s+/g, ' ').trim();
+                  replyQuoteText = qRaw.replace(/^(?:Tin nhắn gốc|Original message|Replied[- ]to message)\s*:\s*/i, '').trim().slice(0, 500) || null;
+                  break;
+                }
+              }
 
               messages.push({
                 fb_message_id: deterministicId,
@@ -10409,16 +10455,17 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                 member_name: (!isOutgoing && labelSenderName) ? labelSenderName : null,
                 member_avatar: (!isOutgoing && labelSenderName) ? extractHistoryMemberAvatar(row, labelSenderName) : null,
                 content: cleaned,
+                reply_to_text: replyQuoteText,
                 is_outgoing: isOutgoing ? 1 : 0,
                 direction_evidence: historyDirectionEvidence,
                 sender_role: isOutgoing ? 'operator' : 'customer',
                 source: 'dom_history_sync',
                 timestamp_ms: finalTsMs,
-                timestamp_source: tsSource,
+                timestamp_source: extractMidTimestampMs(nativeId) ? 'facebook_payload' : tsSource,
                 dom_order,
                 sequence_order: dom_order,
                 _clock_minutes: clockMinutes,
-                _timestamp_has_explicit_date: timestampHasExplicitDate,
+                _timestamp_has_explicit_date: Boolean(extractMidTimestampMs(nativeId)) || timestampHasExplicitDate,
                 created_at: new Date(finalTsMs || Date.now()).toISOString()
               });
             }

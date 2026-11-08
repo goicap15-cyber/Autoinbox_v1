@@ -3870,13 +3870,40 @@ wss.on('connection', (ws, req) => {
                   stableMessageId = existingSameText.fb_message_id;
                   existingStableMessage = existingSameText;
                 } else {
-                  for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
-                    const candidateId = `${baseFamId}__bubble_${bIdx}`;
-                    const taken = db.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateId);
-                    if (!taken) {
-                      stableMessageId = candidateId;
-                      existingStableMessage = null;
-                      break;
+                  const isIncomingLinkCard = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(incomingTxt);
+                  const isExistLinkCard = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(existTxt);
+                  const familyRows = db.prepare(`
+                    SELECT id, fb_message_id, thread_id, content, sender_name, media_type, media_url
+                    FROM messages
+                    WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+                  `).all(m.thread_id, baseFamId, `${escFam}__bubble_%`);
+                  const superRow = familyRows.find((r) => {
+                    const rt = String(r.content || '').trim();
+                    return (rt.length > incomingTxt.length && rt.includes(incomingTxt) && incomingTxt.length >= 6)
+                      || (isIncomingLinkCard && /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(rt));
+                  });
+                  if (superRow) {
+                    break;
+                  }
+                  const subRow = familyRows.find((r) => {
+                    const rt = String(r.content || '').trim();
+                    return (incomingTxt.length > rt.length && incomingTxt.includes(rt) && rt.length >= 6)
+                      || (/\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(rt) && /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(incomingTxt));
+                  });
+                  if (subRow || isExistLinkCard) {
+                    const targetRow = subRow || existingStableMessage;
+                    db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(m.content, targetRow.id);
+                    stableMessageId = targetRow.fb_message_id || stableMessageId;
+                    existingStableMessage = { ...targetRow, content: m.content };
+                  } else {
+                    for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
+                      const candidateId = `${baseFamId}__bubble_${bIdx}`;
+                      const taken = db.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateId);
+                      if (!taken) {
+                        stableMessageId = candidateId;
+                        existingStableMessage = null;
+                        break;
+                      }
                     }
                   }
                 }
@@ -4179,7 +4206,7 @@ wss.on('connection', (ws, req) => {
             if (incomingQuote) {
               try {
                 const quoteUpdate = db.prepare(
-                  'UPDATE messages SET reply_to_text = COALESCE(NULLIF(TRIM(COALESCE(reply_to_text, \'\')), \'\'), ?) WHERE fb_message_id = ?'
+                  'UPDATE messages SET reply_to_text = ? WHERE fb_message_id = ? AND (reply_to_text IS NULL OR TRIM(reply_to_text) = \'\')'
                 ).run(incomingQuote, stableMessageId);
                 replyWasUpdated = quoteUpdate.changes > 0;
                 if (replyWasUpdated) {
@@ -4210,7 +4237,7 @@ wss.on('connection', (ws, req) => {
             if (reconcile.reason === 'not_found') {
               break; // Duplicate vì client_message_id hoặc lý do khác
             }
-            if (!reconcile.updated && !mediaWasUpdated) {
+            if (!reconcile.updated && !mediaWasUpdated && !replyWasUpdated) {
               console.log(`[WS] Bỏ qua tin nhắn đã tồn tại (fb_message_id: ${m.fb_message_id})`);
               break;
             }
@@ -5016,18 +5043,19 @@ wss.on('connection', (ws, req) => {
                 const mediaHintLastAt = mediaHintLastSeen.get(mediaHintKey) || 0;
                 if (mediaHintLastSeen.size > 600) mediaHintLastSeen.clear();
                 if (!incomingPreviewChanged
-                  && (!rawSidebarPreview || (isSystemOrMetadataText(rawSidebarPreview) && !systemNotice))
+                  && (!rawSidebarPreview || isActivitySummary || (isSystemOrMetadataText(rawSidebarPreview) && !systemNotice))
                   && t.preview_is_outgoing !== true
-                  && (Number(t.is_unread) === 1 || t.is_like === true)
-                  && (unreadFlippedToIncoming || rowFresh)
-                  && Date.now() - mediaHintLastAt > 90 * 1000) {
+                  && (Number(t.is_unread) === 1 || t.is_like === true || isActivitySummary)
+                  && (unreadFlippedToIncoming || rowFresh || isActivitySummary)
+                  && Date.now() - mediaHintLastAt > 10 * 1000) {
                   const recentRealIncoming = db.prepare(`
                     SELECT 1 FROM messages
                     WHERE thread_id = ? AND is_outgoing = 0
+                      AND media_type IN ('image', 'video')
                       AND fb_message_id NOT LIKE 'sidebar_preview_%'
                       AND timestamp_ms >= ?
                     LIMIT 1
-                  `).get(existingInternalThreadId, Date.now() - 90 * 1000);
+                  `).get(existingInternalThreadId, Date.now() - 12 * 1000);
                   if (!recentRealIncoming) {
                     mediaHintLastSeen.set(mediaHintKey, Date.now());
                     changedUnreadThreads.push({
@@ -10196,6 +10224,86 @@ function startServer() {
            SELECT MAX(COALESCE(timestamp_ms, 0)) FROM messages m WHERE m.thread_id = threads.id
          ) < (? - 3600000))
     `).run(Date.now());
+
+    // (4l) Dọn sạch các bong bóng rác do thẻ preview link (drive.google.com, Vid ads.mp4),
+    // nhãn tóm tắt đính kèm ("đã gửi 1 ảnh"), nhãn "Tôi · Đã chỉnh sửa" và các row __bubble_N nhân bản
+    try {
+      db.prepare(`
+        DELETE FROM messages
+        WHERE (media_type IS NULL OR media_type = 'text')
+          AND media_url IS NULL
+          AND attachment_id IS NULL
+          AND (
+            TRIM(COALESCE(content, '')) = ''
+            OR LOWER(TRIM(content)) IN ('drive.google.com', 'docs.google.com', 'google docs', 'google drive', 'youtube.com', 'youtu.be', 'facebook.com', 'tiktok.com', 'đã chỉnh sửa', 'edited')
+            OR TRIM(content) LIKE '%· Đã chỉnh sửa%'
+            OR TRIM(content) LIKE '%• Đã chỉnh sửa%'
+          )
+      `).run();
+      const allTextRows = db.prepare(`
+        SELECT id, thread_id, fb_message_id, content, is_outgoing, reply_to_text, timestamp_ms
+        FROM messages
+        WHERE (media_type IS NULL OR media_type = 'text') AND media_url IS NULL AND attachment_id IS NULL
+      `).all();
+      for (const r of allTextRows) {
+        const txt = String(r.content || '').trim();
+        if (!txt || isSystemOrMetadataText(txt) || isSidebarActivitySummary(txt)) {
+          db.prepare('DELETE FROM messages WHERE id = ?').run(r.id);
+          continue;
+        }
+        const fbId = String(r.fb_message_id || '');
+        if (/^mid\.\$.+__bubble_\d+$/.test(fbId)) {
+          const baseId = fbId.replace(/__bubble_\d+$/, '');
+          if (/\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(txt)) {
+            const hasUrlSibling = db.prepare(`
+              SELECT 1 FROM messages
+              WHERE thread_id = ? AND id != ?
+                AND (fb_message_id = ? OR fb_message_id LIKE ? || '__bubble_%')
+                AND (content LIKE '%http%' OR content LIKE '%drive.google.com%' OR content LIKE '%docs.google.com%')
+              LIMIT 1
+            `).get(r.thread_id, r.id, baseId, baseId);
+            if (hasUrlSibling) {
+              db.prepare('DELETE FROM messages WHERE id = ?').run(r.id);
+              continue;
+            }
+          }
+          // Nếu __bubble_N nhân bản y hệt một tin nhắn có thật khác trong cùng thread (hoặc bị gán nhầm vào mid.$ cũ cách > 1 giờ)
+          const baseSnowflakeTs = ConversationRepository.extractSnowflakeTimestampMs(baseId);
+          const duplicateElsewhere = db.prepare(`
+            SELECT id, fb_message_id, timestamp_ms FROM messages
+            WHERE thread_id = ? AND id != ? AND is_outgoing = ?
+              AND TRIM(COALESCE(content, '')) = ?
+            ORDER BY CASE WHEN fb_message_id NOT LIKE '%__bubble_%' THEN 0 ELSE 1 END ASC, id ASC
+            LIMIT 1
+          `).get(r.thread_id, r.id, r.is_outgoing, txt);
+          if (duplicateElsewhere) {
+            const otherBaseId = String(duplicateElsewhere.fb_message_id || '').replace(/__bubble_\d+$/, '');
+            const otherTs = ConversationRepository.extractSnowflakeTimestampMs(otherBaseId) || Number(duplicateElsewhere.timestamp_ms || 0);
+            if (otherBaseId === baseId
+              || !/__bubble_\d+$/.test(String(duplicateElsewhere.fb_message_id || ''))
+              || (baseSnowflakeTs > 0 && otherTs > 0 && Math.abs(otherTs - baseSnowflakeTs) > 3600000)
+              || duplicateElsewhere.id < r.id) {
+              db.prepare('DELETE FROM messages WHERE id = ?').run(r.id);
+              continue;
+            }
+          }
+        } else if (/^mid\.\$/.test(fbId) && /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(txt)) {
+          // Trường hợp base row giữ tên file ("Vid ads 28.mp4") còn __bubble_N giữ nội dung link đầy đủ -> gộp vào base
+          const fullUrlBubble = db.prepare(`
+            SELECT id, content FROM messages
+            WHERE thread_id = ? AND fb_message_id LIKE ? || '__bubble_%'
+              AND (content LIKE '%http%' OR content LIKE '%drive.google.com%' OR content LIKE '%docs.google.com%')
+            ORDER BY LENGTH(content) DESC LIMIT 1
+          `).get(r.thread_id, fbId);
+          if (fullUrlBubble) {
+            db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(fullUrlBubble.content, r.id);
+            db.prepare('DELETE FROM messages WHERE id = ?').run(fullUrlBubble.id);
+          }
+        }
+      }
+    } catch (cleanErr) {
+      console.warn('[DB Self-Heal 4l] Cleanup warning:', cleanErr.message);
+    }
 
     const activeThreads = db.prepare('SELECT DISTINCT thread_id FROM messages').all();
     for (const { thread_id } of activeThreads) {

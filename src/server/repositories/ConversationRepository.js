@@ -83,7 +83,20 @@ class ConversationRepository {
   }
 
   static extractSnowflakeBigInt(fbMessageId) {
-    const raw = String(fbMessageId || '').replace(/__bubble_\d+$/, '').trim();
+    const raw = String(fbMessageId || '').replace(/__bubble_\d+$/, '').replace(/_media(?:_\d+)?$/, '').trim();
+    const midMatch = raw.match(/^mid\.\$([A-Za-z0-9_-]{20,44})$/);
+    if (midMatch) {
+      try {
+        const b64 = midMatch[1].replace(/-/g, '+').replace(/_/g, '/');
+        const buf = Buffer.from(b64, 'base64');
+        if (buf.length >= 16) {
+          const last8 = buf.readBigUInt64BE(buf.length - 8);
+          const sf = (last8 & 0x03ffffffffffffffn) << 6n;
+          const ts = Number(sf >> 22n);
+          if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return sf;
+        }
+      } catch (_) {}
+    }
     const m = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
     if (!m) return null;
     try {
@@ -749,6 +762,44 @@ class ConversationRepository {
         // gốc dán nhầm tên người gửi còn text thật nằm dưới id __bubble_N).
         // KHÔNG áp cho id anchor kiểu peer@msgr.N__bubble_N - đó là id tổng
         // hợp cho pending outgoing, có thể là tin thật riêng (like-group).
+        if (/^mid\.\$/.test(String(stableId))) {
+          const bubbleFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
+          const incomingText = String(content || '').trim();
+          const isIncomingLinkCardFile = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(incomingText);
+          if (bubbleFamilyId.length >= 12 && incomingText && !isPureEmojiContent && mediaType === 'text' && !mediaUrl) {
+            const likeEscFam = bubbleFamilyId.replace(/[_%]/g, (c) => `\\${c}`);
+            const familyRows = database.prepare(`
+              SELECT id, fb_message_id, content, media_url, sender_name FROM messages
+              WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+              ORDER BY id ASC
+            `).all(threadId, bubbleFamilyId, `${likeEscFam}__bubble_%`);
+            let handledByFamily = false;
+            for (const famRow of familyRows) {
+              const famText = String(famRow.content || '').trim();
+              if (!famText) continue;
+              const isFamLinkCardFile = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(famText);
+              if (famText === incomingText) {
+                stableId = famRow.fb_message_id;
+                handledByFamily = true;
+                break;
+              }
+              if ((famText.length > incomingText.length && famText.includes(incomingText) && incomingText.length >= 6)
+                || (isIncomingLinkCardFile && /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(famText))) {
+                result.skippedCount += 1;
+                handledByFamily = 'skip';
+                break;
+              }
+              if ((incomingText.length > famText.length && incomingText.includes(famText) && famText.length >= 6)
+                || (isFamLinkCardFile && /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(incomingText))) {
+                database.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, famRow.id);
+                stableId = famRow.fb_message_id;
+                handledByFamily = true;
+                break;
+              }
+            }
+            if (handledByFamily === 'skip') continue;
+          }
+        }
         if (/^mid\.\$/.test(String(stableId)) && /__bubble_\d+$/.test(String(stableId))) {
           const bubbleFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
           const bubbleFamilyBase = bubbleFamilyId.length >= 12
@@ -1094,16 +1145,34 @@ class ConversationRepository {
           const mediaChanged = (mediaUrl && existing.media_url !== mediaUrl) || (mediaType !== 'text' && existing.media_type !== mediaType);
           const changed = existing.content !== content || mediaChanged || timestampChanged || directionChanged || sequenceChanged || roleChanged || senderNameChanged;
           if (!changed) {
-            if (promotedSidebarPreview) result.updatedIds.push(stableId);
-            else result.skippedCount += 1;
+              const incomingQuote = String(msg.reply_to_text || msg.reply_quote_text || '').trim().slice(0, 500);
+              if (incomingQuote) {
+                try {
+                  database.prepare("UPDATE messages SET reply_to_text = COALESCE(NULLIF(TRIM(COALESCE(reply_to_text, '')), ''), ?) WHERE fb_message_id = ? AND (reply_to_text IS NULL OR TRIM(reply_to_text) = '')").run(incomingQuote, stableId);
+                } catch (_) {}
+              }
+              if (promotedSidebarPreview) result.updatedIds.push(stableId);
+              else result.skippedCount += 1;
+              continue;
+            }
+            insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, upsertIsOutgoing, upsertSenderRole, observedSequence, upsertDirectionStatus, createdAt);
+            const incomingQuoteUpd = String(msg.reply_to_text || msg.reply_quote_text || '').trim().slice(0, 500);
+            if (incomingQuoteUpd) {
+              try {
+                database.prepare("UPDATE messages SET reply_to_text = COALESCE(NULLIF(TRIM(COALESCE(reply_to_text, '')), ''), ?) WHERE fb_message_id = ? AND (reply_to_text IS NULL OR TRIM(reply_to_text) = '')").run(incomingQuoteUpd, stableId);
+              } catch (_) {}
+            }
+            result.updatedIds.push(stableId);
             continue;
           }
-          insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, upsertIsOutgoing, upsertSenderRole, observedSequence, upsertDirectionStatus, createdAt);
-          result.updatedIds.push(stableId);
-          continue;
-        }
-        insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
-        result.insertedIds.push(stableId);
+          insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
+          const incomingQuoteNew = String(msg.reply_to_text || msg.reply_quote_text || '').trim().slice(0, 500);
+          if (incomingQuoteNew) {
+            try {
+              database.prepare("UPDATE messages SET reply_to_text = COALESCE(NULLIF(TRIM(COALESCE(reply_to_text, '')), ''), ?) WHERE fb_message_id = ? AND (reply_to_text IS NULL OR TRIM(reply_to_text) = '')").run(incomingQuoteNew, stableId);
+            } catch (_) {}
+          }
+          result.insertedIds.push(stableId);
         // Batch có thể mang row ma lật chiều ĐỨNG TRƯỚC base (guard 513 cần
         // base đã tồn tại) - base vừa insert thì dọn sibling __bubble_N.
         try {
@@ -1191,14 +1260,20 @@ class ConversationRepository {
       }
       const ms = Number(row?.timestamp_ms || 0);
       if (Number.isFinite(ms) && ms > 0) return ms;
-      return createdMs;
+      if (Boolean(row?.client_message_id || row?.attachment_id || String(row?.fb_message_id || '').startsWith('sidebar_preview_'))) {
+        return createdMs;
+      }
+      return 0;
     }
 
     rows.sort((a, b) => {
       const sfA = ConversationRepository.extractSnowflakeBigInt(a?.fb_message_id);
       const sfB = ConversationRepository.extractSnowflakeBigInt(b?.fb_message_id);
-      if (sfA !== null && sfB !== null && sfA !== sfB) {
-        return sfA < sfB ? -1 : 1;
+      if (sfA !== null && sfB !== null) {
+        if (sfA !== sfB) return sfA < sfB ? -1 : 1;
+        const occA = ConversationRepository.bubbleOccurrenceId(a?.fb_message_id);
+        const occB = ConversationRepository.bubbleOccurrenceId(b?.fb_message_id);
+        if (occA !== occB) return occA - occB;
       }
 
       const tsA = parseSafeUtcTimestamp(a);
@@ -1210,9 +1285,6 @@ class ConversationRepository {
       const minuteB = tsB > 0 ? Math.floor(tsB / 60000) : 0;
       if (minuteA > 0 && minuteB > 0 && minuteA !== minuteB) {
         return minuteA - minuteB;
-      }
-      if ((minuteA > 0) !== (minuteB > 0)) {
-        return minuteA > 0 ? -1 : 1;
       }
 
       const orderA = a.sequence_order !== null && a.sequence_order !== undefined ? Number(a.sequence_order) : a.id;
@@ -1358,7 +1430,8 @@ class ConversationRepository {
         || !['pending', 'sending'].includes(String(existingMsg.delivery_status)));
     const isDecisiveGeometryObservation = isCrawlObservation
       && (directionEvidence === 'geometry' || (normalizedOutgoing === 0 && (directionEvidence === 'avatar' || directionEvidence === 'label_name')))
-      && existingRowHasNoCrmTrace;
+      && existingRowHasNoCrmTrace
+      && Number(existingMsg.is_outgoing) !== normalizedOutgoing;
 
     // Hard guard: if the stored row is already confirmed outgoing (is_outgoing=1),
     // a crawl/history source alone must never flip it to incoming. Only an
