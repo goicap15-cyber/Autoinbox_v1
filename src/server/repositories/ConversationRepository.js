@@ -1357,7 +1357,7 @@ class ConversationRepository {
       && (existingMsg.delivery_status === null
         || !['pending', 'sending'].includes(String(existingMsg.delivery_status)));
     const isDecisiveGeometryObservation = isCrawlObservation
-      && directionEvidence === 'geometry'
+      && (directionEvidence === 'geometry' || (normalizedOutgoing === 0 && (directionEvidence === 'avatar' || directionEvidence === 'label_name')))
       && existingRowHasNoCrmTrace;
 
     // Hard guard: if the stored row is already confirmed outgoing (is_outgoing=1),
@@ -1392,20 +1392,12 @@ class ConversationRepository {
     }
 
     // Chiều ngược: quét lại với nhãn hydrate lỗi thời ("do Bạn gửi") không
-    // được lật row INCOMING đã có tên người gửi thật thành OUTGOING. Tên này
-    // chỉ được điền khi giải được từ nhãn Messenger nên là bằng chứng hướng
-    // đáng tin (reproduce 2026-11-03: heal xong bị lật lại bằng 2-strike).
-    // sender_id='CONTACT' KHÔNG tính: đó là placeholder chung của mọi row
-    // incoming — tính theo nó là giết luôn 2-strike hysteresis của feature 019
-    // (page_dom_observer sửa chiều sai do đoán hình học). Ngoại lệ geometry:
-    // row không dấu vết CRM + quan sát quyết đoán được sửa chiều ngược lại
-    // (chữa heal lật sai tin operator gõ tay).
+    // được lật row INCOMING đã có tên người gửi thật thành OUTGOING.
     const crawlFlipsNamedIncoming = isCrawlObservation
-      && !isDecisiveGeometryObservation
       && Number(existingMsg.is_outgoing) === 0
       && normalizedOutgoing === 1
       && (existingMsg.sender_name
-        && !/^(?:bạn|you)$/i.test(String(existingMsg.sender_name).trim()));
+        && !/^(?:bạn|you|khách hàng|customer|người dùng facebook|facebook user)$/i.test(String(existingMsg.sender_name).trim()));
     if (crawlFlipsNamedIncoming) {
       console.log(`[ConversationRepo] 🛡️ Blocked crawl flip of named incoming row: ${stableMessageId} (source=${source})`);
       directionFlipCandidates.delete(stableMessageId);

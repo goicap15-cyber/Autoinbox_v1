@@ -3545,15 +3545,27 @@ wss.on('connection', (ws, req) => {
             const isMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
             let outgoingMatch = null;
 
-            if (isMedia) {
+            if (isMedia && m.source !== 'dom_video_hydration') {
+              const obsEchoMid = String(m.fb_message_id || '');
+              const obsEchoBareSf = OutboundDomCorrelationService.bareSnowflakePart(obsEchoMid);
               outgoingMatch = db.prepare(`
                 SELECT id, fb_message_id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
                 WHERE thread_id = ? AND is_outgoing = 1
                   AND (attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))
-                  AND datetime(created_at) >= datetime('now', '-300 seconds')
+                  AND (
+                    (
+                      (? != '' AND (fb_message_id = ? OR (? IS NOT NULL AND (fb_message_id = ? OR fb_message_id LIKE '%@msgr.' || ?))))
+                      AND (media_url IS NOT NULL OR local_media_path IS NOT NULL OR attachment_id IS NOT NULL)
+                    )
+                    OR (
+                      (attachment_id IS NOT NULL OR client_message_id IS NOT NULL)
+                      AND (delivery_status = 'pending' OR fb_message_id LIKE 'pending_%')
+                      AND datetime(created_at) >= datetime('now', '-120 seconds')
+                    )
+                  )
                 ORDER BY id DESC LIMIT 1
-              `).get(canonicalThreadId);
-            } else if (m.content) {
+              `).get(canonicalThreadId, obsEchoMid, obsEchoMid, obsEchoBareSf, obsEchoBareSf, obsEchoBareSf);
+            } else if (m.content && !isMedia) {
               // Echo dom_observer mang mid thật thì khớp theo mid thay vì theo
               // nội dung: khớp nội dung nuốt tin nhắn tay LẶP NỘI DUNG trong
               // 5 phút (reproduce 2026-10-09: 5 tin "alo" nhắn tay trong
@@ -3835,27 +3847,56 @@ wss.on('connection', (ws, req) => {
           // data-message-id), cấp hậu tố __bubble_N để không bị INSERT OR IGNORE nuốt mất!
           if (existingStableMessage
             && String(existingStableMessage.thread_id) === String(m.thread_id)
-            && (!m.media_type || m.media_type === 'text') && !m.media_url
-            && String(m.content || '').trim()
             && !/^sidebar_preview_|^pending_/.test(String(stableMessageId))) {
-            const existTxt = String(existingStableMessage.content || '').trim();
-            const incomingTxt = String(m.content || '').trim();
-            const existSender = String(existingStableMessage.sender_name || m.member_name || m.sender_name || '').trim();
-            const isExistSenderHeader = existSender && existTxt.toLowerCase() === existSender.toLowerCase();
-            if (existTxt && incomingTxt && existTxt !== incomingTxt && !isExistSenderHeader) {
+            const isIncomingMediaRow = Boolean((m.media_type && m.media_type !== 'text') || m.media_url);
+            const isExistingMediaRow = Boolean((existingStableMessage.media_type && existingStableMessage.media_type !== 'text') || existingStableMessage.media_url);
+            if (!isIncomingMediaRow && String(m.content || '').trim()) {
+              const existTxt = String(existingStableMessage.content || '').trim();
+              const incomingTxt = String(m.content || '').trim();
+              const existSender = String(existingStableMessage.sender_name || m.member_name || m.sender_name || '').trim();
+              const isExistSenderHeader = existSender && existTxt.toLowerCase() === existSender.toLowerCase();
+              if (existTxt && incomingTxt && existTxt !== incomingTxt && !isExistSenderHeader) {
+                const baseFamId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+                const escFam = baseFamId.replace(/[_%]/g, (c) => `\\${c}`);
+                const existingSameText = db.prepare(`
+                  SELECT id, fb_message_id, thread_id, content, sender_name, media_type, media_url
+                  FROM messages
+                  WHERE thread_id = ?
+                    AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+                    AND TRIM(COALESCE(content, '')) = ?
+                  LIMIT 1
+                `).get(m.thread_id, baseFamId, `${escFam}__bubble_%`, incomingTxt);
+                if (existingSameText) {
+                  stableMessageId = existingSameText.fb_message_id;
+                  existingStableMessage = existingSameText;
+                } else {
+                  for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
+                    const candidateId = `${baseFamId}__bubble_${bIdx}`;
+                    const taken = db.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateId);
+                    if (!taken) {
+                      stableMessageId = candidateId;
+                      existingStableMessage = null;
+                      break;
+                    }
+                  }
+                }
+              }
+            } else if (isIncomingMediaRow && isExistingMediaRow && m.media_url && existingStableMessage.media_url
+              && String(m.media_url) !== String(existingStableMessage.media_url)
+              && !(String(m.media_type) === 'video' && String(m.media_url).startsWith('data:video/') && !String(existingStableMessage.media_url).startsWith('data:video/'))) {
               const baseFamId = String(stableMessageId).replace(/__bubble_\d+$/, '');
               const escFam = baseFamId.replace(/[_%]/g, (c) => `\\${c}`);
-              const existingSameText = db.prepare(`
+              const existingSameMedia = db.prepare(`
                 SELECT id, fb_message_id, thread_id, content, sender_name, media_type, media_url
                 FROM messages
                 WHERE thread_id = ?
                   AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
-                  AND TRIM(COALESCE(content, '')) = ?
+                  AND media_url = ?
                 LIMIT 1
-              `).get(m.thread_id, baseFamId, `${escFam}__bubble_%`, incomingTxt);
-              if (existingSameText) {
-                stableMessageId = existingSameText.fb_message_id;
-                existingStableMessage = existingSameText;
+              `).get(m.thread_id, baseFamId, `${escFam}__bubble_%`, m.media_url);
+              if (existingSameMedia) {
+                stableMessageId = existingSameMedia.fb_message_id;
+                existingStableMessage = existingSameMedia;
               } else {
                 for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
                   const candidateId = `${baseFamId}__bubble_${bIdx}`;
@@ -3869,7 +3910,9 @@ wss.on('connection', (ws, req) => {
               }
             }
           }
-          if (!existingStableMessage && !m.client_message_id) {
+          if (!existingStableMessage && !m.client_message_id
+            && (!m.media_type || m.media_type === 'text') && !m.media_url
+            && String(m.content || '').trim() !== '') {
             const driftFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
             const likeEscaped = driftFamilyId.replace(/[_%]/g, (c) => `\\${c}`);
             const driftGhostRow = db.prepare(`
@@ -4109,7 +4152,9 @@ wss.on('connection', (ws, req) => {
             const hasRicherMedia = Boolean(existingMedia && hasIncomingMedia && (
               !existingMedia.media_type || existingMedia.media_type === 'text' ||
               (!existingMedia.media_url && m.media_url) ||
-              (!existingMedia.local_media_path && m.local_media_path)
+              (!existingMedia.local_media_path && m.local_media_path) ||
+              (incomingMediaType === 'video' && String(m.media_url || '').startsWith('data:video/') && !String(existingMedia.media_url || '').startsWith('data:video/')) ||
+              existingMedia.content === '👍'
             ));
             if (hasRicherMedia) {
               const mediaUpdate = db.prepare(`
@@ -4118,12 +4163,13 @@ wss.on('connection', (ws, req) => {
                   media_url = COALESCE(NULLIF(?, ''), media_url),
                   local_media_path = COALESCE(NULLIF(?, ''), local_media_path),
                   content = CASE
+                    WHEN content = '👍' THEN COALESCE(NULLIF(?, ''), '')
                     WHEN COALESCE(content, '') = '' AND COALESCE(?, '') != '' THEN ?
                     ELSE content
                   END
                 WHERE fb_message_id = ?
               `).run(incomingMediaType, m.media_url || null, m.local_media_path || null,
-                m.content || null, m.content || null, stableMessageId);
+                m.content || null, m.content || null, m.content || null, stableMessageId);
               mediaWasUpdated = mediaUpdate.changes > 0;
             }
             // Row đã lưu trước khi có tính năng đồng bộ trả lời: backfill quote

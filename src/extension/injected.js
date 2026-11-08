@@ -214,7 +214,7 @@
         try {
           const res = await fetch(String(data.url));
           const blob = await res.blob();
-          if (blob && blob.size > 0 && blob.size <= 8 * 1024 * 1024) {
+          if (blob && blob.size > 0 && blob.size <= 35 * 1024 * 1024) {
             dataUrl = await new Promise((resolve, reject) => {
               const reader = new FileReader();
               reader.onload = () => resolve(String(reader.result || ''));
@@ -223,6 +223,24 @@
             });
           }
         } catch (_) {}
+        if (!dataUrl) {
+          try {
+            const targetUrl = String(data.url);
+            const vid = Array.from(document.querySelectorAll('video')).find(
+              (v) => v.currentSrc === targetUrl || v.src === targetUrl
+            );
+            if (vid && vid.videoWidth > 0 && vid.videoHeight > 0) {
+              const canvas = document.createElement('canvas');
+              canvas.width = Math.min(vid.videoWidth, 640);
+              canvas.height = Math.round((canvas.width / vid.videoWidth) * vid.videoHeight);
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+                dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+              }
+            }
+          } catch (_) {}
+        }
         try {
           window.postMessage({ type: 'CRM_BLOB_DATA', rid: data.rid, url: String(data.url), dataUrl }, '*');
         } catch (_) {}

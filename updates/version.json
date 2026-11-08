@@ -1,8 +1,8 @@
 {
-  "version": "1.0.23",
-  "releasedAt": "2026-11-08T06:56:54.797Z",
-  "notes": "Tăng tốc đồng bộ tin nhắn khách realtime và sửa triệt để lỗi thiếu tin nhắn cũ/mới",
+  "version": "1.0.24",
+  "releasedAt": "2026-11-08T07:29:47.849Z",
+  "notes": "Sửa lỗi đồng bộ nhiều ảnh/video, chống đẩy nhầm ảnh khách sang phải và xoá nút Like ảo",
   "requiresRestart": true,
-  "sizeBytes": 3086877,
-  "sha256": "e9a15ead3adf7d8f8f2d9758462cd7c3e6fd174ac6f8e440245da4fc9e7444e8"
+  "sizeBytes": 3085704,
+  "sha256": "b35e24977a0e33bd1c09d854abd91271d3a16a676cd2462b2a6fb1716d8fba0c"
 }

@@ -9984,8 +9984,8 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               || (element.tagName === 'TITLE' ? element.textContent : '') || '').trim();
             if (!value) continue;
             if (value.length <= 16 && /^\p{Extended_Pictographic}[\p{Extended_Pictographic}\uFE0F\u20D0-\u20FF]*$/u.test(value)) return value;
-            if (/(?:giơ ngón tay cái|thumbs?\\s*up|\\blike\\b|thích|👍)/i.test(value)
-              && (element.matches?.('img, svg, title, [role="img"]') || element.closest?.('svg'))) return '👍';
+            if (/(?:k\u00fd hi\u1ec7u gi\u01a1 ng\u00f3n tay c\u00e1i|thumbs?\s*up\s*symbol)/i.test(value)
+              && (element.matches?.('title') || element.closest?.('svg'))) return '👍';
           }
           const directText = String(container.textContent || '').trim();
           return directText.length <= 4 && /^\p{Extended_Pictographic}+$/u.test(directText) ? directText : '';
@@ -10088,43 +10088,34 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             return !b.querySelector('div[dir="auto"], span[dir="auto"]');
           });
 
-          // A Messenger video frequently uses a transient blob: URL and may
-          // not have videoWidth yet while the hidden history tab is scraping.
-          // Treat the VIDEO element itself as authoritative media evidence;
-          // keep the old geometry-based image filtering for avatars/photos.
-          const videoElement = Array.from(row.querySelectorAll('video')).find((element) => !element.closest(COMPOSER_EXCLUDE)) || null;
-          // Hidden/history Messenger can render a video as a semantic control
-          // before mounting the actual <video> element. Keep this in parity
-          // with content.js so those rows are not silently dropped.
+          const videoElements = Array.from(row.querySelectorAll('video')).filter((element) => !element.closest(COMPOSER_EXCLUDE));
+          const videoElement = videoElements[0] || null;
           const semanticVideoElement = Array.from(row.querySelectorAll('[role=img]')).find((element) => {
             if (element.closest(COMPOSER_EXCLUDE)) return false;
             const label = String(element.getAttribute('aria-label') || element.getAttribute('title') || '').trim();
             return /(?:ph\u00e1t|m\u1edf|xem|play|open|watch)?\s*video/i.test(label)
               && !/(?:cu\u1ed9c g\u1ecdi|video call|call video)/i.test(label);
           }) || null;
-          const mediaElement = videoElement || Array.from(row.querySelectorAll('img[src]')).find((element) => {
+          const photoElements = Array.from(row.querySelectorAll('img[src]')).filter((element) => {
+            if (element.closest(COMPOSER_EXCLUDE)) return false;
             const rect = element.getBoundingClientRect();
-            // Use rendered geometry first. Avatars often have a large source
-            // bitmap (hundreds of pixels) but are rendered as a 28-40px circle;
-            // Math.max(naturalWidth, rect.width) therefore misclassified them
-            // as message photos.
             const width = rect.width || element.naturalWidth || element.videoWidth || 0;
             const height = rect.height || element.naturalHeight || element.videoHeight || 0;
-            const alt = String(element.getAttribute('alt') || element.getAttribute('aria-label') || '').toLowerCase();
+            const alt = String(element.getAttribute('alt') || element.getAttribute('aria-label') || '').trim();
+            if (/^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i.test(alt)) return true;
+            const altLower = alt.toLowerCase();
             const normalizedContactName = String(contactName || '').trim().toLowerCase();
-            const namesContact = normalizedContactName && alt.includes(normalizedContactName);
+            const namesContact = normalizedContactName && altLower.includes(normalizedContactName);
             const isSmallProfileImage = width <= 64 && height <= 64;
             const isLikelyAvatar = namesContact || isSmallProfileImage;
             return !isLikelyAvatar && width >= 72 && height >= 72;
           });
+          const mediaElement = videoElement || photoElements[0] || null;
           const mediaAnchor = row.querySelector('a[href*="fbcdn"], a[href*=".mp4"], a[href*="video"]');
           const videoPoster = videoElement?.poster || videoElement?.getAttribute?.('poster') || null;
           const rawMediaUrl = mediaElement?.currentSrc || mediaElement?.src
             || mediaElement?.querySelector?.('source[src]')?.src
             || mediaAnchor?.href || videoPoster || null;
-          // MSE videos expose blob: as currentSrc, but their poster remains a
-          // stable fbcdn/data image. Persist that thumbnail so CRM renders the
-          // video message instead of a bare "[Video]" placeholder.
           const mediaUrl = rawMediaUrl && !String(rawMediaUrl).startsWith('blob:')
             ? rawMediaUrl
             : (videoPoster && !String(videoPoster).startsWith('blob:') ? videoPoster : null);
@@ -10132,16 +10123,12 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             || /\.mp4(?:\?|$)|video/i.test(String(mediaUrl || ''));
           const mediaType = isVideoMessage ? 'video' : (mediaUrl ? 'image' : null);
 
-          // Some Like rows expose their timestamp minute (37/37sáng) as
-          // the only dir=auto leaf. Replace that UI fragment with the row's
-          // semantic thumbs-up so it cannot be persisted as message content.
           const hasOnlyClockFragments = leafBubbles.length > 0 && leafBubbles.every((bubble) => {
             const bubbleText = cleanText(bubble.textContent || '');
             return !bubbleText || isClockMinuteFragment(bubbleText, effectiveLabel);
           });
-          if (!rowEmojiContent && hasOnlyClockFragments && row.querySelector('svg')) rowEmojiContent = '👍';
-          if (rowEmojiContent && (leafBubbles.length === 0 || hasOnlyClockFragments) && !mediaUrl && !isVideoMessage) leafBubbles = [row];
-          if (leafBubbles.length === 0 && !mediaUrl && !isVideoMessage) return;
+          if (rowEmojiContent && (leafBubbles.length === 0 || hasOnlyClockFragments) && !mediaUrl && !isVideoMessage && photoElements.length === 0) leafBubbles = [row];
+          if (leafBubbles.length === 0 && !mediaUrl && !isVideoMessage && photoElements.length === 0) return;
 
           const timestampElement = row.querySelector('time[datetime], abbr[data-utime], [data-utime]');
           const unixSeconds = Number(timestampElement?.getAttribute('data-utime') || 0);
@@ -10170,27 +10157,35 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             tsMs = lastFallbackTime || 0;
           }
 
-          if (mediaUrl || isVideoMessage) {
-            // Alignment from the REAL media element wins: aria-labels can be
-            // inherited from a surrounding accessibility wrapper and describe a
-            // NEIGHBOURING bubble (reproduce 2026-10-30: customer video+map
-            // stored outgoing because a row-level "...by You" label from an
-            // adjacent own text leaked into effectiveLabel). Never measure the
-            // row wrapper itself - it is 100% wide, so its right edge always
-            // reads >= 0.80 and mislabels every media row as outgoing.
+          if (mediaUrl || isVideoMessage || photoElements.length > 0) {
             let mediaOutgoing = null;
             let mediaDirectionEvidence = 'geometry';
+            const directionBoxEl = messageLog || historyDirectionContainer;
+            const directionRect = directionBoxEl.getBoundingClientRect();
+            const hasLeftAvatarInRow = directionRect.width > 0 && Array.from(row.querySelectorAll('img[src]')).some((img) => {
+              if (img.closest(COMPOSER_EXCLUDE)) return false;
+              const alt = String(img.getAttribute('alt') || '').trim();
+              if (/^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i.test(alt)) return false;
+              const r = img.getBoundingClientRect();
+              if (!r || r.width < 18 || r.width > 64 || r.height < 18 || r.height > 64) return false;
+              const leftGap = r.left - directionRect.left;
+              const rightGap = directionRect.right - r.right;
+              return leftGap >= -8 && leftGap <= 96 && leftGap < rightGap;
+            });
+            if (hasLeftAvatarInRow) {
+              mediaOutgoing = false;
+              mediaDirectionEvidence = 'avatar';
+            }
             const measuredMediaEl = mediaElement || mediaAnchor || semanticVideoElement || null;
-            if (measuredMediaEl) {
+            if (mediaOutgoing === null && measuredMediaEl) {
               const mediaRect = measuredMediaEl.getBoundingClientRect();
-              const directionRect = historyDirectionContainer.getBoundingClientRect();
               if (directionRect.width > 0 && mediaRect.width > 0) {
-                // For wide media elements (> 40% of container), use right edge proximity.
-                const mediaWidthRatio = mediaRect.width / directionRect.width;
-                if (mediaWidthRatio > 0.40) {
-                  const rightEdgeRatio = (mediaRect.right - directionRect.left) / directionRect.width;
-                  if (rightEdgeRatio >= 0.80) mediaOutgoing = true;
-                  else if (rightEdgeRatio <= 0.60) mediaOutgoing = false;
+                const leftGap = Math.max(0, mediaRect.left - directionRect.left);
+                const rightGap = Math.max(0, directionRect.right - mediaRect.right);
+                if (leftGap <= 96 && leftGap < rightGap) {
+                  mediaOutgoing = false;
+                } else if (rightGap <= Math.max(96, directionRect.width * 0.22) && rightGap < leftGap) {
+                  mediaOutgoing = true;
                 } else {
                   const relativeCenter = (mediaRect.left + mediaRect.width / 2 - directionRect.left) / directionRect.width;
                   if (relativeCenter >= 0.55) mediaOutgoing = true;
@@ -10205,18 +10200,15 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             }
             const mediaNativeId = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id')
               || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id') || row.getAttribute('data-id') || null;
-            const mediaStableId = mediaNativeId
-              ? `${mediaNativeId}_media`
-              : `dom_${targetThreadId}_media_${stringHash(mediaUrl || `${effectiveLabel}:${idx}:video`)}`;
-            // Tên thành viên giải từ label media - ảnh/video trong NHÓM cũng
-            // phải hiện đúng người gửi thay vì tên nhóm.
-            const mediaSenderMatch = effectiveLabel.match(/Tin nh\u1eafn do ([^]+?) g\u1eedi l\u00fac/i) || effectiveLabel.match(/Message sent by ([^]+?) at/i);
+            const mediaSenderMatch = effectiveLabel.match(/Tin nh\u1eafn do ([^]+?) g\u1eedi l\u00fac/i) || effectiveLabel.match(/Message sent by ([^]+?) at/i) || effectiveLabel.match(/Message sent [^]*? by ([^:]+?):/i);
+            if (mediaSenderMatch && !/^(?:B\u1ea1n|You)$/i.test(mediaSenderMatch[1].trim())) {
+              mediaOutgoing = false;
+              mediaDirectionEvidence = 'label_name';
+            }
             let mediaMemberName = (!mediaOutgoing && mediaSenderMatch
               && !/^(?:B\u1ea1n|You)$/i.test(mediaSenderMatch[1].trim()))
               ? mediaSenderMatch[1].trim()
               : '';
-            // Ảnh/video ở NHÓM dùng label article "Lúc <giờ>, <Tên>: ..." —
-            // regex format cũ không khớp nên member_name rỗng.
             const mediaArticleLabel = nativeIdEl?.getAttribute('aria-label')
               || row.getAttribute('aria-label') || '';
             const mediaArticleSender = mediaArticleLabel.match(/^Lúc\s+.*,\s*([^:]+?):\s+(.+)$/);
@@ -10225,32 +10217,50 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               mediaMemberName = mediaArticleSender[1].trim();
               mediaDirectionEvidence = 'label_name';
             }
-            messages.push({
-              fb_message_id: mediaStableId,
-              thread_id: targetThreadId,
-              sender_id: mediaOutgoing ? 'current_user' : null,
-              sender_name: mediaOutgoing ? 'Bạn' : (contactName || 'Khách hàng'),
-              member_name: mediaMemberName || null,
-              member_avatar: mediaMemberName ? extractHistoryMemberAvatar(row, mediaMemberName) : null,
-              // Keep a visible, persisted record even when Facebook exposes
-              // only blob: media. If a stable fbcdn/mp4 URL is present the
-              // existing downloader and video player continue unchanged.
-              content: '',
-              media_type: mediaType,
-              media_url: mediaUrl,
-              is_outgoing: mediaOutgoing ? 1 : 0,
-              direction_evidence: mediaDirectionEvidence,
-              sender_role: mediaOutgoing ? 'operator' : 'customer',
-              source: 'dom_history_sync',
-              timestamp_ms: tsMs ? tsMs + dom_order : 0,
-              timestamp_source: tsSource,
-              dom_order,
-              sequence_order: dom_order,
-              _clock_minutes: clockMinutes,
-              _timestamp_has_explicit_date: timestampHasExplicitDate,
-              created_at: new Date(tsMs ? tsMs + dom_order : Date.now()).toISOString()
+            const rowMediaList = [];
+            for (const pEl of photoElements) {
+              const pSrc = pEl.currentSrc || pEl.src || '';
+              const pUrl = pSrc && !String(pSrc).startsWith('blob:') ? pSrc : null;
+              if (pUrl) rowMediaList.push({ type: 'image', url: pUrl, el: pEl });
+            }
+            if (isVideoMessage) {
+              rowMediaList.push({ type: 'video', url: mediaUrl, el: videoElement || semanticVideoElement });
+            } else if (rowMediaList.length === 0 && mediaUrl) {
+              rowMediaList.push({ type: mediaType || 'image', url: mediaUrl, el: mediaElement });
+            }
+            rowMediaList.forEach((mItem, mIdx) => {
+              const itemNativeEl = mItem.el?.closest?.('[data-message-id], [data-id], [id^="mid."]');
+              const itemNativeId = itemNativeEl?.getAttribute?.('data-message-id')
+                || itemNativeEl?.getAttribute?.('data-id')
+                || itemNativeEl?.getAttribute?.('id')
+                || mediaNativeId;
+              const mediaStableId = itemNativeId
+                ? (mIdx > 0 ? `${itemNativeId}_media_${mIdx}` : `${itemNativeId}_media`)
+                : `dom_${targetThreadId}_media_${stringHash((mItem.url || `${effectiveLabel}:${idx}:video`) + `:${mIdx}`)}`;
+              messages.push({
+                fb_message_id: mediaStableId,
+                thread_id: targetThreadId,
+                sender_id: mediaOutgoing ? 'current_user' : null,
+                sender_name: mediaOutgoing ? 'Bạn' : (mediaMemberName || contactName || 'Khách hàng'),
+                member_name: mediaMemberName || null,
+                member_avatar: mediaMemberName ? extractHistoryMemberAvatar(row, mediaMemberName) : null,
+                content: '',
+                media_type: mItem.type,
+                media_url: mItem.url,
+                is_outgoing: mediaOutgoing ? 1 : 0,
+                direction_evidence: mediaDirectionEvidence,
+                sender_role: mediaOutgoing ? 'operator' : 'customer',
+                source: 'dom_history_sync',
+                timestamp_ms: tsMs ? tsMs + dom_order : 0,
+                timestamp_source: tsSource,
+                dom_order,
+                sequence_order: dom_order,
+                _clock_minutes: clockMinutes,
+                _timestamp_has_explicit_date: timestampHasExplicitDate,
+                created_at: new Date(tsMs ? tsMs + dom_order : Date.now()).toISOString()
+              });
+              dom_order++;
             });
-            dom_order++;
           }
 
           let bubble_idx = 0;
@@ -10297,24 +10307,10 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                     isOutgoing = true;
                     senderName = 'Bạn';
                     directionMatched = true;
-                  } else if (contactName) {
-                    // Nhãn "Lúc ..., <Tên>:" của Messenger ghi tên NGƯỜI GỬI.
-                    // Khớp fuzzy (nickname "Khang" ⊂ contact "Lê Văn
-                    // KhangRryuutrtuu"; đuôi " · 2 phút" của sidebar phải cắt)
-                    // = tin khách. Exact thuần hụt nickname rồi rơi nhánh
-                    // "không khớp = tin mình" bóp tin khách thành tin đi
-                    // (reproduce 2026-11-03). Đồng bộ historyRowSupport.js.
-                    const cleanContact = String(contactName).replace(/\s·\s[^·]*$/, '').trim().toLowerCase();
-                    const labelName = rawSender.toLowerCase();
-                    if (cleanContact.length >= 3 && labelName.length >= 3
-                      && (cleanContact.includes(labelName) || labelName.includes(cleanContact))) {
-                      isOutgoing = false;
-                      senderName = rawSender;
-                      labelSenderName = rawSender;
-                    } else {
-                      isOutgoing = true;
-                      senderName = 'Bạn';
-                    }
+                  } else {
+                    isOutgoing = false;
+                    senderName = rawSender;
+                    labelSenderName = rawSender;
                     directionMatched = true;
                   }
                 }

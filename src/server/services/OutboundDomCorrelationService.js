@@ -65,8 +65,15 @@ class OutboundDomCorrelationService {
         SELECT id, client_message_id, fb_message_id, timestamp_ms, created_at, attachment_id, media_url, media_type, delivery_status
         FROM messages
         WHERE thread_id = ? AND is_outgoing = 1 AND delivery_status IN ('sent', 'pending', 'failed')
+          AND (client_message_id IS NOT NULL OR attachment_id IS NOT NULL)
           AND fb_message_id IS NOT NULL AND fb_message_id != ?
-          AND (fb_message_id NOT LIKE 'mid.%' OR client_message_id IS NOT NULL)
+          AND (
+            delivery_status = 'pending'
+            OR fb_message_id LIKE 'pending_%'
+            OR fb_message_id LIKE 'dom_%'
+            OR fb_message_id LIKE '%__bubble_%'
+            OR (fb_message_id GLOB '[0-9]*' AND fb_message_id NOT LIKE '%@msgr.%')
+          )
           AND (attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))
         ORDER BY id DESC
         LIMIT 10
@@ -74,13 +81,8 @@ class OutboundDomCorrelationService {
 
       for (const row of candidates) {
         const createdMs = Date.parse(row.created_at ? (String(row.created_at).includes('T') ? row.created_at : `${row.created_at}Z`) : '') || 0;
-        const rowSfTs = ConversationRepository.extractSnowflakeTimestampMs(row.fb_message_id);
-        const existingHasValidPostSendSnowflake = rowSfTs > 0 && createdMs > 0 && Math.abs(rowSfTs - createdMs) <= 120000 && !/__bubble_\d+$/.test(String(row.fb_message_id));
-        if (existingHasValidPostSendSnowflake && String(row.fb_message_id) !== String(message.fb_message_id)) {
-          continue;
-        }
         const refTime = createdMs > 0 ? createdMs : (Number(row.timestamp_ms) || observedTimestamp);
-        if (Math.abs(refTime - observedTimestamp) <= 120000) {
+        if (Math.abs(refTime - observedTimestamp) <= 60000) {
           return row;
         }
       }
