@@ -91,7 +91,7 @@ test('detects only a recent exact outbound text as a possible sidebar echo', () 
 
 test('normalization uses DOM sequence inside the same Facebook minute', () => {
   const db = new Database(':memory:');
-  db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, fb_message_id TEXT UNIQUE, timestamp_ms INTEGER, sequence_order REAL, created_at TEXT)`);
+  db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, fb_message_id TEXT UNIQUE, timestamp_ms INTEGER, timestamp_source TEXT, sequence_order REAL, created_at TEXT)`);
   db.prepare(`INSERT INTO messages (thread_id, fb_message_id, timestamp_ms, sequence_order) VALUES
     ('t1', 'image', 60003, 1), ('t1', 'Ggy', 60000, 2), ('t1', 'Uuuuuu', 60000, 3), ('t1', 'Frtt', 60000, 4)`).run();
   ConversationRepository.normalizeMessageSequence('t1', db);
@@ -119,7 +119,7 @@ test('a later partial scan cannot move an already stored customer text', () => {
 
 test('an authoritative Messenger DOM window repairs stale relative sequence slots', () => {
   const db = new Database(':memory:');
-  db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, fb_message_id TEXT UNIQUE, timestamp_ms INTEGER, sequence_order REAL, created_at TEXT)`);
+  db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, fb_message_id TEXT UNIQUE, timestamp_ms INTEGER, timestamp_source TEXT, sequence_order REAL, created_at TEXT)`);
   db.prepare(`INSERT INTO messages (id, thread_id, fb_message_id, timestamp_ms, sequence_order) VALUES
     (1, 't1', 'older', 60000, 1),
     (2, 't1', 'outgoing_text', 60000, 2),
