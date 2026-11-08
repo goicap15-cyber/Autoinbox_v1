@@ -91,7 +91,7 @@ async function createWindow() {
     height: 800,
     minWidth: 1000,
     minHeight: 650,
-    title: 'FB Messenger CRM',
+    title: 'AdsupCRM',
     autoHideMenuBar: true,
     show: false,
     webPreferences: {
@@ -146,12 +146,12 @@ async function createWindow() {
     appendDesktopLog(`[startup] Failed: ${message}`);
     if (/EADDRINUSE/i.test(message)) {
       dialog.showErrorBox(
-        'FB Messenger CRM đã đang chạy',
-        'Đã có một cửa sổ CRM khác đang mở (cổng 5050 bận).\nHãy dùng cửa sổ đang chạy, hoặc đóng hẳn app (Task Manager → FB Messenger CRM) rồi mở lại.'
+        'AdsupCRM đã đang chạy',
+        'Đã có một cửa sổ CRM khác đang mở (cổng 5050 bận).\nHãy dùng cửa sổ đang chạy, hoặc đóng hẳn app (Task Manager → AdsupCRM) rồi mở lại.'
       );
     } else {
       dialog.showErrorBox(
-        'Không thể khởi động FB Messenger CRM',
+        'Không thể khởi động AdsupCRM',
         `Backend không khởi động được.\n\n${err?.message || err}\n\nLog: ${path.join(app.getPath('userData'), 'logs', 'desktop.log')}`
       );
     }

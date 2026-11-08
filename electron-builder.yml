@@ -1,5 +1,5 @@
 appId: com.adsup.autochatbot
-productName: FB Messenger CRM
+productName: AdsupCRM
 copyright: Copyright © 2024 Adsup
 
 # ─── Directories ───────────────────────────────────────────────────────
@@ -41,6 +41,7 @@ extraResources:
 
 # ─── Windows NSIS Installer ─────────────────────────────────────────────
 win:
+  artifactName: "AdsupCRM-Setup-${version}.${ext}"
   target:
     - target: nsis
       arch: [x64]
@@ -59,7 +60,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: FB Messenger CRM
+  shortcutName: AdsupCRM
 
 # ─── Linux AppImage (dev testing) ──────────────────────────────────────
 linux:

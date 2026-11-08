@@ -224,7 +224,7 @@ app.get('/google-auth-external', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Xác thực Google - FB Messenger CRM</title>
+      <title>Xác thực Google - AdsupCRM</title>
       <script src="https://accounts.google.com/gsi/client" async defer onload="initGoogle()"></script>
       <style>
         body { font-family: system-ui, -apple-system, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f8fafc; color: #0f172a; }
