@@ -24,6 +24,7 @@ import LicenseLockScreen from './components/LicenseLockScreen.jsx';
 import LicenseExpiryBanner, { computeLicenseDaysLeft, formatLicenseExpiryDate } from './components/LicenseExpiryBanner.jsx';
 import AuthScreen from './components/AuthScreen.jsx';
 import EmployeeManagementModal from './components/EmployeeManagementModal.jsx';
+import AppUpdateModal from './components/AppUpdateModal.jsx';
 import { useSocket } from './hooks/useSocket.js';
 import { MessageSquare } from 'lucide-react';
 import { sortThreadsByActivity } from './utils/threadActivity.js';
@@ -44,22 +45,36 @@ function getVerifiedContactName(contact) {
   return isPlaceholderContactName(name) ? '' : name;
 }
 
+const extractSnowflakeBigInt = (fbMessageId) => {
+  const raw = String(fbMessageId || '').replace(/__bubble_\d+$/, '').trim();
+  const m = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
+  if (!m) return null;
+  try {
+    const sf = BigInt(m[1]);
+    const ts = Number(sf >> 22n);
+    if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return sf;
+  } catch (_) {}
+  return null;
+};
+
+const extractSnowflakeTimestampMs = (fbMessageId) => {
+  const sf = extractSnowflakeBigInt(fbMessageId);
+  return sf !== null ? Number(sf >> 22n) : 0;
+};
+
 const messageTime = (message) => {
   // Local outgoing placeholders keep this anchor for their whole lifetime.
   // Delivery confirmation may arrive later, but it must not move the bubble.
   const anchor = Number(message?.order_anchor_ms);
   if (Number.isFinite(anchor) && anchor > 0) return anchor;
+  const sfTs = extractSnowflakeTimestampMs(message?.fb_message_id);
+  if (sfTs > 0) return sfTs;
   const numeric = Number(message?.timestamp_ms);
   if (Number.isFinite(numeric) && numeric > 0) return numeric;
   const parsed = Date.parse(message?.created_at || '');
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
-// Facebook labels only carry minute precision while CRM sends stamp exact
-// seconds, so comparing raw milliseconds re-sorts a just-sent operator text
-// below customer replies that Messenger shows BEFORE it (label 10:59:00 vs
-// client_submit 10:59:14). Minutes are the finest trustworthy granularity;
-// sequence_order (server-assigned arrival order) settles the same minute.
 const messageMinuteMs = (message) => {
   const t = messageTime(message);
   return t > 0 ? Math.floor(t / 60000) : 0;
@@ -68,8 +83,16 @@ const messageMinuteMs = (message) => {
 const sortMessagesChronologically = (items = []) => items
   .map((message, originalIndex) => ({ message, originalIndex }))
   .sort((left, right) => {
-    // Thời gian là tiêu chí chính (ngày trước, trong ngày theo giờ, tối thiểu
-    // theo phút). sequence_order xếp các tin cùng phút theo đúng thứ tự đến.
+    const sfA = extractSnowflakeBigInt(left.message?.fb_message_id);
+    const sfB = extractSnowflakeBigInt(right.message?.fb_message_id);
+    if (sfA !== null && sfB !== null && sfA !== sfB) {
+      return sfA < sfB ? -1 : 1;
+    }
+    const tsA = messageTime(left.message);
+    const tsB = messageTime(right.message);
+    if ((sfA !== null || sfB !== null) && tsA > 0 && tsB > 0 && tsA !== tsB) {
+      return tsA - tsB;
+    }
     const minuteA = messageMinuteMs(left.message);
     const minuteB = messageMinuteMs(right.message);
     if (minuteA > 0 && minuteB > 0 && minuteA !== minuteB) return minuteA - minuteB;
@@ -236,11 +259,11 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
       ui_render_key: previous.ui_render_key || message.ui_render_key,
       ui_position_locked: previous.ui_position_locked || message.ui_position_locked,
       order_anchor_ms: previous.order_anchor_ms,
-      sequence_order: previous.sequence_order ?? message.sequence_order
+      sequence_order: message.sequence_order ?? previous.sequence_order
     };
     messageIdentities(result[matchedIndex]).forEach((key) => indexByIdentity.set(key, matchedIndex));
   });
-  return result;
+  return sortMessagesChronologically(result);
 };
 
 // Snapshot DB trả về đúng thứ tự chuẩn hóa, nhưng merge append-only có thể
@@ -278,7 +301,7 @@ const isSyntheticId = (messageOrId) => {
   const id = typeof messageOrId === 'string'
     ? messageOrId
     : String(messageOrId?.fb_message_id || messageOrId?.id || '');
-  return !id || /^(?:dom_|history_|sidebar_preview_|pending_|network_|websocket_|mercury_|xhr_)/i.test(id) || !id.startsWith('mid.');
+  return !id || /^(?:dom_|history_|sidebar_preview_|pending_|network_|websocket_|mercury_|xhr_)/i.test(id) || (!id.startsWith('mid.') && !id.startsWith('m_'));
 };
 
 // A CRM text send can briefly arrive twice: once as the local/client row and
@@ -531,6 +554,51 @@ export default function App() {
     if (sessionUser) checkLicenseStatus();
     else setLicenseStatus(null);
   }, [checkLicenseStatus, sessionUser]);
+
+  const [appUpdateStatus, setAppUpdateStatus] = useState(null);
+  const [updateBannerDismissedVersion, setUpdateBannerDismissedVersion] = useState(null);
+
+  useEffect(() => {
+    if (!sessionUser) return;
+    const runCheck = () => {
+      fetch('/api/app-update/check', { method: 'POST' })
+        .then((r) => r.json())
+        .then((d) => { if (d?.status) setAppUpdateStatus(d.status); })
+        .catch(() => {});
+    };
+    fetch('/api/app-update/status')
+      .then((r) => r.json())
+      .then((d) => { if (d?.status) setAppUpdateStatus(d.status); })
+      .catch(() => {});
+    const timer = setTimeout(runCheck, 3000);
+    // Tự động kiểm tra định kỳ mỗi 30 giây & khi cửa sổ được focus để không cần đóng app vẫn hiện bản mới ngay
+    const interval = setInterval(runCheck, 30 * 1000);
+    const onFocus = () => runCheck();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [sessionUser]);
+
+  useEffect(() => {
+    if (appUpdateStatus?.state === 'restarting') {
+      const reloadTimer = setTimeout(() => {
+        window.location.reload();
+      }, 900);
+      return () => clearTimeout(reloadTimer);
+    }
+  }, [appUpdateStatus?.state]);
+
+  useEffect(() => {
+    if (!socket) return;
+    const onUpdateStatus = (st) => {
+      if (st) setAppUpdateStatus(st);
+    };
+    socket.on?.('app_update_status', onUpdateStatus);
+    return () => socket.off?.('app_update_status', onUpdateStatus);
+  }, [socket]);
 
   const loadInboxSources = useCallback(async () => {
     try {
@@ -901,7 +969,7 @@ export default function App() {
         .catch(() => {})
         .finally(() => { requestPending = false; });
     };
-    const timer = setInterval(reconcileFromDatabase, 15000);
+    const timer = setInterval(reconcileFromDatabase, 4000);
     return () => { stopped = true; clearInterval(timer); controller.abort(); };
   }, [activeThreadId]);
 
@@ -978,11 +1046,25 @@ export default function App() {
     if (!socket) return;
     socket.on('THREAD_LIST_UPDATED', (data) => {
       // Page API auto-backfill: có tin mới được kéo về → refresh danh sách
-      if (data?.account_id && accountsRef.current.length > 0) {
+      if (data?.account_id && !data?.page_id && !data?.thread_id && accountsRef.current.length > 0) {
         const matches = accountsRef.current.some((account) => String(account.id) === String(data.account_id));
         if (!matches) return;
       }
       refreshThreadListThrottled();
+      const openTid = String(activeThreadIdRef.current || '');
+      if (openTid && (!data?.thread_id || String(data.thread_id) === openTid || String(openTid).endsWith(':' + String(data.thread_id)))) {
+        fetch(`/api/threads/${encodeURIComponent(openTid)}/messages`)
+          .then((r) => r.json())
+          .then((msgs) => {
+            if (!Array.isArray(msgs)) return;
+            setMessages((prev) => {
+              const existing = prev[openTid] || [];
+              const merged = reconcileOutgoingTextEchoes(mergeSnapshotSelfHealing(existing, preserveOrderAnchors(msgs, existing)));
+              return messageSnapshotSignature(existing) === messageSnapshotSignature(merged) ? prev : { ...prev, [openTid]: merged };
+            });
+          })
+          .catch(() => {});
+      }
     });
     socket.on('THREAD_MEMBERS', (payload) => {
       const tid = String(payload?.thread_id || '');
@@ -999,7 +1081,7 @@ export default function App() {
         const total = t_ui - t_dom;
         console.log(`%c[TELEMETRY] ⚡ E2E Latency: ${total}ms (dom->sw: ${domToSw}ms, sw->srv: ${swToSrv}ms, srv->ui: ${srvToUi}ms)`, 'color: #10b981; font-weight: bold;');
       }
-      if (newMsg.account_id && accountsRef.current.length > 0) {
+      if (newMsg.account_id && newMsg.source_type !== 'page_messenger' && String(activeThreadIdRef.current || '') !== String(newMsg.thread_id || '') && accountsRef.current.length > 0) {
         const matchesAccount = accountsRef.current.some((account) =>
           String(account.id) === String(newMsg.account_id) ||
           String(account.account_id || '') === String(newMsg.account_id)
@@ -1072,7 +1154,7 @@ export default function App() {
               ui_render_key: currentMsgs[existsIdx]?.ui_render_key,
               ui_position_locked: currentMsgs[existsIdx]?.ui_position_locked,
               order_anchor_ms: currentMsgs[existsIdx]?.order_anchor_ms,
-              sequence_order: currentMsgs[existsIdx]?.sequence_order ?? newMsg.sequence_order,
+              sequence_order: newMsg.sequence_order ?? currentMsgs[existsIdx]?.sequence_order,
               status: newMsg.status || newMsg.delivery_status || 'sent'
             };
           } else if (optimisticIdx >= 0) {
@@ -1083,7 +1165,7 @@ export default function App() {
               ui_render_key: currentMsgs[optimisticIdx]?.ui_render_key,
               ui_position_locked: currentMsgs[optimisticIdx]?.ui_position_locked,
               order_anchor_ms: currentMsgs[optimisticIdx]?.order_anchor_ms,
-              sequence_order: currentMsgs[optimisticIdx]?.sequence_order ?? newMsg.sequence_order,
+              sequence_order: newMsg.sequence_order ?? currentMsgs[optimisticIdx]?.sequence_order,
               status: newMsg.status || newMsg.delivery_status || 'sent'
             };
           } else {
@@ -1107,7 +1189,7 @@ export default function App() {
               ui_render_key: currentMsgs[mergeIdx]?.ui_render_key,
               ui_position_locked: currentMsgs[mergeIdx]?.ui_position_locked,
               order_anchor_ms: currentMsgs[mergeIdx]?.order_anchor_ms,
-              sequence_order: currentMsgs[mergeIdx]?.sequence_order ?? newMsg.sequence_order,
+              sequence_order: newMsg.sequence_order ?? currentMsgs[mergeIdx]?.sequence_order,
               status: newMsg.status || newMsg.delivery_status || 'sent'
             };
           } else {
@@ -1145,7 +1227,24 @@ export default function App() {
         });
         if (idx >= 0) {
           const updated = [...prev];
-          updated[idx] = { ...updated[idx], ...(['source_id','source_type','source_name','source_status'].reduce((acc, key) => (newMsg[key] ? { ...acc, [key]: newMsg[key] } : acc), {})), thread_key: msgThreadKey || updated[idx].thread_key, last_message: newMsg.content, last_activity: newMsg.created_at || new Date().toISOString(), is_unread: true };
+          const isViewingThisThread = String(activeThreadIdRef.current) === tidStr;
+          const sfTs = extractSnowflakeTimestampMs(newMsg.fb_message_id);
+          const nextMsgTs = sfTs || Number(newMsg.timestamp_ms) || Date.parse(newMsg.created_at || '') || Date.now();
+          const prevMsgTs = Number(updated[idx].last_msg_ts) || 0;
+          const isNewestMsg = nextMsgTs >= prevMsgTs - 2000;
+          const isFreshIncoming = !newMsg.is_outgoing && nextMsgTs >= (Date.now() - 5 * 60 * 1000);
+          const nextUnread = isViewingThisThread ? 0 : (newMsg.is_outgoing ? 0 : (isFreshIncoming && isNewestMsg ? 1 : Number(updated[idx].is_unread || 0)));
+          updated[idx] = {
+            ...updated[idx],
+            ...(['source_id','source_type','source_name','source_status'].reduce((acc, key) => (newMsg[key] ? { ...acc, [key]: newMsg[key] } : acc), {})),
+            thread_key: msgThreadKey || updated[idx].thread_key,
+            last_message: isNewestMsg ? (newMsg.content || updated[idx].last_message) : updated[idx].last_message,
+            last_activity: isNewestMsg ? (new Date(nextMsgTs).toISOString()) : updated[idx].last_activity,
+            last_msg_ts: Math.max(prevMsgTs, nextMsgTs),
+            is_unread: nextUnread,
+            unread_manual: (newMsg.is_outgoing || isViewingThisThread) ? -1 : updated[idx].unread_manual,
+            unread_count: nextUnread ? 1 : 0
+          };
           return sortThreadsByActivity(updated);
         }
         const summary = newMsg.thread_summary;
@@ -1606,7 +1705,7 @@ export default function App() {
       // đánh dấu đã đọc -> thread tụt về vị trí theo last_activity như Messenger.
       const nextActivity = typeof payload?.last_activity === 'string' ? payload.last_activity : null;
       setThreads((prev) => sortThreadsByActivity(prev.map((t) => (String(t.id) === tid
-        ? { ...t, is_unread: next ? 1 : 0, unread_manual: next ? 1 : -1, ...(nextActivity ? { last_activity: nextActivity } : {}) }
+        ? { ...t, is_unread: next ? 1 : 0, unread_manual: payload?.unread_manual !== undefined ? Number(payload.unread_manual) : (next ? 0 : -1), unread_count: next ? (Number(t.unread_count) || 1) : 0, ...(nextActivity ? { last_activity: nextActivity, last_msg_ts: Math.max(Number(t.last_msg_ts) || 0, Date.parse(nextActivity) || 0) } : {}) }
         : t))));
     });
     socket.on('THREAD_COMPLETED', () => loadThreadsRef.current());
@@ -1660,7 +1759,10 @@ export default function App() {
               contact_name: synced.contact_name || synced.name || updatedThreads[idx].contact_name,
               avatar_url: synced.avatar_url || updatedThreads[idx].avatar_url,
               phone: synced.phone || updatedThreads[idx].phone,
-              email: synced.email || updatedThreads[idx].email
+              email: synced.email || updatedThreads[idx].email,
+              ...(String(syncedIdStr) === String(activeThreadIdRef.current) || (Number(updatedThreads[idx].unread_manual) === -1 && !(Number(synced.last_msg_ts || 0) > Number(updatedThreads[idx].last_msg_ts || 0)))
+                ? { is_unread: 0, unread_manual: -1, unread_count: 0 }
+                : {})
             };
           } else {
             updatedThreads.push({
@@ -2027,7 +2129,11 @@ export default function App() {
   const activeMessages = activeThreadId ? (messages[String(activeThreadId)] || []) : [];
   const handleSelectThread = useCallback((threadId) => {
     const clickedThread = threads.find((thread) => String(thread.id) === String(threadId));
-    if (clickedThread && (Number(clickedThread.is_unread) === 1 || Number(clickedThread.unread_manual) === 1)) {
+    if (clickedThread) {
+      const tidStr = String(clickedThread.id || threadId);
+      setThreads((prev) => sortThreadsByActivity(prev.map((t) => (String(t.id) === tidStr
+        ? { ...t, is_unread: 0, unread_manual: -1, unread_count: 0 }
+        : t))));
       fetch('/api/threads/' + encodeURIComponent(String(threadId)) + '/unread', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2212,6 +2318,7 @@ export default function App() {
         hasCheckpoint={hasCheckpoint} collapsed={leadPanelCollapsed}
         onToggleCollapse={() => setLeadPanelCollapsed(!leadPanelCollapsed)}
         sessionUser={sessionUser} onLogout={handleLogout}
+        updateStatus={appUpdateStatus}
       />
 
       {activeView === 'employees' && <EmployeeManagementModal />}
@@ -2387,6 +2494,21 @@ export default function App() {
           isOpen={true}
           onClose={() => setActiveModal(null)}
           onOpenPayment={() => setActiveModal('payment')}
+        />
+      )}
+      {(activeModal === 'appUpdate' ||
+        ['downloading', 'applying', 'restarting'].includes(appUpdateStatus?.state) ||
+        (appUpdateStatus?.updateAvailable && updateBannerDismissedVersion !== appUpdateStatus?.latestVersion)) && (
+        <AppUpdateModal
+          isOpen={true}
+          onClose={() => {
+            if (activeModal === 'appUpdate') setActiveModal(null);
+            if (appUpdateStatus?.latestVersion) {
+              setUpdateBannerDismissedVersion(appUpdateStatus.latestVersion);
+            }
+          }}
+          updateStatus={appUpdateStatus}
+          onStatusChange={setAppUpdateStatus}
         />
       )}
 

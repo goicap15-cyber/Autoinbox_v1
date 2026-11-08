@@ -14,3 +14,10 @@
 
 ### 4. UI/UX Pro Max Design Rules
 - Follow UI/UX design intelligence guidelines from `ui-ux-pro-max` skill for all UI components, pages, design tokens, color schemes, typography, and responsive layouts.
+
+### 5. Quy trình Đóng gói & Phát hành Bản cập nhật (Hot-Update & Release)
+- Nguồn Auto-Update chính thức: Repo `https://github.com/goicap15-cyber/Autoinbox_v1.git` (remote `autoinbox_v1`), nhánh `prod-owner-only`.
+- Khi sửa code xong và cần cập nhật vào bản chạy thực tế `release/win-unpacked/FB Messenger CRM.exe` + phát hành bản cập nhật (Hot-Update) lên nhánh `prod-owner-only`:
+  - Chạy `node scripts/publish-update.js "<mô tả thay đổi>"` để tự động tăng `version` trong `package.json`, build toàn bộ (`dist/client`, `dist/server`, `dist/extension`) và tạo `updates/crm-update.zip` + `updates/version.json`.
+  - Chạy `node tmp/repack_release.js` để đóng gói `app.asar`, cập nhật `resources/extension` và vá mã SHA256 header hash trong `release/win-unpacked/FB Messenger CRM.exe`.
+  - Khi người dùng yêu cầu đẩy bản cập nhật lên GitHub, chạy `npm run release:push` (hoặc commit `updates/version.json`, `updates/crm-update.zip`, `package.json` và chạy `git push autoinbox_v1 HEAD:prod-owner-only`).

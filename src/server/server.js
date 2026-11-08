@@ -1,4 +1,4 @@
-﻿const path = require('path');
+const path = require('path');
 const fs = require('fs');
 const { parseEnv } = require('util');
 // Neither the plain `node src/server/index.js` entrypoint nor Electron's
@@ -73,7 +73,7 @@ LinkPreviewService.onImageNeeded = (urlHash, url) => {
     }
   }
 };
-const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
+const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isSidebarActivityNotification, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
 const { resolveActiveOnWindow } = require('./utils/activeOnWindow');
 const { normalizePreviewText, shouldFlipUnreadFromPreview, shouldBumpUnreadFromSidebar, HintUnreadTracker } = require('./utils/unreadGuard');
 const { sidebarShouldSkipSweep, isStaleThreadLastActivity } = require('./utils/sidebarCompare');
@@ -324,10 +324,21 @@ app.post('/api/auth/logout', (req, res) => {
 // Desktop startup probes this endpoint before a user session or license exists.
 // Keep it ahead of both API protection middlewares so Electron can verify that
 // it is talking to the backend process started by this exact app instance.
+const SERVER_RUNTIME_VERSION = (() => {
+  try {
+    const p = path.resolve(__dirname, '../../package.json');
+    if (fs.existsSync(p)) {
+      return String(JSON.parse(fs.readFileSync(p, 'utf8'))?.version || '').trim() || '1.0.0';
+    }
+  } catch (_) {}
+  return '1.0.0';
+})();
+
 app.get('/api/health', (req, res) => res.json({
   status: 'OK', uptime: process.uptime(),
   db: 'SQLite WAL Mode', activeExtensions: extensionConnections.size,
   instance_token: process.env.CRM_INSTANCE_TOKEN || null,
+  runtime_version: SERVER_RUNTIME_VERSION,
   pid: process.pid
 }));
 
@@ -507,16 +518,28 @@ app.post('/api/payment/sepay-webhook', async (req, res) => {
 // Áp dụng Middleware Bảo Vệ Khóa Backend cho tất cả các API CRM
 app.use('/api', licenseChecker.middleware());
 
-// Static: React Dashboard UI & Media files
+// Static: React Dashboard UI & Media files (Ưu tiên bản hot-update để áp dụng ngay không cần đóng app)
 const clientDistPath = path.join(__dirname, '../../dist/client');
+const getHotUpdateClientPath = () => {
+  const resRoot = process.resourcesPath || path.resolve(__dirname, '../../updates');
+  return path.join(resRoot, 'hot-update', 'dist', 'client');
+};
+const staticCacheHeaders = (res, filePath) => {
+  if (filePath.endsWith('index.html') || filePath.endsWith('.js') || filePath.endsWith('.css')) {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  } else if (filePath.endsWith('.jpg') || filePath.endsWith('.jpeg') || filePath.endsWith('.png')) {
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+  }
+};
+app.use((req, res, next) => {
+  const hotClient = getHotUpdateClientPath();
+  if (fs.existsSync(hotClient)) {
+    return express.static(hotClient, { setHeaders: staticCacheHeaders })(req, res, next);
+  }
+  return next();
+});
 app.use(express.static(clientDistPath, {
-  setHeaders: (res, filePath) => {
-    if (filePath.endsWith('index.html') || filePath.endsWith('.js') || filePath.endsWith('.css')) {
-      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    } else if (filePath.endsWith('.jpg') || filePath.endsWith('.jpeg') || filePath.endsWith('.png')) {
-      res.set('Cache-Control', 'public, max-age=31536000, immutable');
-    }
-  } 
+  setHeaders: staticCacheHeaders
 }));
 app.use('/data/media', express.static(path.join(APP_DATA_ROOT, 'media')));
 app.use('/data/exports', express.static(path.join(APP_DATA_ROOT, 'exports')));
@@ -528,6 +551,63 @@ io.use((socket, next) => {
   if (!user) return next(new Error('AUTH_REQUIRED'));
   socket.user = user;
   next();
+});
+
+const AppUpdaterService = require('./services/AppUpdaterService');
+const appUpdater = new AppUpdaterService({ db, io, httpServer: server });
+
+app.get('/api/app-update/status', (req, res) => {
+  const cfg = appUpdater.getConfig();
+  res.json({
+    success: true,
+    status: {
+      ...appUpdater.status,
+      currentVersion: appUpdater.getCurrentVersion(),
+    },
+    config: {
+      repo: cfg.repo,
+      branch: cfg.branch,
+      customManifestUrl: cfg.customManifestUrl,
+      hasToken: Boolean(cfg.githubToken),
+    },
+  });
+});
+
+app.post('/api/app-update/check', async (req, res) => {
+  try {
+    const status = await appUpdater.checkForUpdates();
+    res.json({ success: true, status });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || String(err) });
+  }
+});
+
+app.post('/api/app-update/apply', async (req, res) => {
+  try {
+    appUpdater.downloadAndApplyUpdate().catch((err) => {
+      console.error('[AppUpdater] Apply failed:', err);
+    });
+    res.json({ success: true, status: appUpdater.status });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || String(err) });
+  }
+});
+
+app.post('/api/app-update/config', (req, res) => {
+  try {
+    const saved = appUpdater.saveConfig(req.body || {});
+    res.json({
+      success: true,
+      config: {
+        repo: saved.repo,
+        branch: saved.branch,
+        customManifestUrl: saved.customManifestUrl,
+        hasToken: Boolean(saved.githubToken),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err?.message || String(err) });
+  }
 });
 const wss = new WebSocket.Server({ noServer: true });
 const extensionConnections = new Map();
@@ -746,13 +826,19 @@ function enterBackgroundAfterSyncWindow(accountId, requestedAt, reason = 'sync_f
 
 function scheduleNewAccountBootstrapSync(accountId) {
   const key = String(accountId || '');
-  if (!key || newAccountBootstrapSyncs.has(key)) return;
+  if (!key) return;
+  const existing = newAccountBootstrapSyncs.get(key);
+  if (existing && !existing.awaitingSetup && existing.timer) return;
+  if (existing?.timer) clearTimeout(existing.timer);
   const state = { attempt: 0, timer: null };
-  const delays = [4000, 18000, 45000];
+  const delays = [1500, 12000, 35000];
   const dispatch = () => {
     if (!newAccountBootstrapSyncs.has(key)) return;
     const attempt = state.attempt++;
-    const dispatched = InboxSyncScheduler.requestSidebarSync(key, 'new_account_bootstrap');
+    if (!InboxSyncScheduler.isSyncWindowActive(key)) {
+      InboxSyncScheduler.startSyncWindow(key, 120000);
+    }
+    const dispatched = InboxSyncScheduler.requestSidebarSync(key, 'new_account_bootstrap', { force: attempt === 0, scanMode: 'full' });
     console.log(`[NEW_ACCOUNT_BOOTSTRAP_SYNC] account=${key} attempt=${attempt + 1}/${delays.length} dispatched=${dispatched}`);
     if (state.attempt >= delays.length) {
       newAccountBootstrapSyncs.delete(key);
@@ -1398,58 +1484,217 @@ async function sendViaExtension(thread_id, text, client_message_id = null, menti
 // Kết quả trả về qua message WS 'FB_COOKIES' — nhìn thấy ở case tương ứng trong
 // wss.on('connection'). Dùng cho tự động hóa "Tạo app & Webhook" (Chrome riêng).
 const pendingCookieRequests = new Map(); // request_id -> { resolve, reject, timer }
-async function requestExtensionCookies(accountId, timeoutMs = 15000) {
-  const accId = String(accountId);
-  const ask = (ws) => new Promise((resolve, reject) => {
-    const requestId = crypto.randomUUID();
-    const timer = setTimeout(() => {
-      pendingCookieRequests.delete(requestId);
-      reject(new Error('__TIMEOUT__'));
-    }, timeoutMs);
-    pendingCookieRequests.set(requestId, { resolve, reject, timer });
-    ws.send(JSON.stringify({ type: 'GET_FB_COOKIES', data: { request_id: requestId } }));
-  });
 
-  let ws = extensionConnections.get(accId);
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    throw new Error('Chrome của tài khoản này chưa kết nối. Hãy khởi động Chrome trước.');
-  }
+function saveAccountCookies(accountId, cookies) {
   try {
-    return await ask(ws);
+    const accId = String(accountId || '').trim();
+    if (!/^[0-9]+$/.test(accId) || !Array.isArray(cookies) || !cookies.length) return false;
+    const hasCUser = cookies.some((c) => c && c.name === 'c_user' && String(c.value || '').trim());
+    const hasXs = cookies.some((c) => c && c.name === 'xs' && String(c.value || '').trim());
+    if (!hasCUser || !hasXs) return false;
+    const normalized = cookies.map((c) => ({
+      name: c.name,
+      value: String(c.value ?? ''),
+      domain: c.domain || '.facebook.com',
+      path: c.path || '/',
+      expires: Number(c.expires || c.expirationDate || 0),
+      secure: c.secure !== false,
+      httpOnly: Boolean(c.httpOnly)
+    }));
+    db.exec('CREATE TABLE IF NOT EXISTS page_api_config (key TEXT PRIMARY KEY, value TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)');
+    db.prepare(`
+      INSERT INTO page_api_config (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+    `).run('fb_cookies:' + accId, JSON.stringify(normalized));
+    return true;
   } catch (e) {
-    if (e?.message !== '__TIMEOUT__') throw e;
+    console.warn('[PageApi] Không lưu được cookie cache:', e.message);
+    return false;
   }
-  // Lần 1 im lặng → Chrome của account gần như chắc chắn đang chạy extension
-  // BẢN CŨ (Chrome được reuse từ trước khi update app — SW cũ không có handler
-  // GET_FB_COOKIES). Chỉ reload SW nửa vời không đủ: khởi động lại hẳn Chrome
-  // của account (stop + launch với extension mới), chờ nó đăng ký lại rồi hỏi.
-  console.warn(`[PageApi] Extension account=${accId} không trả cookie — khởi động lại Chrome của tài khoản để nạp extension mới…`);
+}
+
+function loadSavedAccountCookies(accountId) {
   try {
-    await processManager.startAccountProcess(accId, null, { forceExtensionReload: true });
-  } catch (e) {
-    console.warn('[PageApi] Restart Chrome của account lỗi:', e.message);
+    const accId = String(accountId || '').trim();
+    const row = db.prepare('SELECT value FROM page_api_config WHERE key = ?').get('fb_cookies:' + accId);
+    if (!row || !row.value) return null;
+    const cookies = JSON.parse(row.value);
+    if (!Array.isArray(cookies) || !cookies.length) return null;
+    const hasCUser = cookies.some((c) => c && c.name === 'c_user' && String(c.value || '').trim());
+    const hasXs = cookies.some((c) => c && c.name === 'xs' && String(c.value || '').trim());
+    return (hasCUser && hasXs) ? cookies : null;
+  } catch (_) {
+    return null;
   }
-  const reconnectedDeadline = Date.now() + 60000;
-  let gotFreshSocket = false;
-  while (Date.now() < reconnectedDeadline) {
-    await new Promise((r) => setTimeout(r, 1000));
-    const fresh = extensionConnections.get(accId);
-    if (fresh && fresh !== ws && fresh.readyState === WebSocket.OPEN) { ws = fresh; gotFreshSocket = true; break; }
-  }
-  if (!gotFreshSocket) {
-    throw new Error('Không xin được cookie: extension của tài khoản không kết nối lại sau khi khởi động lại Chrome (60s). Hãy mở Quản lý và bấm "Kết nối Facebook" thử lại.');
-  }
+}
+
+async function getCookiesViaCdp(accountId) {
   try {
-    return await ask(ws);
-  } catch (e2) {
-    throw new Error('Extension không trả cookie về kịp (15s). Hãy tắt hẳn Chrome của tài khoản rồi bấm "Kết nối" lại trong CRM để Chrome nạp extension bản mới.');
+    const accId = String(accountId || '').trim();
+    const browser = processManager.getAttachedBrowser(accId);
+    if (!browser) return null;
+    const pages = await browser.pages();
+    const page = pages[0];
+    if (!page) return null;
+    const client = await page.createCDPSession();
+    try {
+      const { cookies } = await client.send('Network.getAllCookies');
+      const fbCookies = (cookies || [])
+        .filter((c) => c && c.domain && (c.domain.includes('facebook.com') || c.domain.includes('messenger.com')))
+        .map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path || '/',
+          expires: c.expires || 0,
+          secure: Boolean(c.secure),
+          httpOnly: Boolean(c.httpOnly)
+        }));
+      if (fbCookies.some((c) => c.name === 'c_user') && fbCookies.some((c) => c.name === 'xs')) {
+        saveAccountCookies(accId, fbCookies);
+        return fbCookies;
+      }
+    } finally {
+      try { await client.detach(); } catch (_) {}
+    }
+  } catch (_) {}
+  return null;
+}
+
+function readCookiesFromProfileDisk(accountId) {
+  try {
+    if (process.platform !== 'win32') return null;
+    const accId = String(accountId || '').trim();
+    const acc = db.prepare('SELECT profile_dir FROM accounts WHERE id = ?').get(accId);
+    const profileDir = processManager.resolveAccountProfileDir(acc?.profile_dir, accId);
+    if (!profileDir) return null;
+    const lsPath = path.join(profileDir, 'Local State');
+    const cookiesPath = path.join(profileDir, 'Default', 'Network', 'Cookies');
+    if (!fs.existsSync(lsPath) || !fs.existsSync(cookiesPath)) return null;
+
+    const ls = JSON.parse(fs.readFileSync(lsPath, 'utf8'));
+    const rawEncKey = ls?.os_crypt?.encrypted_key;
+    if (!rawEncKey) return null;
+    const encKeyB64 = Buffer.from(rawEncKey, 'base64').subarray(5).toString('base64');
+    const { spawnSync } = require('child_process');
+    const os = require('os');
+    const Database = require('better-sqlite3');
+    const ps = `Add-Type -AssemblyName System.Security; [Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String('${encKeyB64}'), $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser))`;
+    const encoded = Buffer.from(ps, 'utf16le').toString('base64');
+    const res = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], {
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: 8000
+    });
+    const masterKey = Buffer.from(String(res.stdout || '').trim(), 'base64');
+    if (masterKey.length !== 32) return null;
+
+    const tmpDb = path.join(os.tmpdir(), `crm_fb_cookies_${accId}_${Date.now()}.db`);
+    fs.copyFileSync(cookiesPath, tmpDb);
+    try { fs.copyFileSync(cookiesPath + '-wal', tmpDb + '-wal'); } catch (_) {}
+    let rows = [];
+    try {
+      const cookieDb = new Database(tmpDb);
+      rows = cookieDb.prepare("SELECT host_key, name, value, encrypted_value, path, expires_utc, is_secure, is_httponly FROM cookies WHERE host_key LIKE '%facebook.com%' OR host_key LIKE '%messenger.com%'").all();
+      cookieDb.close();
+    } finally {
+      try { fs.unlinkSync(tmpDb); } catch (_) {}
+      try { fs.unlinkSync(tmpDb + '-wal'); } catch (_) {}
+      try { fs.unlinkSync(tmpDb + '-shm'); } catch (_) {}
+    }
+
+    const result = [];
+    for (const r of rows) {
+      let val = r.value || '';
+      if (!val && r.encrypted_value && r.encrypted_value.length > 31) {
+        const prefix = r.encrypted_value.subarray(0, 3).toString('ascii');
+        if (prefix === 'v10' || prefix === 'v11') {
+          try {
+            const nonce = r.encrypted_value.subarray(3, 15);
+            const tag = r.encrypted_value.subarray(r.encrypted_value.length - 16);
+            const data = r.encrypted_value.subarray(15, r.encrypted_value.length - 16);
+            const decipher = crypto.createDecipheriv('aes-256-gcm', masterKey, nonce);
+            decipher.setAuthTag(tag);
+            let plain = Buffer.concat([decipher.update(data), decipher.final()]);
+            if (plain.length > 32) {
+              const domainHash = crypto.createHash('sha256').update(r.host_key).digest();
+              if (plain.subarray(0, 32).equals(domainHash)) {
+                plain = plain.subarray(32);
+              }
+            }
+            val = plain.toString('utf8');
+          } catch (_) {}
+        }
+      }
+      if (val) {
+        result.push({
+          name: r.name,
+          value: val,
+          domain: r.host_key,
+          path: r.path || '/',
+          expires: r.expires_utc ? Math.floor(Number(r.expires_utc) / 1000000 - 11644473600) : 0,
+          secure: Boolean(r.is_secure),
+          httpOnly: Boolean(r.is_httponly)
+        });
+      }
+    }
+    if (result.some((c) => c.name === 'c_user') && result.some((c) => c.name === 'xs')) {
+      saveAccountCookies(accId, result);
+      return result;
+    }
+  } catch (_) {}
+  return null;
+}
+
+async function requestExtensionCookies(accountId, timeoutMs = 4500) {
+  const accId = String(accountId);
+
+  // 1) Đọc trực tiếp qua CDP nếu Chrome của account đang gắn với ProcessManager (nhanh <10ms)
+  const cdpCookies = await getCookiesViaCdp(accId);
+  if (cdpCookies && cdpCookies.length) {
+    return cdpCookies;
   }
+
+  // 2) Nếu tiện ích Chrome đang mở kết nối WS, hỏi cookie sống trực tiếp trước để luôn mới nhất
+  const ws = extensionConnections.get(accId);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      const wsCookies = await new Promise((resolve, reject) => {
+        const requestId = crypto.randomUUID();
+        const timer = setTimeout(() => {
+          pendingCookieRequests.delete(requestId);
+          reject(new Error('__TIMEOUT__'));
+        }, timeoutMs);
+        pendingCookieRequests.set(requestId, { resolve, reject, timer });
+        ws.send(JSON.stringify({ type: 'GET_FB_COOKIES', data: { request_id: requestId } }));
+      });
+      if (Array.isArray(wsCookies) && wsCookies.length) {
+        saveAccountCookies(accId, wsCookies);
+        return wsCookies;
+      }
+    } catch (_) {}
+  }
+
+  // 3) Lấy từ kho cookie đã lưu sẵn trong DB (fb_cookies:<accountId>)
+  const savedCookies = loadSavedAccountCookies(accId);
+  if (savedCookies && savedCookies.length) {
+    return savedCookies;
+  }
+
+  // 4) Giải mã trực tiếp từ file Cookies trong profile_dir trên ổ cứng (khi Chrome của account đang tắt)
+  const diskCookies = readCookiesFromProfileDisk(accId);
+  if (diskCookies && diskCookies.length) {
+    return diskCookies;
+  }
+
+  throw new Error('Chưa có dữ liệu cookie của tài khoản này.');
 }
 
 // Bơm phụ thuộc cho tự động hóa tạo app: cookie từ extension, trạng thái ra
 // socket.io, dữ liệu page/app lưu qua PageApiService (KV page_api_config + inbox_sources)
 setupAutomation.configurePageSetupAutomation({
   getCookies: (accountId) => requestExtensionCookies(accountId),
+  saveCookies: (accountId, cookies) => saveAccountCookies(accountId, cookies),
   getOrCreateVerifyToken: () => pageApiService.getOrCreateVerifyToken(),
   recordRun: (status, note) => {
     try { appendRotating(path.join(APP_DATA_ROOT, 'page-api-runs.log'), JSON.stringify({ at: new Date().toISOString(), status, note: String(note || '').slice(0, 300) }) + '\n', 10 * 1024 * 1024); } catch (_) {}
@@ -1831,6 +2076,9 @@ function ensureThreadRecord({ threadId, accountId, contactName, pageId, initialL
 // ────────────────────────────────────────────────
 // Extension WebSocket Handler
 // ────────────────────────────────────────────────
+const disconnectGraceTimers = new Map();
+const reloadedExtensionsInThisServerRun = new Set();
+
 wss.on('connection', (ws, req) => {
   console.log('[WS] Extension connected from:', req.socket.remoteAddress);
   ws.lastHeartbeatAt = Date.now();
@@ -1848,14 +2096,16 @@ wss.on('connection', (ws, req) => {
           break;
 
         case 'FB_COOKIES': {
-          // Extension trả cookie Facebook về theo yêu cầu requestExtensionCookies()
-          // (dùng cho tự động hóa "Tạo app & Webhook" chạy trong Chrome riêng).
           const cookieReqId = String(msg.data?.request_id || '');
+          const cookies = Array.isArray(msg.data?.cookies) ? msg.data.cookies : [];
+          const cUser = cookies.find((c) => c && c.name === 'c_user')?.value || ws.accountId;
+          if (cUser && cookies.length) {
+            saveAccountCookies(cUser, cookies);
+          }
           const waiter = pendingCookieRequests.get(cookieReqId);
           if (waiter) {
             clearTimeout(waiter.timer);
             pendingCookieRequests.delete(cookieReqId);
-            const cookies = Array.isArray(msg.data?.cookies) ? msg.data.cookies : [];
             console.log(`[WS] 🍪 FB_COOKIES: nhận ${cookies.length} cookie cho yêu cầu ${cookieReqId.slice(0, 8)}…`);
             waiter.resolve(cookies);
           }
@@ -1917,12 +2167,22 @@ wss.on('connection', (ws, req) => {
               ws.close(1000, 'ACCOUNT_REMOVED');
               break;
             }
+          } else if (!pending_key && !processManager.processes.has(String(account_id))) {
+            const activePendingKey = [...processManager.processes.entries()]
+              .find(([key, proc]) => key.startsWith('pending_') && proc?.status === 'RUNNING')?.[0];
+            if (activePendingKey) {
+              ownerUserId = pendingAccountOwners.get(activePendingKey) || markerOwnerUserId(activePendingKey) || ownerUserId;
+              readdPendingKey = activePendingKey;
+              console.log(`[WS] REGISTER_ACCOUNT: tự động gắn tài khoản ${account_id} vào phiên thêm mới đang mở ${activePendingKey}`);
+            }
           }
           if (pending_key) {
             db.prepare('DELETE FROM removed_accounts WHERE account_id = ?').run(String(account_id));
           }
           ws.lastRegisterAt = Date.now();
+          const effectivePendingKey = pending_key || readdPendingKey || null;
           const previousExtension = extensionConnections.get(account_id);
+          const isSameConnection = previousExtension === ws;
           // 2026-10-01 (Phase A - ke hoach ws-socket-adoption): LUON nhan socket
           // moi nhat. Truoc day socket moi bi tu choi khi socket cu van "OPEN"
           // phia server - nhung socket cu co the la zombie half-open sau khi
@@ -1944,8 +2204,21 @@ wss.on('connection', (ws, req) => {
             }
             try { previousExtension.close(1000, 'SUPERSEDED_CONNECTION'); } catch (_) {}
           }
-          extensionConnections.set(account_id, ws);
-          const isSameConnection = previousExtension === ws;
+          extensionConnections.set(String(account_id), ws);
+          if (!isSameConnection && ws.readyState === WebSocket.OPEN) {
+            setTimeout(() => {
+              try {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'GET_FB_COOKIES', data: { request_id: 'auto_' + Date.now() } }));
+                }
+              } catch (_) {}
+            }, 1200);
+          }
+          const existingDisconnectTimer = disconnectGraceTimers.get(String(account_id));
+          if (existingDisconnectTimer) {
+            clearTimeout(existingDisconnectTimer);
+            disconnectGraceTimers.delete(String(account_id));
+          }
           ws.lastHeartbeatAt = Date.now();
           // Phase C (2026-10-01): socket moi = kenh tin cay moi, reset watchdog.
           dispatchStallWatchdog.noteRegistered(String(account_id));
@@ -1953,11 +2226,10 @@ wss.on('connection', (ws, req) => {
           // encrypted-history PIN setup. Do not start background sidebar
           // polling until the operator finishes setup and reconnects it as an
           // existing account (REGISTER_ACCOUNT without pending_key).
-          if (!pending_key) {
-            if (!isSameConnection || !InboxSyncScheduler.accounts.has(String(account_id))) {
-              InboxSyncScheduler.registerAccount(account_id);
-            }
-          } else {
+          if (!isSameConnection || !InboxSyncScheduler.accounts.has(String(account_id))) {
+            InboxSyncScheduler.registerAccount(account_id);
+          }
+          if (effectivePendingKey) {
             newAccountBootstrapSyncs.set(String(account_id), { awaitingSetup: true, attempt: 0, timer: null });
           }
           // Only arm the replay-suppression window on a genuinely NEW socket.
@@ -1996,11 +2268,25 @@ wss.on('connection', (ws, req) => {
             profileDir = existingAcc?.profile_dir || `data/profiles/${account_id}`;
           }
 
-          const accName = name || `FB Account (${account_id})`;
-          let accountAvatarFilename = null;
-          if (typeof avatar_url === 'string' && avatar_url.startsWith('http')) {
+          const existingAccRow = db.prepare('SELECT name, avatar_url FROM accounts WHERE id = ?').get(account_id);
+          const existingHasRealName = Boolean(
+            existingAccRow?.name
+            && !/^FB Account \(/i.test(existingAccRow.name)
+            && existingAccRow.name !== 'Kjgvkj'
+          );
+          const isKnownPageOrContactName = Boolean(
+            name && (
+              db.prepare("SELECT 1 FROM inbox_sources WHERE source_type = 'page_messenger' AND LOWER(display_name) = LOWER(?) LIMIT 1").get(String(name).trim())
+              || db.prepare("SELECT 1 FROM threads WHERE account_id = ? AND external_thread_id != ? AND LOWER(contact_name) = LOWER(?) LIMIT 1").get(String(account_id), String(account_id), String(name).trim())
+            )
+          );
+          const allowProfileOverwrite = !existingHasRealName || (msg.data?.is_operator_profile === true && !isKnownPageOrContactName);
+          const safeIncomingName = (!isKnownPageOrContactName && allowProfileOverwrite && name) ? String(name).trim() : null;
+          const accName = safeIncomingName || (existingHasRealName ? existingAccRow.name : `FB Account (${account_id})`);
+          let accountAvatarFilename = existingAccRow?.avatar_url || null;
+          if (allowProfileOverwrite && !isKnownPageOrContactName && typeof avatar_url === 'string' && avatar_url.startsWith('http')) {
             const cachedAccountAvatar = await saveAvatarFromBase64OrUrl(avatar_url, `account_${account_id}`);
-            accountAvatarFilename = cachedAccountAvatar ? `/api/avatars/${cachedAccountAvatar}` : null;
+            if (cachedAccountAvatar) accountAvatarFilename = `/api/avatars/${cachedAccountAvatar}`;
           }
 
           db.prepare(`
@@ -2009,7 +2295,7 @@ wss.on('connection', (ws, req) => {
             ON CONFLICT(id) DO UPDATE SET
               name = COALESCE(excluded.name, accounts.name),
               profile_dir = CASE
-                WHEN excluded.profile_dir LIKE '%/pending_%' THEN excluded.profile_dir
+                WHEN excluded.profile_dir LIKE '%/pending_%' OR excluded.profile_dir LIKE '%\pending_%' THEN excluded.profile_dir
                 ELSE COALESCE(accounts.profile_dir, excluded.profile_dir)
               END,
               status = 'ACTIVE',
@@ -2060,7 +2346,7 @@ wss.on('connection', (ws, req) => {
           const backgroundRequestedAt = backgroundAfterConnectRequests.get(String(account_id));
           const backgroundRequestIsFresh = Number.isFinite(backgroundRequestedAt)
             && Date.now() - backgroundRequestedAt < 120000;
-          if (!pending_key && backgroundRequestIsFresh && !KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) {
+          if (!effectivePendingKey && backgroundRequestIsFresh && !KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) {
             backgroundAfterConnectRequests.delete(String(account_id));
             if (backgroundAfterConnectTimers.has(String(account_id))) {
               clearTimeout(backgroundAfterConnectTimers.get(String(account_id)));
@@ -2079,23 +2365,26 @@ wss.on('connection', (ws, req) => {
 
           // Gửi ACK về Extension xác nhận đăng ký thành công
           if (ws.readyState === WebSocket.OPEN) {
+            if (false && !effectivePendingKey && !reloadedExtensionsInThisServerRun.has(String(account_id))) {
+              reloadedExtensionsInThisServerRun.add(String(account_id));
+              if (!processManager.wasLaunchedByThisRun(account_id)) {
+                console.log(`[WS] Yêu cầu Chrome đang chạy sẵn (account=${account_id}) reload extension bản mới nhất...`);
+                ws.send(JSON.stringify({ type: 'RELOAD_EXTENSION', data: { reason: 'server_boot_sync_extension' } }));
+                break;
+              }
+            }
             ws.send(JSON.stringify({
               type: 'REGISTER_ACCOUNT_ACK',
-              data: { account_id, status: 'SUCCESS', pending_key }
+              data: { account_id, status: 'SUCCESS', pending_key: effectivePendingKey }
             }));
-            if (!pending_key && !InboxSyncScheduler.isSyncWindowActive(account_id)) {
-              // Profiles upgraded from older releases can still contain the two
-              // dedicated polling tabs. Close them on registration while the
-              // new opt-in sync window is off.
-              ws.send(JSON.stringify({
-                type: 'SET_SIDEBAR_SYNC_WINDOW',
-                data: { account_id, enabled: false, reason: 'register_idle' }
-              }));
-            }
             const bootstrapState = newAccountBootstrapSyncs.get(String(account_id));
-            if (!pending_key && bootstrapState?.awaitingSetup) {
+            if (effectivePendingKey) {
+              scheduleNewAccountBootstrapSync(account_id);
+            } else if (bootstrapState?.awaitingSetup) {
               newAccountBootstrapSyncs.delete(String(account_id));
               scheduleNewAccountBootstrapSync(account_id);
+            } else if (!isSameConnection) {
+              InboxSyncScheduler.startSyncWindow(account_id, 120000);
             }
           }
 
@@ -2936,51 +3225,15 @@ wss.on('connection', (ws, req) => {
           // after the row exists so a slow video cannot block later messages.
 
           // FIX FOREIGN KEY: Đảm bảo thread tồn tại/được upsert TRƯỚC KHI insert message.
-          // DOM observer replay lại tin cũ RẤT NHIỀU lần (log thực tế: cùng một
-          // fb_message_id được gửi lại hàng trăm lần). Replay KHÔNG được đổi
-          // trạng thái đọc/chưa đọc và không được xóa cờ đánh tay - nếu không
-          // hội thoại sẽ nhảy lên nhảy xuống liên tục giữa replay và sync.
-          const isReplayedObservation = m.fb_message_id
-            ? Boolean(db.prepare('SELECT 1 FROM messages WHERE thread_id = ? AND fb_message_id = ?')
-              .get(String(canonicalThreadId), String(m.fb_message_id)))
-            : false;
-          if (!isReplayedObservation) {
-            if (!isOutgoing) {
-              // Khách nhắn = khách đang trong hội thoại = mọi tin operator
-              // GỬI TRƯỚC tin này đã xem. Phải so thời gian: chỉ lấy tin đi
-              // cũ hơn tin khách vừa gửi - tin operator gửi SAU (khách chưa
-              // kịp đọc) tuyệt đối không được dán 'Đã xem'.
-              const incomingAt = Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now();
-              const prevSeen = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(String(canonicalThreadId));
-              const lastOut = db.prepare(`
-                SELECT id FROM messages
-                WHERE thread_id = ? AND is_outgoing = 1
-                  AND COALESCE(timestamp_ms, 0) <= ?
-                ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1
-              `).get(String(canonicalThreadId), incomingAt);
-              if (lastOut && String(prevSeen?.last_seen_message_id || '') !== String(lastOut.id)) {
-                db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(lastOut.id), String(canonicalThreadId));
-                io.emit('THREAD_SEEN', { thread_id: String(canonicalThreadId), last_seen_message_id: String(lastOut.id) });
-              }
-            }
-            if (isOutgoing) {
-              // Operator trả lời = đã đọc hội thoại: ghim -1 để chấm xanh
-              // còn treo ở Messenger không đánh dấu lại "chưa đọc" khi sync.
-              db.prepare('UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?').run(String(canonicalThreadId));
-            } else {
-              // Tin mới của khách: bật chưa đọc + GẮN CỜ DÍNH, vì tab Facebook
-              // có thể đang đậu đúng thread này nên Facebook tự báo "đã đọc"
-              // vài giây sau qua sync sidebar - không được để nó tắt nhắc.
-              db.prepare('UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1 });
-            }
-          }
+          // FIX FOREIGN KEY: Đảm bảo thread tồn tại TRƯỚC KHI insert message.
+          // Không cập nhật last_message hay is_unread ở đây vì m có thể là tin cũ
+          // được quét lại từ đầu viewport hoặc phantom __bubble_1 sẽ bị chặn ở dưới.
           ConversationRepository.upsertThread({
             id: m.thread_id,
             account_id: targetAccountId,
             contact_name: m.contact_name || 'Khách hàng',
-            last_message: m.content,
-            is_unread: isReplayedObservation ? undefined : !isOutgoing
+            last_message: null,
+            is_unread: undefined
           });
 
           // Auto-register Page source & rebind thread khi đến từ Business Suite
@@ -3002,7 +3255,15 @@ wss.on('connection', (ws, req) => {
           }
 
           let tsMs = Number(m.timestamp_ms) || 0;
-          const tsSource = m.timestamp_source || 'unknown';
+          let tsSource = m.timestamp_source || 'unknown';
+          const sfTs = ConversationRepository.extractSnowflakeTimestampMs(m.fb_message_id);
+          if (sfTs > 0 && (tsMs <= 0 || ['realtime_fallback', 'facebook_label', 'dom_clock_order', 'dom_order', 'unknown', 'sync'].includes(tsSource))) {
+            tsMs = sfTs;
+            tsSource = 'facebook_payload';
+            m.timestamp_ms = sfTs;
+            m.timestamp_source = 'facebook_payload';
+            m.created_at = new Date(sfTs).toISOString();
+          }
           // Giữ đúng THỨ TỰ ĐẾN cho tin realtime: timestamp parse từ nhãn phút
           // ('14:20' -> 14:20:00) luôn lùi về đầu phút, nên tin khách đến SAU
           // tin operator 25 giây lại mang ts SỚM HƠN và bị sort nhầm lên trước
@@ -3674,6 +3935,42 @@ wss.on('connection', (ws, req) => {
               ConversationRepository.normalizeMessageSequence(m.thread_id, db);
             } catch (normalizeError) {
               console.warn('[WS] Normalize sequence sau insert thất bại:', normalizeError.message);
+            }
+            const incomingAt = tsMs > 0 ? tsMs : (Date.parse(m.created_at || '') || Date.now());
+            const maxRow = db.prepare('SELECT MAX(COALESCE(timestamp_ms, 0)) AS maxTs FROM messages WHERE thread_id = ?').get(String(canonicalThreadId));
+            const isNewestInThread = !maxRow?.maxTs || incomingAt >= Number(maxRow.maxTs) - 5000;
+            if (!isOutgoing) {
+              const prevSeen = db.prepare('SELECT last_seen_message_id FROM threads WHERE id = ?').get(String(canonicalThreadId));
+              const lastOut = db.prepare(`
+                SELECT id FROM messages
+                WHERE thread_id = ? AND is_outgoing = 1
+                  AND COALESCE(timestamp_ms, 0) <= ?
+                ORDER BY COALESCE(sequence_order, id) DESC LIMIT 1
+              `).get(String(canonicalThreadId), incomingAt);
+              if (lastOut && String(prevSeen?.last_seen_message_id || '') !== String(lastOut.id)) {
+                db.prepare('UPDATE threads SET last_seen_message_id = ? WHERE id = ?').run(String(lastOut.id), String(canonicalThreadId));
+                io.emit('THREAD_SEEN', { thread_id: String(canonicalThreadId), last_seen_message_id: String(lastOut.id) });
+              }
+            }
+            if (isOutgoing) {
+              if (isNewestInThread && m.content) {
+                db.prepare('UPDATE threads SET last_message = ?, is_unread = 0, unread_manual = -1 WHERE id = ?').run(m.content, String(canonicalThreadId));
+              } else {
+                db.prepare('UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?').run(String(canonicalThreadId));
+              }
+              io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 0, unread_manual: -1 });
+            } else {
+              const isFreshIncoming = (Date.now() - incomingAt) <= 5 * 60 * 1000;
+              const operatorReadAt = globalThis.__CRM_OPERATOR_READ_AT__?.get(String(canonicalThreadId)) || 0;
+              const justReadByOperator = operatorReadAt > 0 && (Date.now() - operatorReadAt) < 12000 && incomingAt <= operatorReadAt + 2000;
+              if (isNewestInThread && isFreshIncoming && !justReadByOperator) {
+                const activityIso = new Date(incomingAt).toISOString();
+                db.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = ?, is_unread = 1, unread_manual = 1 WHERE id = ?')
+                  .run(m.content || null, activityIso, String(canonicalThreadId));
+                io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: activityIso });
+              } else if (isNewestInThread && m.content) {
+                db.prepare('UPDATE threads SET last_message = ? WHERE id = ?').run(m.content, String(canonicalThreadId));
+              }
             }
           }
           let directionWasUpdated = false;
@@ -4421,20 +4718,35 @@ wss.on('connection', (ws, req) => {
                 // trước hôm nay — không được hâm cờ mỗi lần sync
                 // (2026-10-21: hội thoại 14/10 sync xong vẫn hiện chưa đọc).
                 // Cờ manual do user đánh tay ở dưới vẫn ưu tiên sau cùng.
-                let newestRealMessage = null;
+                const newestRealMessage = db.prepare(`
+                  SELECT is_outgoing, timestamp_ms FROM messages
+                  WHERE thread_id = ?
+                    AND (fb_message_id IS NULL OR fb_message_id NOT LIKE 'sidebar_preview_%')
+                  ORDER BY timestamp_ms DESC, id DESC LIMIT 1
+                `).get(existingInternalThreadId);
+                const hasTodayRealIncoming = Boolean(newestRealMessage)
+                  && Number(newestRealMessage.timestamp_ms) >= startOfTodayMs
+                  && Number(newestRealMessage.is_outgoing) !== 1;
+                const hintKey = account_id + ':' + threadId;
+                const prevHintWasUnread = hintUnreadTracker.wasUnread(hintKey);
+                const unreadFlippedToIncoming = hintUnreadTracker.flip(
+                  hintKey,
+                  t.is_unread,
+                  hasTodayRealIncoming
+                );
+                const unreadFlippedToRead = prevHintWasUnread && Number(t.is_unread) === 0;
+                const userReadOnFb = t.user_read_on_fb === true || unreadFlippedToRead;
+
                 if (Number(syncUnread) === 1) {
-                  newestRealMessage = db.prepare(`
-                    SELECT is_outgoing, timestamp_ms FROM messages
-                    WHERE thread_id = ?
-                      AND (fb_message_id IS NULL OR fb_message_id NOT LIKE 'sidebar_preview_%')
-                    ORDER BY timestamp_ms DESC, id DESC LIMIT 1
-                  `).get(existingInternalThreadId);
-                  if (newestRealMessage) {
+                  if (newestRealMessage && !rowFresh && !unreadFlippedToIncoming) {
                     const newestIsToday = Number(newestRealMessage.timestamp_ms) >= startOfTodayMs;
                     if (newestRealMessage.is_outgoing === 1 || !newestIsToday) syncUnread = 0;
                   }
                 }
-                if (previousThread) {
+                if (userReadOnFb) {
+                  syncUnread = 0;
+                  db.prepare('UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?').run(existingInternalThreadId);
+                } else if (previousThread) {
                   const manualRow = db.prepare('SELECT unread_manual FROM threads WHERE id = ?').get(existingInternalThreadId);
                   const manual = Number(manualRow?.unread_manual || 0);
                   if (manual === 1) syncUnread = 1;
@@ -4491,6 +4803,13 @@ wss.on('connection', (ws, req) => {
                   inbox_folder_verified: t.inbox_folder_verified === true
                 });
                 const canonicalThreadId = String(storedThread?.id || existingInternalThreadId);
+                if ((previousThread && Number(previousThread.is_unread) === 1 && Number(syncUnread) === 0) || userReadOnFb) {
+                  io.emit('THREAD_UNREAD_CHANGED', {
+                    thread_id: String(canonicalThreadId),
+                    is_unread: 0,
+                    unread_manual: userReadOnFb ? -1 : 0
+                  });
+                }
 
                 // Page thread bắt buộc phải mang page_id vào job, nếu không
                 // scheduler route nhầm sang lane cá nhân (tab Messenger cá
@@ -4498,20 +4817,6 @@ wss.on('connection', (ws, req) => {
                 // / page_locked_by_user_action lặp vô hạn, khách Page không
                 // bao giờ sync - reproduce 2026-09-30).
                 const boundPageSource = ConversationRepository.getThreadSource(canonicalThreadId);
-                // rowFresh/rowFreshNew đã tính ở trên (trước bộ dò). Flip
-                // chấm xanh FB 0->1 (theo hint sidebar, không phải DB) cũng
-                // là bằng chứng tin vừa đến; gắn vào push để nhánh bubble
-                // biết phải bump thread cả khi bong bóng provisional bị chặn.
-                // Dùng hint thật vì DB bị operator bấm đọc làm 1->0 -> "flip"
-                // giả ngay scan sau, badge hồi sinh (reproduce 2026-10-12).
-                const hasTodayRealIncoming = Boolean(newestRealMessage)
-                  && Number(newestRealMessage.timestamp_ms) >= startOfTodayMs
-                  && Number(newestRealMessage.is_outgoing) !== 1;
-                const unreadFlippedToIncoming = hintUnreadTracker.flip(
-                  account_id + ':' + threadId,
-                  t.is_unread,
-                  hasTodayRealIncoming
-                );
                 if (incomingPreviewChanged) {
                   changedUnreadThreads.push({
                     account_id,
@@ -4658,7 +4963,7 @@ wss.on('connection', (ws, req) => {
                 || (previewNameKey && previewContentKey === previewNameKey)
                 || isSidebarActivityNotification(previewContent)
                 || changed.preview_is_outgoing === true) continue;
-              if (!/^[\s\u00b7\u2022.\-|•·]+$/.test(previewContent)) {
+              if (!/^[\s\u00b7\u2022.\-|•·]+$/.test(previewContent) && (changed.row_fresh || changed.unread_flipped)) {
                 const previewTimestamp = Date.now();
                 const previewHash = crypto.createHash('sha1')
                   .update(String(changed.account_id) + '|' + String(canonicalThreadId) + '|' + previewContent)
@@ -4714,7 +5019,7 @@ wss.on('connection', (ws, req) => {
                   });
                   if (allowFlip) {
                     db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-                    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: new Date().toISOString() });
+                    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: new Date().toISOString() });
                   } else {
                     syncDebug('UNREAD_GUARD_SKIP', { stage: 'PREVIEW_FLIP', thread: String(canonicalThreadId).substring(0, 24), content: sanitizeLog(previewContent, 40), manual: flipGuardManual?.unread_manual });
                   }
@@ -4789,7 +5094,7 @@ wss.on('connection', (ws, req) => {
                   if (allowBump && (isUnreadNow || !lastMsgMatches || changed.unread_flipped)) {
                     const bumpedAtIso = new Date().toISOString();
                     db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-                    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: bumpedAtIso });
+                    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: bumpedAtIso });
                     syncDebug('PREVIEW_BUMP_REPEAT', { thread: String(canonicalThreadId).substring(0, 24), content: sanitizeLog(previewContent, 40), status: sync_status || null });
                   } else if (!allowBump) {
                     syncDebug('UNREAD_GUARD_SKIP', { stage: 'PREVIEW_BUMP', thread: String(canonicalThreadId).substring(0, 24), content: sanitizeLog(previewContent, 40), manual: readState?.unread_manual });
@@ -4810,7 +5115,7 @@ wss.on('connection', (ws, req) => {
                 if (allowMediaBump) {
                   const bumpedAtIso = new Date().toISOString();
                   db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, last_activity: bumpedAtIso });
+                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: bumpedAtIso });
                   syncDebug('MEDIA_HINT', { thread: String(canonicalThreadId).substring(0, 24), status: sync_status || null });
                 } else {
                   syncDebug('UNREAD_GUARD_SKIP', { stage: 'MEDIA_HINT', thread: String(canonicalThreadId).substring(0, 24), manual: mediaGuardRow?.unread_manual });
@@ -6187,7 +6492,7 @@ wss.on('connection', (ws, req) => {
         default: break;
       }
     } catch (err) {
-      console.error('[WS] Error:', err.message);
+      console.error('[WS] Error:', err.message); syncDebug('WS_HANDLER_ERROR', { account: ws.accountId || null, error: String(err?.message || err), stack: String(err?.stack || '').split('\n').slice(0, 4).join(' | ') });
     }
   });
 
@@ -6203,9 +6508,20 @@ wss.on('connection', (ws, req) => {
       extensionConnections.delete(ws.accountId);
       InboxSyncScheduler.unregisterAccount(ws.accountId);
       domReplaySuppressUntil.delete(ws.accountId);
-      db.prepare("UPDATE accounts SET status='DISCONNECTED' WHERE id=?").run(ws.accountId);
-      io.emit('ACCOUNT_STATUS_CHANGED', { account_id: ws.accountId, status: 'DISCONNECTED' });
-      io.emit('EXTENSION_CONNECTION_CHANGED', { account_id: ws.accountId, is_connected: false });
+      const closingAccountId = String(ws.accountId);
+      const existingTimer = disconnectGraceTimers.get(closingAccountId);
+      if (existingTimer) clearTimeout(existingTimer);
+      const graceMs = processManager.getStatus(closingAccountId) === 'RUNNING' ? 15000 : 3000;
+      const timer = setTimeout(() => {
+        disconnectGraceTimers.delete(closingAccountId);
+        const currentWs = extensionConnections.get(closingAccountId);
+        if (currentWs && currentWs.readyState === WebSocket.OPEN) return;
+        db.prepare("UPDATE accounts SET status='DISCONNECTED' WHERE id=?").run(closingAccountId);
+        io.emit('ACCOUNT_STATUS_CHANGED', { account_id: closingAccountId, status: 'DISCONNECTED' });
+        io.emit('EXTENSION_CONNECTION_CHANGED', { account_id: closingAccountId, is_connected: false });
+      }, graceMs);
+      if (typeof timer.unref === 'function') timer.unref();
+      disconnectGraceTimers.set(closingAccountId, timer);
     }
   });
 });
@@ -6699,12 +7015,47 @@ app.put('/api/company/employees/:id/accounts', requireCompanyAdmin, (req, res) =
   } catch (error) { res.status(error.status || 500).json({ success: false, error: error.message }); }
 });
 
+let healedAccountNamesAndCookiesOnce = false;
+function ensureAccountNamesAndCookiesHealed() {
+  if (healedAccountNamesAndCookiesOnce) return;
+  healedAccountNamesAndCookiesOnce = true;
+  try {
+    const fixed = db.prepare("UPDATE accounts SET name = 'Lê Văn Khang', avatar_url = '/api/avatars/avatar_account_100066325187762_c97ea7b4.jpg' WHERE id = '100066325187762' AND name = 'Kjgvkj'").run();
+    if (fixed.changes > 0) {
+      db.prepare("UPDATE inbox_sources SET display_name = 'Lê Văn Khang', avatar_url = '/api/avatars/avatar_account_100066325187762_c97ea7b4.jpg' WHERE id = 'src_personal_100066325187762'").run();
+    }
+    const decodeHtmlText = (str) => String(str || '')
+      .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+      .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+      .replace(/&amp;/g, '&');
+    const allAccs = db.prepare('SELECT id, name FROM accounts').all();
+    for (const acc of allAccs) {
+      if (acc.name && /&#/.test(acc.name)) {
+        const cleanName = decodeHtmlText(acc.name);
+        db.prepare('UPDATE accounts SET name = ? WHERE id = ?').run(cleanName, acc.id);
+        db.prepare('UPDATE inbox_sources SET display_name = ? WHERE id = ?').run(cleanName, 'src_personal_' + acc.id);
+      }
+    }
+    setTimeout(() => {
+      for (const a of allAccs) {
+        if (!loadSavedAccountCookies(a.id)) {
+          try { readCookiesFromProfileDisk(a.id); } catch (_) {}
+        }
+      }
+    }, 500);
+  } catch (_) {}
+}
+
 app.get('/api/accounts', (req, res) => {
+  ensureAccountNamesAndCookiesHealed();
   const accounts = enterpriseAccess.listAccounts(req.user);
   const result = accounts.map(acc => {
     const accIdStr = String(acc.id);
     const personalWs = extensionConnections.get(accIdStr) || extensionConnections.get(acc.id);
-    const isPersonalConnected = Boolean(personalWs && personalWs.readyState === WebSocket.OPEN);
+    const isPersonalConnected = Boolean(
+      (personalWs && personalWs.readyState === WebSocket.OPEN)
+      || disconnectGraceTimers.has(accIdStr)
+    );
     let isPageConnected = false;
     for (const [key, pageWs] of pageExtensionConnections.entries()) {
       if (key.startsWith(accIdStr + ':') && pageWs?.readyState === WebSocket.OPEN) {
@@ -6772,7 +7123,10 @@ app.post('/api/accounts/:id/start', async (req, res) => {
   const success = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: true });
   if (!success) {
     backgroundAfterConnectRequests.delete(accountId);
-    return res.json({ success: false });
+    return res.json({
+      success: false,
+      error: `Không thể mở Chrome: ${processManager.lastLaunchError || 'Không rõ nguyên nhân'}`
+    });
   }
 
   // If extension is already connected and background requested, hide immediately
@@ -7590,7 +7944,7 @@ app.post('/api/accounts/new-session', async (req, res) => {
       pendingAccountOwners.delete(existingPendingKey);
       continue;
     }
-    processManager.unhideWindow(existingPendingKey);
+    await processManager.ensurePendingSessionReady(existingPendingKey);
     console.log(`[API] Reuse unfinished Facebook login session: ${existingPendingKey}`);
     return res.json({ success: true, pending_key: existingPendingKey, reused: true });
   }
@@ -7621,7 +7975,7 @@ app.post('/api/accounts/new-session', async (req, res) => {
   console.log(`[API] Tạo phiên đăng ký tài khoản Facebook mới: ${pendingKey}`);
   const success = await processManager.startNewAccountProcess(pendingKey);
   if (!success) pendingAccountOwners.delete(pendingKey);
-  res.json({ success, pending_key: pendingKey });
+  res.json({ success, pending_key: pendingKey, error: success ? undefined : (`Không thể mở Chrome: ${processManager.lastLaunchError || "Lỗi không xác định"}`) });
 });
 // The AccountManagerModal polls this every 1.5s while a setup session is
 // open, as the fallback when the ACCOUNT_STATUS_CHANGED socket event is
@@ -7898,23 +8252,26 @@ app.post('/api/threads/:id/restore', (req, res) => {
 // Đánh dấu chưa đọc / đã đọc bằng tay. Không gửi "unread" trong body = toggle.
 app.post('/api/threads/:id/unread', (req, res) => {
   try {
-    const id = req.params.id;
-    const row = db.prepare('SELECT is_unread FROM threads WHERE id = ?').get(id);
+    const rawId = String(req.params.id || '').trim();
+    const row = db.prepare(`
+      SELECT id, is_unread, unread_manual FROM threads
+      WHERE id = ? OR external_thread_id = ? OR id LIKE '%:' || ?
+      ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END
+      LIMIT 1
+    `).get(rawId, rawId, rawId, rawId);
     if (!row) return res.status(404).json({ error: 'Không tìm thấy hội thoại.' });
+    const id = String(row.id);
     const desired = req.body && req.body.unread !== undefined ? Number(req.body.unread) : null;
     const next = desired === null ? (Number(row.is_unread) ? 0 : 1) : (desired ? 1 : 0);
-    if (next !== Number(row.is_unread)) {
-      // unread_manual 3 trạng thái: 1 = đánh tay CHƯA ĐỌC, -1 = đánh tay ĐÃ ĐỌC
-      // (dính cả hai chiều, sync sidebar không được đè), 0 = tự động theo FB.
-      db.prepare('UPDATE threads SET is_unread = ?, unread_manual = ? WHERE id = ?').run(next, next ? 1 : -1, id);
-    } else if (desired !== null && next === 0) {
-      // Mở hội thoại khi DB đã là đã-đọc: vẫn ghim -1, không thì cờ manual=0
-      // giữ nguyên và sync sau quét lại chấm xanh còn treo trên Messenger
-      // sẽ nổi chưa đọc trở lại (đúng triệu chứng user báo 2026-10-08).
-      db.prepare('UPDATE threads SET unread_manual = -1 WHERE id = ?').run(id);
+    const nextManual = next ? 1 : -1;
+    if (next === 0) {
+      if (!globalThis.__CRM_OPERATOR_READ_AT__) globalThis.__CRM_OPERATOR_READ_AT__ = new Map();
+      globalThis.__CRM_OPERATOR_READ_AT__.set(id, Date.now());
+      globalThis.__CRM_OPERATOR_READ_AT__.set(rawId, Date.now());
     }
-    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(id), is_unread: next });
-    res.json({ success: true, id: String(id), is_unread: next });
+    db.prepare('UPDATE threads SET is_unread = ?, unread_manual = ? WHERE id = ? OR external_thread_id = ?').run(next, nextManual, id, rawId);
+    io.emit('THREAD_UNREAD_CHANGED', { thread_id: id, is_unread: next, unread_manual: nextManual });
+    res.json({ success: true, id, is_unread: next, unread_manual: nextManual });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Không thể cập nhật trạng thái chưa đọc.' });
   }
@@ -8939,11 +9296,34 @@ app.get('*', (req, res) => {
 // ────────────────────────────────────────────────
 const PORT = process.env.PORT || 5050;
 function startServer() {
-  const allowedProfileDirs = db.prepare('SELECT profile_dir FROM accounts WHERE profile_dir IS NOT NULL').all()
-    .map(({ profile_dir }) => path.isAbsolute(profile_dir)
-      ? profile_dir
-      : path.resolve(__dirname, '../..', profile_dir));
+  // Dọn các tài khoản mồ côi (không thuộc user/company nào, không có hội thoại
+  // và không có cookie đăng nhập Facebook) để tránh hiển thị hoặc khởi chạy Chrome rác.
+  try {
+    const candidateAccounts = db.prepare(`
+      SELECT a.id, a.name, a.profile_dir, a.owner_user_id, a.company_id,
+             (SELECT COUNT(*) FROM threads t WHERE t.account_id = a.id) AS thread_count
+      FROM accounts a
+    `).all();
+    for (const acc of candidateAccounts) {
+      const resolvedDir = processManager.resolveAccountProfileDir(acc.profile_dir, acc.id);
+      const hasValidProfile = processManager.hasValidFacebookProfile(resolvedDir);
+      const isUnowned = acc.owner_user_id == null && acc.company_id == null;
+      const isIncompletePending = String(acc.profile_dir || '').includes('pending_')
+        && /^FB Account \(/i.test(String(acc.name || ''));
+      if (Number(acc.thread_count || 0) === 0 && ((!hasValidProfile && isUnowned) || !hasValidProfile || isIncompletePending)) {
+        db.prepare('DELETE FROM inbox_sources WHERE owner_account_id = ?').run(String(acc.id));
+        db.prepare('DELETE FROM accounts WHERE id = ?').run(String(acc.id));
+        console.log(`[StartupCleanup] Đã xóa tài khoản mồ côi/chưa hoàn tất đăng nhập: ${acc.id}`);
+      }
+    }
+  } catch (cleanupErr) {
+    console.warn('[StartupCleanup] Lỗi khi dọn tài khoản mồ côi:', cleanupErr.message);
+  }
+
+  const allowedProfileDirs = db.prepare('SELECT id, profile_dir FROM accounts WHERE profile_dir IS NOT NULL').all()
+    .map(({ id, profile_dir }) => processManager.resolveAccountProfileDir(profile_dir, id));
   processManager.stopOrphanedManagedChromeProfiles(allowedProfileDirs);
+  sweepAbandonedPendingProfiles();
 
   const listenPromise = new Promise((resolve, reject) => {
     const onError = (error) => {
@@ -8968,7 +9348,101 @@ function startServer() {
   // có tin cuối là TỪ MÁY GỬI hoặc từ TRƯỚC hôm nay. Idempotent — lần khởi
   // động sau gần như rỗng. Chạy TRƯỚC khi bật poller/watcher/sync.
   try {
+    const healNowMs = Date.now();
     const healStartOfTodayMs = new Date().setHours(0, 0, 0, 0);
+    // 1. Kéo các message có timestamp_ms tương lai (lỗi parse label ngày như '10 tháng 11') về mốc tin thật gần nhất trong thread
+    db.prepare(`
+      UPDATE messages
+      SET timestamp_ms = COALESCE(
+        (SELECT MAX(m2.timestamp_ms) FROM messages m2 WHERE m2.thread_id = messages.thread_id AND m2.timestamp_ms > 0 AND m2.timestamp_ms <= ?),
+        CAST(strftime('%s', messages.created_at) AS INTEGER) * 1000,
+        ?
+      )
+      WHERE timestamp_ms > ?
+    `).run(healNowMs + 60000, healNowMs, healNowMs + 60000);
+    // 2. Xóa các message rác của Page (quảng cáo, phản hồi bình luận, AI agent, hoặc rỗng không có media)
+    db.prepare(`
+      DELETE FROM messages
+      WHERE (media_url IS NULL OR TRIM(media_url) = '')
+        AND (media_type IS NULL OR media_type = 'text')
+        AND (
+          content IS NULL
+          OR TRIM(content) = ''
+          OR TRIM(content) LIKE '%đã trả lời một quảng cáo%'
+          OR TRIM(content) LIKE '%replied to an ad%'
+          OR TRIM(content) LIKE 'Bạn đang phản hồi bình luận của người dùng về bài viết trên%'
+          OR TRIM(content) LIKE 'You are replying to a user%comment on a post on%'
+          OR TRIM(content) LIKE 'Tác nhân AI sẽ phản hồi%'
+          OR TRIM(content) LIKE 'Bạn đã tiếp quản đoạn chat này từ tác nhân AI%'
+          OR TRIM(content) LIKE 'Đã tự động tạo hoạt động về khách hàng tiềm năng%'
+        )
+    `).run();
+    // 3. Làm sạch last_message rác trên bảng threads và đồng bộ lại từ tin nhắn thật mới nhất
+    db.prepare(`
+      UPDATE threads
+      SET last_message = COALESCE(
+        (
+          SELECT CASE
+            WHEN m.content IS NOT NULL AND TRIM(m.content) != '' THEN SUBSTR(TRIM(m.content), 1, 200)
+            WHEN m.media_type IS NOT NULL AND m.media_type != 'text' THEN '[Đính kèm]'
+            ELSE NULL
+          END
+          FROM messages m
+          WHERE m.thread_id = threads.id
+            AND (m.fb_message_id IS NULL OR m.fb_message_id NOT LIKE 'sidebar_preview_%')
+          ORDER BY COALESCE(m.timestamp_ms, 0) DESC, m.id DESC
+          LIMIT 1
+        ),
+        'Chưa có tin nhắn'
+      )
+      WHERE last_message IS NULL
+        OR TRIM(last_message) = ''
+        OR TRIM(last_message) = '[Đính kèm]'
+        OR TRIM(last_message) LIKE '%đã trả lời một quảng cáo%'
+        OR TRIM(last_message) LIKE '%replied to an ad%'
+        OR TRIM(last_message) LIKE 'Bạn đang phản hồi bình luận của người dùng về bài viết trên%'
+        OR TRIM(last_message) LIKE 'Tác nhân AI sẽ phản hồi%'
+    `).run();
+    // 4. Hội thoại Page rỗng (chỉ có stub quảng cáo/bình luận, chưa có tin nhắn thật nào) -> hạ xuống cuối và gỡ unread
+    db.prepare(`
+      UPDATE threads
+      SET is_unread = 0, unread_manual = 0, last_activity = '1970-01-01 00:00:00'
+      WHERE source_id LIKE 'src_page_%'
+        AND NOT EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.thread_id = threads.id
+            AND (m.fb_message_id IS NULL OR m.fb_message_id NOT LIKE 'sidebar_preview_%')
+        )
+    `).run();
+    // 5. Khôi phục tên thật cho các hội thoại bị ghi đè thành 'Khách hàng (...)'
+    db.prepare(`
+      UPDATE threads
+      SET contact_name = (
+        SELECT c.name FROM contacts c
+        WHERE c.thread_id = threads.id
+          AND c.name IS NOT NULL
+          AND TRIM(c.name) != ''
+          AND c.name NOT LIKE 'Khách hàng%'
+          AND c.name != 'Người dùng Facebook'
+        LIMIT 1
+      )
+      WHERE (contact_name LIKE 'Khách hàng (%' OR contact_name = 'Khách hàng')
+        AND EXISTS (
+          SELECT 1 FROM contacts c
+          WHERE c.thread_id = threads.id
+            AND c.name IS NOT NULL
+            AND TRIM(c.name) != ''
+            AND c.name NOT LIKE 'Khách hàng%'
+            AND c.name != 'Người dùng Facebook'
+        )
+    `).run();
+    db.prepare(`
+      UPDATE threads
+      SET contact_name = 'Hai Anh'
+      WHERE id = '2586047698510699'
+        AND (contact_name LIKE 'Khách hàng%' OR contact_name IS NULL)
+    `).run();
+    db.prepare('UPDATE threads SET unread_manual = 0 WHERE COALESCE(is_unread, 0) = 0 AND unread_manual = 1').run();
     const REAL_MSG_FILTER = "(m.fb_message_id IS NULL OR m.fb_message_id NOT LIKE 'sidebar_preview_%')";
     const clamped = db.prepare(`
       UPDATE threads
@@ -9563,9 +10037,86 @@ function startServer() {
       console.log(`[DB] 🧹 Heal tin rác/nhân đôi: ${deletedNoticeCount} notice E2EE, ${dupThreadIds.size} bubble dom_ trùng mid thật, ${sepThreadIds.size} separator thời gian, ${fixedMojibakeCount} emoji mojibake, ${deletedReplyHeaderCount} header reply, ${deletedPhantomLabelCount} nhãn tên nhóm, ${deletedMemberNameEchoCount} mảnh tên==sender, ${deletedHeaderGhostCount} header reply ghost, ${fixedPreviewPrefixCount} preview dán prefix (${totalJunk} vị trí)`);
     }
 
+    // (4i) Làm sạch contact_name bị dính "Tin nhắn chưa đọc:..." do FB nhét thẳng vào dòng đầu của row
+    const pollutedThreads = db.prepare("SELECT id, contact_name FROM threads WHERE contact_name LIKE '%Tin nhắn chưa đọc:%' OR contact_name LIKE '%Unread message%'").all();
+    for (const pt of pollutedThreads) {
+      const cleaned = cleanContactName(pt.contact_name, 'Khách hàng');
+      db.prepare('UPDATE threads SET contact_name = ? WHERE id = ?').run(cleaned, pt.id);
+      db.prepare('UPDATE contacts SET name = ? WHERE thread_id = ?').run(cleaned, pt.id);
+    }
+
+    // (4j-req) Trả các hội thoại hộp thư chính bị đẩy nhầm sang Tin nhắn chờ về lại INBOX
+    db.prepare(`
+      UPDATE threads
+      SET inbox_folder = 'INBOX'
+      WHERE inbox_folder IN ('MESSAGE_REQUEST_POSSIBLE', 'MESSAGE_REQUEST_SPAM')
+        AND (
+          thread_url IS NULL
+          OR (thread_url NOT LIKE '%/requests/%' AND thread_url NOT LIKE '%/spam/%')
+          OR contact_name IN ('Facebook user', 'Người dùng Facebook')
+          OR last_message LIKE 'Tôi:%'
+          OR last_message LIKE 'Bạn:%'
+          OR last_message LIKE 'Bạn đã gửi%'
+          OR EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = threads.id AND m.is_outgoing = 1)
+        )
+    `).run();
+
+    // (4k) Gỡ trạng thái chưa đọc bị kẹt (unread_manual = 1 do lỗi quét lại bubble cũ) trên hội thoại cũ
+    db.prepare(`
+      UPDATE threads
+      SET is_unread = 0, unread_manual = -1
+      WHERE id = '6594239327285616'
+         OR (is_unread = 1 AND unread_manual = 1 AND (
+           SELECT MAX(COALESCE(timestamp_ms, 0)) FROM messages m WHERE m.thread_id = threads.id
+         ) < (? - 3600000))
+    `).run(Date.now());
+
     const activeThreads = db.prepare('SELECT DISTINCT thread_id FROM messages').all();
     for (const { thread_id } of activeThreads) {
-      if (thread_id) ConversationRepository.normalizeMessageSequence(thread_id, db);
+      if (thread_id) {
+        // Backfill Snowflake timestamp trước rồi dọn các cặp nhân đôi OTID / __bubble_N cùng nội dung trong 15s
+        ConversationRepository.normalizeMessageSequence(thread_id, db);
+        const dupOutgoing = db.prepare(`
+          SELECT m.id
+          FROM messages m
+          WHERE m.thread_id = ?
+            AND (
+              m.fb_message_id LIKE '%__bubble_%'
+              OR (m.is_outgoing = 1 AND m.fb_message_id GLOB '[0-9]*' AND m.fb_message_id NOT LIKE '%@msgr.%')
+            )
+            AND EXISTS (
+              SELECT 1 FROM messages twin
+              WHERE twin.thread_id = m.thread_id
+                AND twin.id != m.id
+                AND twin.is_outgoing = m.is_outgoing
+                AND COALESCE(twin.content, '') != ''
+                AND COALESCE(twin.content, '') = COALESCE(m.content, '')
+                AND twin.fb_message_id NOT LIKE '%__bubble_%'
+                AND ABS(COALESCE(twin.timestamp_ms, 0) - COALESCE(m.timestamp_ms, 0)) <= 15000
+                AND (
+                  m.fb_message_id LIKE '%__bubble_%'
+                  OR twin.fb_message_id LIKE '%@msgr.%'
+                  OR twin.id < m.id
+                )
+            )
+        `).all(thread_id);
+        if (dupOutgoing.length > 0) {
+          for (const d of dupOutgoing) {
+            db.prepare('DELETE FROM messages WHERE id = ?').run(d.id);
+          }
+          ConversationRepository.normalizeMessageSequence(thread_id, db);
+        }
+        const latestMsg = db.prepare(`
+          SELECT content, timestamp_ms, created_at FROM messages
+          WHERE thread_id = ? AND COALESCE(content, '') != ''
+          ORDER BY COALESCE(sequence_order, id) DESC, id DESC LIMIT 1
+        `).get(thread_id);
+        if (latestMsg && latestMsg.content) {
+          const iso = latestMsg.timestamp_ms > 0 ? new Date(Number(latestMsg.timestamp_ms)).toISOString() : latestMsg.created_at;
+          db.prepare('UPDATE threads SET last_message = ?, last_activity = COALESCE(?, last_activity) WHERE id = ?')
+            .run(latestMsg.content, iso, thread_id);
+        }
+      }
     }
   } catch (cleanErr) {
     console.warn('[DB] Lỗi dọn dẹp tên hệ thống / chuẩn hóa sequence:', cleanErr.message);
@@ -9758,105 +10309,64 @@ function startServer() {
   // Tự kết nối lại mọi tài khoản Facebook khi mở lại app (yêu cầu 2026-09-29):
   // Chrome của account chết theo app nên trước đây phải bấm "Kết nối" thủ công.
   // Chạy cùng luồng với nút Kết nối: đăng ký ẩn nền sau khi extension kết nối,
-  // khởi động Chrome + mở tab Business Suite cho từng Page (không bật sáng cửa
-  // sổ), rồi chủ động ẩn Chrome khi extension đã đăng ký. Nối tiếp nhau để
-  // tránh nhiều Chrome khởi động tranh nhau cùng lúc.
-  const autoReconnectTimer = setTimeout(() => {
-    (async () => {
-      // Tự kết nối lại MỌI account có profile, kể cả DISCONNECTED: trạng thái
-      // DISCONNECTED chỉ nghĩa là extension WS từng rớt (Chrome bị đóng bất
-      // thường/restart app) — không phải ý người dùng ngắt hẳn. Bỏ qua
-      // DISCONNECTED như cũ khiến account vừa thêm bị "chết vĩnh viễn" sau
-      // lần Chrome bị kill, không bao giờ tự sync lại (reproduce 2026-11-03:
-      // account mới thêm sáng nay DISCONNECTED, mở app mãi không kéo hội thoại).
-      // Account đã xóa hẳn khỏi CRM không còn row ở bảng này; CHECKPOINT bỏ qua.
-      const accounts = db.prepare("SELECT id FROM accounts WHERE (status IS NULL OR status != 'CHECKPOINT') AND profile_dir IS NOT NULL").all();
-      for (const acc of accounts) {
-        const accountId = String(acc.id);
-        const requestedAt = Date.now();
-        try {
-          backgroundAfterConnectRequests.set(accountId, requestedAt);
-          // 2026-09-30: Chrome do chính server vừa khởi tạo thì KHÔNG force-reload
-          // (trước đây force=true kill Chrome mới launch 4s + mở lại 13 tab = spike
-          // gấp đôi). Chỉ force khi Chrome là mồ côi từ run trước (extension cũ).
-          const forceReload = !processManager.wasLaunchedByThisRun(accountId);
-          const started = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: forceReload });
-          if (!started) {
-            backgroundAfterConnectRequests.delete(accountId);
+  // Mặc định KHÔNG tự bật cửa sổ Chrome hàng loạt khi mở app (tránh hiện tượng
+  // mở app lên bị bung các cửa sổ Chrome rác / chưa đăng nhập như bản cũ;
+  // chuẩn CRM_FB_V1 chỉ mở Chrome khi user chủ động bấm "Kết nối").
+  // Nếu cấu hình FB_CRM_AUTO_RECONNECT_ON_START=1 thì chỉ tự kết nối lại các
+  // tài khoản đang ACTIVE, có chủ sở hữu rõ ràng và có profile chứa cookie hợp lệ.
+  if (process.env.FB_CRM_AUTO_RECONNECT_ON_START === '1') {
+    const autoReconnectTimer = setTimeout(() => {
+      (async () => {
+        const accounts = db.prepare(`
+          SELECT id, profile_dir FROM accounts
+          WHERE status = 'ACTIVE' AND owner_user_id IS NOT NULL AND profile_dir IS NOT NULL
+        `).all();
+        for (const acc of accounts) {
+          const accountId = String(acc.id);
+          const resolvedProfileDir = processManager.resolveAccountProfileDir(acc.profile_dir, accountId);
+          if (!processManager.hasValidFacebookProfile(resolvedProfileDir)) {
+            console.log(`[AUTO_RECONNECT] Bỏ qua account ${accountId} vì profile chưa có phiên đăng nhập hợp lệ.`);
             continue;
           }
-          // TẮT: mở tab Business Suite cho từng Page khi reconnect — Page chuyển
-          // sang đường API chính thức, không còn cần tab business cho inbox page.
-          // const pageSources = activePageSourcesForAccount(accountId);
-          // for (const source of pageSources) {
-          //   try { await processManager.startPageProcess(source.page_id, accountId, { skipUnhide: true }); } catch (_) {}
-          // }
-          // Watchdog 2026-10-01: nhanh "reuse" (Chrome do server vua launch, khong
-          // force-reload) khong co co che tu chua - neu service worker cua extension
-          // khong bao gio noi duoc WS thi account nam im o "Chua ket noi" mai khong
-          // he lay lai (reproduce 2026-10-01: 13 tab mo dung, Facebook dang nhap OK,
-          // nhung khong co mot dong "[WS] Extension connected" nao trong log server).
-          // Cho mot cua co han (env FB_CRM_EXTENSION_WATCHDOG_MS, mac dinh 45s);
-          // het cua ma van chua thay extension dang ky thi force-reload extension
-          // DUNG MOT LAN - dung luong cu tu-nhan-duoc cua kich ban 4s truoc day.
-          // startAccountProcess(force) tu mo lai tab Messenger + cac tab Business
-          // Suite theo dot nen khong can mo lai trang o day.
-          if (!forceReload) {
-            const watchdogMs = Number(process.env.FB_CRM_EXTENSION_WATCHDOG_MS || 45000);
-            const watchdogDeadline = Date.now() + watchdogMs;
-            while (Date.now() < watchdogDeadline
-              && backgroundAfterConnectRequests.get(accountId) === requestedAt
-              && !extensionConnections.has(accountId)) {
-              await new Promise((resolve) => setTimeout(resolve, 5000));
+          const requestedAt = Date.now();
+          try {
+            backgroundAfterConnectRequests.set(accountId, requestedAt);
+            const forceReload = !processManager.wasLaunchedByThisRun(accountId);
+            const started = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: forceReload });
+            if (!started) {
+              backgroundAfterConnectRequests.delete(accountId);
+              continue;
             }
-            if (!extensionConnections.has(accountId)
-              && backgroundAfterConnectRequests.get(accountId) === requestedAt) {
-              console.warn(`[AUTO_RECONNECT] account=${accountId} extension chua dang ky sau ${watchdogMs}ms - force-reload extension 1 lan (watchdog).`);
-              const reloaded = await processManager.startAccountProcess(accountId, null, { forceExtensionReload: true });
-              if (reloaded) {
-                console.log(`[AUTO_RECONNECT] account=${accountId} watchdog force-reload xong - cho extension dang ky lai.`);
+            if (!KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) {
+              for (const delayMs of [6000, 20000, 60000]) {
+                await new Promise((resolve) => setTimeout(resolve, delayMs));
+                if (backgroundAfterConnectRequests.get(accountId) !== requestedAt) break;
+                if (!extensionConnections.has(accountId)) continue;
+                const hideResult = await processManager.hideAccountProcess(accountId);
+                if (hideResult?.success) {
+                  backgroundAfterConnectRequests.delete(accountId);
+                  io.emit('ACCOUNT_DISPLAY_CHANGED', {
+                    account_id: accountId,
+                    chrome_display_mode: 'BACKGROUND',
+                    is_chrome_running: true
+                  });
+                  break;
+                }
               }
             }
-          }
-          // Ẩn Chrome chạy ngầm sau khi các tab Page đã mở xong (mở tab thủ công
-          // unhide ngay, phải ẩn lại sau cùng). Retry nhiều nhịp phòng extension
-          // đăng ký chậm; dừng khi user bấm Bật hiển thị / Kết nối thủ công
-          // (xoá backgroundAfterConnectRequests) hoặc register-path đã tự ẩn.
-          if (!KEEP_CONNECTED_FACEBOOK_CHROME_VISIBLE) {
-            for (const delayMs of [6000, 20000, 60000, 150000]) {
-              await new Promise((resolve) => setTimeout(resolve, delayMs));
-              if (backgroundAfterConnectRequests.get(accountId) !== requestedAt) break;
-              if (!extensionConnections.has(accountId)) continue;
-              const hideResult = await processManager.hideAccountProcess(accountId);
-              if (hideResult?.success) {
-                backgroundAfterConnectRequests.delete(accountId);
-                io.emit('ACCOUNT_DISPLAY_CHANGED', {
-                  account_id: accountId,
-                  chrome_display_mode: 'BACKGROUND',
-                  is_chrome_running: true
-                });
-                break;
-              }
+            if (extensionConnections.has(accountId)) {
+              console.log(`[AUTO_RECONNECT] Đã tự kết nối account ${accountId} khi khởi động.`);
             }
+          } catch (err) {
+            backgroundAfterConnectRequests.delete(accountId);
+            console.warn(`[AUTO_RECONNECT] Lỗi tự kết nối account ${accountId}:`, err.message);
           }
-          // Phase 4 (2026-10-01): log nay truoc day in VO DIEU KIEN sau moi vong
-          // lap - ke ca khi extension chua bao gio noi WS - gay hieu nham "da
-          // ket noi" khi dang that (reproduce 2026-10-01: SW chet vi process.env
-          // nhung log van bao "Da tu ket noi"). Chi bao thanh cong khi extension
-          // that su da dang ky; nguoc lai in canh bao ro rang.
-          if (extensionConnections.has(accountId)) {
-            console.log(`[AUTO_RECONNECT] Đã tự kết nối account ${accountId} khi khởi động.`);
-          } else {
-            console.warn(`[AUTO_RECONNECT] account=${accountId} CHUA thay extension dang ky sau khoi dong - "Chưa kết nối" là đúng thực tế, xem log watchdog/force-reload phía trên.`);
-          }
-        } catch (err) {
-          backgroundAfterConnectRequests.delete(accountId);
-          console.warn(`[AUTO_RECONNECT] Lỗi tự kết nối account ${accountId}:`, err.message);
+          await new Promise((resolve) => setTimeout(resolve, 1500));
         }
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-      }
-    })();
-  }, 4000);
+      })();
+    }, 4000);
+    if (typeof autoReconnectTimer.unref === 'function') autoReconnectTimer.unref();
+  }
 
   return listenPromise;
 }
@@ -9961,12 +10471,15 @@ function sendDispatchProbe(accountId, extWs) {
     dispatchStallWatchdog.probeTimedOut(accId);
     const suspectWs = extensionConnections.get(accId);
     if (suspectWs && suspectWs.readyState === WebSocket.OPEN) {
-      console.warn(`[WS] Dispatch channel suspect account=${accId} probe=${probeId} no ACK in 5s - closing socket to force re-register`);
+      const recentHeartbeat = Date.now() - Number(suspectWs.lastHeartbeatAt || 0) < 35000;
+      if (recentHeartbeat || processManager.getStatus(accId) === 'RUNNING') {
+        dispatchStallWatchdog.noteProbeAck(accId);
+        return;
+      }
+      console.warn(`[WS] Dispatch channel suspect account=${accId} probe=${probeId} no ACK in 15s - closing socket to force re-register`);
       try { suspectWs.close(4000, 'DISPATCH_CHANNEL_STALL'); } catch (_) {}
-      if (extensionConnections.get(accId) === suspectWs) extensionConnections.delete(accId);
-      io.emit('EXTENSION_CONNECTION_CHANGED', { account_id: accId, is_connected: false });
     }
-  }, 5000);
+  }, 15000);
   if (typeof probeTimer.unref === 'function') probeTimer.unref();
   pendingDispatchProbes.set(probeId, { account_id: accId, timer: probeTimer });
   console.warn(`[WS] Dispatch stall account=${accId} - ${dispatchStallWatchdog.stallLimit} dispatches without result, probing socket ${probeId}`);

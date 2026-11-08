@@ -12,7 +12,7 @@ import {
   normalizeFilters
 } from '../utils/conversationFilters.js';
 import { sortDueReminders } from '../utils/reminderPresentation.js';
-import { isThreadActiveToday } from '../utils/threadActivity.js';
+import { isThreadActiveToday, sortThreadsByActivity } from '../utils/threadActivity.js';
 
 const THREAD_RENDER_BATCH_SIZE = 80;
 
@@ -112,7 +112,7 @@ export default function ConversationSidebar({
     });
 
     // Keep view membership intact, then promote due conversations with stable order.
-    return sortDueReminders(visibleThreads);
+    return sortDueReminders(sortThreadsByActivity(visibleThreads));
   }, [threads, dateRange, dateFilterIds, appliedFilters, activeTab, searchQuery]);
 
   const availableTagOptions = useMemo(() => getAvailableTagOptions(threads), [threads]);

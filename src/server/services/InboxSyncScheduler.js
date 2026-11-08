@@ -135,9 +135,9 @@ class InboxSyncScheduler {
         activeScanMode: null,
         activeScanReason: null,
         lastRealtimePreemptAt: 0,
-        // Sidebar discovery is opt-in. Manual/campaign sending remains online,
-        // while Inbox + Requests polling runs only inside a one-minute window.
-        syncEnabledUntil: 0,
+        // Sidebar discovery starts with an initial active window on registration
+        // so personal conversations sync immediately when an account connects.
+        syncEnabledUntil: Date.now() + 120000,
         syncWindowTimer: null,
         pendingRequestScan: false,
         lastResultAt: 0,
@@ -285,7 +285,7 @@ class InboxSyncScheduler {
     state.activeScanMode = null;
     state.activeScanReason = null;
     const extWs = this.getConnection?.(accId);
-    if (extWs?.readyState === 1) {
+    if (extWs?.readyState === 1 && reason !== 'window_expired') {
       extWs.send(JSON.stringify({ type: 'CANCEL_THREADS_SYNC', data: { account_id: accId, reason } }));
       extWs.send(JSON.stringify({ type: 'SET_SIDEBAR_SYNC_WINDOW', data: { account_id: accId, enabled: false, reason } }));
     }
@@ -435,7 +435,8 @@ class InboxSyncScheduler {
     }
 
     state.inFlight = true;
-    state.activeScanMode = scanMode || (reason === 'scheduler_realtime' || reason === 'register' ? 'realtime' : 'full');
+    const isRealtimeReason = reason === 'scheduler_realtime' || reason === 'scheduler_realtime_always_on';
+    state.activeScanMode = scanMode || (isRealtimeReason ? 'realtime' : 'full');
     state.activeScanReason = reason;
     state.pending = false;
     state.lastSidebarSyncAt = now;
@@ -453,7 +454,7 @@ class InboxSyncScheduler {
     extWs.send(JSON.stringify({ type: 'SYNC_THREADS', data: {
       account_id: accId,
       reason,
-      scan_mode: scanMode || (reason === 'scheduler_realtime' || reason === 'register' ? 'realtime' : 'full'),
+      scan_mode: scanMode || (isRealtimeReason ? 'realtime' : 'full'),
       resume: reason === 'crm_continue',
       // Requests must visit both the Possible and Spam surfaces. Facebook can
       // spend tens of seconds mounting either lazy sidebar, so keep this job

@@ -53,7 +53,7 @@ class AssignmentManager {
       LEFT JOIN conversation_reminders r ON r.thread_id = t.id AND r.status = 'active'
       LEFT JOIN (
         SELECT thread_id, MAX(timestamp_ms) AS max_ts
-        FROM messages WHERE timestamp_ms > 0 GROUP BY thread_id
+        FROM messages WHERE timestamp_ms > 0 AND timestamp_ms <= ${Date.now() + 60000} GROUP BY thread_id
       ) lm ON lm.thread_id = t.id
     `;
     const params = [];
@@ -114,7 +114,8 @@ class AssignmentManager {
     // last_activity chỉ là fallback khi thread chưa có tin - nó bị sync/seen/
     // mở hội thoại bump mà không có tin mới khiến sidebar nhảy loạn (đo
     // 2026-10-11: 12 thread bị bump trong 11 giây, gap tới 496 giờ).
-    query += " ORDER BY CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 ELSE 1 END ASC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN COALESCE(t.pinned_at, '9999') ELSE '' END DESC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 WHEN COALESCE(t.is_unread, 0) = 1 OR COALESCE(t.unread_manual, 0) = 1 THEN 0 ELSE 1 END ASC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 ELSE COALESCE(NULLIF(lm.max_ts, 0), CAST(strftime('%s', t.last_activity) AS INTEGER) * 1000) END DESC, t.id DESC";
+    const sortStartOfTodayMs = new Date().setHours(0, 0, 0, 0);
+    query += ` ORDER BY CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 ELSE 1 END ASC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN COALESCE(t.pinned_at, '9999') ELSE '' END DESC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 WHEN COALESCE(t.is_unread, 0) = 1 AND (COALESCE(t.unread_manual, 0) = 1 OR COALESCE(NULLIF(lm.max_ts, 0), CAST(strftime('%s', t.last_activity) AS INTEGER) * 1000) >= ${sortStartOfTodayMs}) THEN 0 ELSE 1 END ASC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 ELSE COALESCE(NULLIF(lm.max_ts, 0), CAST(strftime('%s', t.last_activity) AS INTEGER) * 1000) END DESC, t.id DESC`;
     const rows = this.db.prepare(query).all(...params);
     ConversationRepository.attachRealActivity(rows, this.db);
 

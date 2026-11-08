@@ -1483,7 +1483,7 @@ const migrations = [
     // cũ: lead 'queued' -> thread hạ về tab "Tin nhắn chờ" (folder
     // MESSAGE_REQUEST_*), lead 'failed' -> xóa thread nếu chưa có tin incoming
     // nào (khách từng nhắn thật thì giữ nguyên hội thoại).
-    version: 20261014001,
+    version: 20261014003,
     name: 'comment_lead_thread_after_send_only',
     // Chủ ý xóa thread lead lỗi (chưa từng có hội thoại thật) — không được
     // để guard "reduced persisted row counts" chặn startup.

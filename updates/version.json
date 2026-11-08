@@ -1,0 +1,8 @@
+{
+  "version": "1.0.21",
+  "releasedAt": "2026-11-07T04:31:31.989Z",
+  "notes": "Sửa lỗi hội thoại ở hộp thư chính bị đẩy nhầm sang Tin nhắn chờ khi mở tab Tin nhắn chờ",
+  "requiresRestart": true,
+  "sizeBytes": 3085241,
+  "sha256": "ac6f1537d2a5316bb2e68000bb69feedf489d1dbccaa04be6f0dcae8b9ff6bdc"
+}

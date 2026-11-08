@@ -29,6 +29,11 @@ const SYSTEM_PATTERNS = [
   // thành tin của khách mỗi lần initial sweep mở thread (reproduce 2026-10-07).
   /^Messages and calls are secured with end-to-end encryption\.?$/i,
   /^Messages and calls are end-to-end encrypted\.?$/i,
+  /^Bạn đang phản hồi bình luận của người dùng về bài viết trên\b/i,
+  /^You are replying to a user(?:'s)? comment on a post on\b/i,
+  /^[^\n]{1,80}\s+đã trả lời một quảng cáo\.?$/i,
+  /^[^\n]{1,80}\s+replied to an ad\.?$/i,
+  /^Tác nhân AI sẽ phản hồi\.?$/i,
   // Nhãn phân cách thời gian dạng tắt khi Messenger UI tiếng Anh ("9w",
   // "2d", "5h", "3m"...) - separator, không phải tin nhắn
   // (reproduce 2026-10-07: "9w" thành bubble rác trong hội thoại).
@@ -153,6 +158,10 @@ const SYSTEM_PATTERNS = [
   // Banner quảng cáo ghim đỉnh hội thoại lead + chip bật AI (harvest orphan
   // dễ nhặt nhầm - 2026-09-28)
   /^Đoạn chat này chứa tin trả lời quảng cáo/i,
+  /^Bạn đang phản hồi bình luận của người dùng về bài viết trên\b/i,
+  /^You are replying to a user(?:'s)? comment on a post on\b/i,
+  /^[^\n]{1,80}\s+đã trả lời một quảng cáo\.?$/i,
+  /^[^\n]{1,80}\s+replied to an ad\.?$/i,
   /^Bật tính năng phản hồi bằng AI$/i,
   /^Xem quảng cáo$/i,
   /^Người gửi:?$/i,
@@ -231,7 +240,12 @@ const SYSTEM_CONVERSATION_NOTICE_PATTERNS = [
   // Notice E2EE (bản tiếng Anh) - bộ heal sidebar (server.js SYNC_THREADS_RESULT)
   // cần nhận ra nó để gỡ unread sai cho thread chưa có tin khách thật.
   /^Messages and calls are secured with end-to-end encryption\.?$/i,
-  /^Messages and calls are end-to-end encrypted\.?$/i
+  /^Messages and calls are end-to-end encrypted\.?$/i,
+  /^Bạn đang phản hồi bình luận của người dùng về bài viết trên\b/i,
+  /^You are replying to a user(?:'s)? comment on a post on\b/i,
+  /^[^\n]{1,80}\s+đã trả lời một quảng cáo\.?$/i,
+  /^[^\n]{1,80}\s+replied to an ad\.?$/i,
+  /^Tác nhân AI sẽ phản hồi\.?$/i
 ];
 
 function isSystemConversationNotice(text) {
@@ -354,6 +368,7 @@ function isSidebarActivityNotification(text) {
 
 const INVALID_CONTACT_NAME_PATTERNS = [
   /^(?:Tất cả tin nhắn|Tất cả|All messages|All)$/i,
+  /^Khách hàng(?:\s*\([^)]*\))?$/i,
   /(?:Tất cả tin nhắn\s*){2,}/i,
   /(?:All messages\s*){2,}/i,
   /(?:Hộp thư đến\s*){2,}/i,
@@ -397,9 +412,12 @@ function isInvalidContactName(name) {
 
 function cleanContactName(rawName, fallback = 'Khách hàng') {
   if (!rawName || typeof rawName !== 'string') return fallback;
-  const trimmed = rawName.trim();
-  if (isInvalidContactName(trimmed)) return fallback;
-  return trimmed;
+  const stripped = rawName
+    .replace(/(?:Tin nhắn chưa đọc|Unread messages?)\s*:[\s\S]*$/iu, '')
+    .replace(/\s*[·•]\s*(?:\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y)(?:\s*(?:trước|ago))?|bây giờ|just now|vừa xong|hôm qua|yesterday)\s*$/iu, '')
+    .trim();
+  if (isInvalidContactName(stripped)) return fallback;
+  return stripped;
 }
 
 // 2026-09-29: Business Suite vẽ dòng attribution "Người gửi: <agent>" bên dưới

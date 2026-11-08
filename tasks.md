@@ -168,3 +168,22 @@
   2. Kiểm tra mức tiêu thụ RAM (< 1.5GB cho toàn bộ ứng dụng).
   3. Kiểm tra tính năng đồng bộ tin nhắn, tìm kiếm FTS5, Broadcast và AI Auto-Pause.
 - **Xác minh:** Toàn bộ tính năng hoạt động không phát sinh lỗi, đạt đầy đủ tiêu chí trong Specification (`spec.md`).
+
+---
+
+## 🚀 SPRINT 6: SỬA LỖI ĐỒNG BỘ HỘI THOẠI USER & NGĂN CHROME RÁC KHI MỞ APP
+
+### Task 6.1: Khắc phục xung đột Migration DB (`src/server/database/db.js`)
+- [x] Đổi version migration `comment_lead_thread_after_send_only` thành `20261014003` để tránh lỗi `UNIQUE constraint failed: migrations.version`.
+
+### Task 6.2: Ngăn Chrome Rác Mở khi Khởi động App (`src/server/services/ProcessManager.js`, `src/server/server.js`)
+- [x] Bổ sung `hasValidFacebookProfile` và export `resolveAccountProfileDir` trong `ProcessManager.js`.
+- [x] Dọn dẹp tài khoản mồ côi (`owner_user_id IS NULL`) không có profile hợp lệ và dừng các tiến trình Chrome mồ côi ngay khi `startServer()`.
+- [x] Tắt cơ chế tự động bật cửa sổ Chrome hàng loạt cho mọi tài khoản `DISCONNECTED`/chưa đăng nhập trong `autoReconnectTimer` khi mở app.
+
+### Task 6.3: Khắc phục lỗi Không Đồng bộ Hội thoại User (`src/extension/background.js`, `src/server/server.js`, `src/server/services/InboxSyncScheduler.js`)
+- [x] Sửa `handleSync100Threads` trong `src/extension/background.js`: bỏ vòng lặp reload `/messages` khi đang ở `/messages/t/...`, ưu tiên quét `inboxTarget` (`INBOX`) trước `requestsTab`, và thêm fallback tab cho chế độ `realtime`.
+- [x] Sửa `waitForPendingSetupCompletion` trong `src/extension/background.js`: không chặn hoàn tất đăng ký khi chưa mở composer.
+- [x] Sửa `REGISTER_ACCOUNT` trong `src/server/server.js` và `InboxSyncScheduler.js`: không gửi `SET_SIDEBAR_SYNC_WINDOW: { enabled: false }` khi vừa kết nối, tự động mở cửa sổ sync và kích hoạt `SYNC_THREADS` (`full`) để đồng bộ hội thoại cá nhân ngay lập tức.
+- [x] Cập nhật `hideChromeWindowFromScreen` trong `ProcessManager.js` để giữ Chromium render DOM khi chạy ngầm.
+

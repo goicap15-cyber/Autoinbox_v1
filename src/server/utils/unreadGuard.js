@@ -49,6 +49,10 @@ class HintUnreadTracker {
     this.prev = new Map();
   }
 
+  wasUnread(key) {
+    return this.prev.get(key) === true;
+  }
+
   flip(key, currentUnread, hasRecentEvidence = true) {
     const now = Number(currentUnread) === 1;
     const has = this.prev.has(key);

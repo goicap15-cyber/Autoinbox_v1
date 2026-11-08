@@ -140,6 +140,10 @@ function isBareVietnamMobileText(text) {
     // Banner quảng cáo ghim đỉnh hội thoại lead + chip bật AI (harvest orphan
     // dễ nhặt nhầm - 2026-09-28)
     /^Đoạn chat này chứa tin trả lời quảng cáo/i,
+    /^Bạn đang phản hồi bình luận của người dùng về bài viết trên\b/i,
+    /^You are replying to a user(?:'s)? comment on a post on\b/i,
+    /^[^\n]{1,80}\s+đã trả lời một quảng cáo\.?$/i,
+    /^[^\n]{1,80}\s+replied to an ad\.?$/i,
     /^Bật tính năng phản hồi bằng AI$/i,
     /^Xem quảng cáo$/i,
   /^Người gửi:?$/i,

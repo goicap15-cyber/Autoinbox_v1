@@ -4,6 +4,16 @@ const fs = require('fs');
 const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
+const Module = require('module');
+
+// Cho phép gói hot-update nằm ngoài app.asar nạp trực tiếp node_modules bên trong app.asar
+const asarNodeModules = path.join(__dirname, '../node_modules');
+const origNodeModulePaths = Module._nodeModulePaths;
+Module._nodeModulePaths = function (from) {
+  const paths = origNodeModulePaths.call(this, from);
+  if (!paths.includes(asarNodeModules)) paths.push(asarNodeModules);
+  return paths;
+};
 
 const instanceToken = crypto.randomUUID();
 process.env.CRM_INSTANCE_TOKEN = instanceToken;
@@ -183,7 +193,16 @@ app.on('second-instance', () => {
 });
 
 app.whenReady().then(async () => {
-  if (!hasSingleInstanceLock) {
+  const isRelaunchAfterUpdate = process.argv.includes('--relaunch-after-update');
+  if (isRelaunchAfterUpdate) {
+    // Chờ tiến trình cũ nhả hẳn cổng 5050 tối đa 6 giây sau khi cập nhật nóng
+    const waitStart = Date.now();
+    while (Date.now() - waitStart < 6000) {
+      const stillBusy = await isBackendPortBusy(5050, 500);
+      if (!stillBusy) break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  } else if (!hasSingleInstanceLock) {
     const portBusy = await isBackendPortBusy(5050);
     if (portBusy) {
       appendDesktopLog('[startup] CRM đã chạy sẵn (cổng 5050 bận) - thoát bản vừa mở.');
@@ -194,12 +213,38 @@ app.whenReady().then(async () => {
   }
   app.userAgentFallback = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 FB-CRM-Desktop';
   appendDesktopLog(`[startup] app=${app.getVersion()} packaged=${app.isPackaged} resources=${process.resourcesPath}`);
-  // Start Backend Express/WebSocket Server
+  // Start Backend Express/WebSocket Server (ưu tiên bản hot-update nếu đã tải về)
   try {
+    const hotUpdateDir = process.resourcesPath ? path.join(process.resourcesPath, 'hot-update') : '';
+    const hotUpdateServer = hotUpdateDir ? path.join(hotUpdateDir, 'dist', 'server', 'index.js') : '';
     const distServer = path.join(__dirname, '../dist/server/index.js');
     const srcServer = path.join(__dirname, 'server/index.js');
 
-    if (fs.existsSync(distServer)) {
+    let useHotUpdate = Boolean(hotUpdateServer && fs.existsSync(hotUpdateServer));
+    if (useHotUpdate) {
+      try {
+        const verFile = path.join(hotUpdateDir, 'version.json');
+        if (fs.existsSync(verFile)) {
+          const hotVer = String(JSON.parse(fs.readFileSync(verFile, 'utf8'))?.version || '0.0.0').replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+          const appVer = String(app.getVersion() || '0.0.0').replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+          for (let i = 0; i < 3; i++) {
+            if ((hotVer[i] || 0) > (appVer[i] || 0)) break;
+            if ((hotVer[i] || 0) < (appVer[i] || 0)) {
+              useHotUpdate = false;
+              appendDesktopLog(`[startup] Removing outdated hot-update (${hotVer.join('.')} < ${appVer.join('.')})`);
+              try { fs.rmSync(hotUpdateDir, { recursive: true, force: true }); } catch (_) {}
+              break;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (useHotUpdate) {
+      console.log('[Electron] Loading hot-updated server from resources/hot-update/dist/server/index.js');
+      appendDesktopLog(`[startup] Loading hot-update server: ${hotUpdateServer}`);
+      backendRuntime = require(hotUpdateServer);
+    } else if (fs.existsSync(distServer)) {
       console.log('[Electron] Loading compiled server from dist/server/index.js');
       backendRuntime = require(distServer);
     } else if (fs.existsSync(srcServer)) {

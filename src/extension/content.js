@@ -484,10 +484,13 @@
   function extractCurrentFacebookAccountName(userId, scripts) {
     const safeUserId = String(userId || '').replace(/[^0-9]/g, '');
     if (!safeUserId) return '';
+    // Chỉ đọc tên trong đúng object CurrentUserInitialData / cùng 1 JSON object phẳng (không vượt qua dấu { hoặc })
+    // để tránh bắt nhầm tên Fanpage / tên đoạn chat (ví dụ Kjgvkj) nằm ở phần sau của thẻ <script>.
     const patterns = [
-      new RegExp(`"ACCOUNT_ID":"${safeUserId}"[\\s\\S]{0,1200}?"NAME":"((?:\\\\.|[^"\\\\])*)"`),
-      new RegExp(`"USER_ID":"${safeUserId}"[\\s\\S]{0,1200}?"NAME":"((?:\\\\.|[^"\\\\])*)"`),
-      new RegExp(`"NAME":"((?:\\\\.|[^"\\\\])*)"[\\s\\S]{0,500}?"ACCOUNT_ID":"${safeUserId}"`)
+      new RegExp(`"CurrentUserInitialData",[\\s\\S]{0,120}?\\{[^{}]*?"ACCOUNT_ID":"${safeUserId}"[^{}]{0,600}?"NAME":"((?:\\\\.|[^"\\\\])*)"`),
+      new RegExp(`"CurrentUserInitialData",[\\s\\S]{0,120}?\\{[^{}]*?"USER_ID":"${safeUserId}"[^{}]{0,600}?"NAME":"((?:\\\\.|[^"\\\\])*)"`),
+      new RegExp(`"ACCOUNT_ID":"${safeUserId}"[^{}\\]\\[]{0,400}?"NAME":"((?:\\\\.|[^"\\\\])*)"`),
+      new RegExp(`"NAME":"((?:\\\\.|[^"\\\\])*)"[^{}\\]\\[]{0,300}?"ACCOUNT_ID":"${safeUserId}"`)
     ];
     for (const script of scripts || []) {
       const source = script.textContent || '';
@@ -504,10 +507,9 @@
     const safeUserId = String(userId || '').replace(/[^0-9]/g, '');
     if (!safeUserId) return '';
     const patterns = [
-      new RegExp(`"ACCOUNT_ID":"${safeUserId}"[\\s\\S]{0,1800}?"PROFILE_PICTURE_URI":"((?:\\\\.|[^"\\\\])*)"`),
-      new RegExp(`"USER_ID":"${safeUserId}"[\\s\\S]{0,1800}?"PROFILE_PICTURE_URI":"((?:\\\\.|[^"\\\\])*)"`),
-      new RegExp(`"ACCOUNT_ID":"${safeUserId}"[\\s\\S]{0,1800}?"profile_picture":\\{"uri":"((?:\\\\.|[^"\\\\])*)"`),
-      new RegExp(`"PROFILE_PICTURE_URI":"((?:\\\\.|[^"\\\\])*)"[\\s\\S]{0,700}?"ACCOUNT_ID":"${safeUserId}"`)
+      new RegExp(`"ACCOUNT_ID":"${safeUserId}"[^{}\\]\\[]{0,800}?"PROFILE_PICTURE_URI":"((?:\\\\.|[^"\\\\])*)"`),
+      new RegExp(`"USER_ID":"${safeUserId}"[^{}\\]\\[]{0,800}?"PROFILE_PICTURE_URI":"((?:\\\\.|[^"\\\\])*)"`),
+      new RegExp(`"PROFILE_PICTURE_URI":"((?:\\\\.|[^"\\\\])*)"[^{}\\]\\[]{0,500}?"ACCOUNT_ID":"${safeUserId}"`)
     ];
     for (const script of scripts || []) {
       const source = script.textContent || '';
@@ -518,31 +520,23 @@
         if (/^https?:\/\//i.test(candidate) && candidate.length <= 4096) return candidate;
       }
     }
-    const accountAvatarSelectors = [
-      '[aria-label*="profile" i] img, [aria-label*="profile" i] image',
-      '[aria-label*="account" i] img, [aria-label*="account" i] image',
-      '[aria-label*="trang cá nhân" i] img, [aria-label*="trang cá nhân" i] image',
-      '[aria-label*="tài khoản" i] img, [aria-label*="tài khoản" i] image',
-      '[role="banner"] img, [role="banner"] image',
-      '[role="navigation"] img, [role="navigation"] image'
-    ];
-    for (const selector of accountAvatarSelectors) {
-      for (const node of document.querySelectorAll(selector)) {
-        const candidate = String(
-          node.currentSrc || node.src || node.href?.baseVal
-          || node.getAttribute?.('href') || node.getAttribute?.('xlink:href') || ''
-        ).trim();
-        if (/^https?:\/\//i.test(candidate) && candidate.length <= 4096) return candidate;
-      }
-    }    return '';
+    return '';
   }
   // Every facebook.com tab re-runs extraction every 3s. Reporting identical
   // tokens each tick made the background SW see name/avatar "changes" (tabs
   // scrape different profile-picture variants) and re-register the account
   // forever - server measured REGISTER_ACCOUNT every ~3s, 3000+ per session.
   let lastReportedTokens = '';
+  function isFacebookLoginSurface() {
+    try {
+      const p = String(window.location.pathname || '').toLowerCase();
+      if (/^\/(?:login|login\.php|recover|checkpoint|reg|r\.php)(?:\/|$)/i.test(p)) return true;
+      if (document.querySelector('input[name="pass"][type="password"], form[action*="/login"] input[type="password"]')) return true;
+    } catch (_) {}
+    return false;
+  }
   function reportTokens(fb_dtsg, user_id) {
-    if (!user_id) return;
+    if (!user_id || isFacebookLoginSurface()) return;
     try {
       if (chrome?.runtime?.id) {
         if (chrome?.storage?.local) {
@@ -1385,12 +1379,10 @@
           is_outgoing = false;
           sender_name = contactNameStr || 'Khách hàng';
           direction_evidence = 'geometry';
-          obsDebug({ stage: 'GEOMETRY_DECISIVE', thread: String(extractThreadIdFromUrl() || ''), side: 'left', centers: decisiveCenters.join(','), rt: isRealtime ? 1 : 0, content: String(rawText || '').substring(0, 30) });
         } else if (sawDecisiveRight && !sawDecisiveLeft) {
           is_outgoing = true;
           sender_name = 'Bạn';
           direction_evidence = 'geometry';
-          obsDebug({ stage: 'GEOMETRY_DECISIVE', thread: String(extractThreadIdFromUrl() || ''), side: 'right', centers: decisiveCenters.join(','), rt: isRealtime ? 1 : 0, content: String(rawText || '').substring(0, 30) });
         }
       }
     }

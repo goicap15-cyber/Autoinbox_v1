@@ -18,6 +18,28 @@ const PhoneCaptureService = require('./PhoneCaptureService');
 const { extractLeadInfo } = require('../utils/leadExtractor');
 const { saveAvatarFromBase64OrUrl } = require('../utils/avatarManager');
 const { isKnownPageSystemNotice } = require('../utils/pageSystemNotice');
+const { isSystemOrMetadataText } = require('../utils/textFilter');
+
+function alignPageThreadFromStoredMessages(threadId, database) {
+  const latestStored = database.prepare(`
+    SELECT content, media_type, timestamp_ms
+    FROM messages
+    WHERE thread_id = ?
+      AND (fb_message_id IS NULL OR fb_message_id NOT LIKE 'sidebar_preview_%')
+    ORDER BY COALESCE(timestamp_ms, 0) DESC, id DESC
+    LIMIT 1
+  `).get(threadId);
+  if (!latestStored) return false;
+  const previewText = (latestStored.content && String(latestStored.content).trim())
+    ? String(latestStored.content).trim().substring(0, 200)
+    : (latestStored.media_type && latestStored.media_type !== 'text' ? '[Đính kèm]' : null);
+  return ConversationRepository.alignThreadActivity(
+    threadId,
+    previewText,
+    Number(latestStored.timestamp_ms) || 0,
+    database
+  );
+}
 const GlobalPhoneAutomationService = require('./GlobalPhoneAutomationService');
 const CampaignPhoneCaptureService = require('./CampaignPhoneCaptureService');
 const CampaignResponseStatsService = require('./CampaignResponseStatsService');
@@ -643,11 +665,12 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
 
         for (const msg of (msgData.data || []).reverse()) {
           await enrichAttachmentUrls(msg, token, database);
-          const inserted = insertGraphMessage(thread.id, source, msg, database, { markUnread: true, io });
+          const inserted = insertGraphMessage(thread.id, source, msg, database, { markUnread: false, io });
           if (inserted != null) insertedNew++;
           else if (backfillMediaUrlOnExistingRow(msg, database)) insertedNew++;
         }
-        const lastMsg = (msgData.data || [])[0];
+        alignPageThreadFromStoredMessages(thread.id, database);
+        const lastMsg = null;
         if (lastMsg) {
           ConversationRepository.alignThreadActivity(
             thread.id,
@@ -858,7 +881,18 @@ function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}
     else if (mime.startsWith('audio/')) { mediaType = 'voice'; mediaUrl = att.audio_url; }
     else { mediaType = 'file'; mediaUrl = att.file_url; }
   }
-  const ts = msg.created_time ? new Date(msg.created_time).getTime() : Date.now();
+  const rawTs = msg.created_time ? new Date(msg.created_time).getTime() : Date.now();
+  const ts = (Number.isFinite(rawTs) && rawTs > 0) ? Math.min(rawTs, Date.now() + 60000) : Date.now();
+  const trimmedText = text ? String(text).trim() : '';
+  if (!mediaUrl && (!trimmedText || isKnownPageSystemNotice(trimmedText) || isSystemOrMetadataText(trimmedText))) return null;
+  if (isOutgoing && text) {
+    const existingPending = database.prepare("SELECT id, fb_message_id, delivery_status FROM messages WHERE thread_id = ? AND is_outgoing = 1 AND content = ? AND ABS(COALESCE(timestamp_ms, 0) - ?) <= 300000 AND (fb_message_id LIKE 'pending_%' OR fb_message_id LIKE 'dom_%' OR delivery_status != 'sent') ORDER BY (delivery_status = 'pending') DESC, id DESC LIMIT 1").get(threadId, text, ts);
+    if (existingPending) {
+      const wasUnsent = existingPending.delivery_status !== 'sent';
+      database.prepare("UPDATE messages SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL WHERE id = ?").run(messageId, existingPending.id);
+      return wasUnsent ? existingPending.id : null;
+    }
+  }
 
   // Thông báo hệ thống của Meta (handover AI agent...): webhook echo đẩy về
   // như tin Page gửi (outgoing) — không phải tin thật, không lưu (guard WS
@@ -909,6 +943,8 @@ function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}
   // KHÔNG đánh dấu - import page không làm unread hàng loạt.
   if (shouldMarkUnread) {
     database.prepare("UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?").run(threadId);
+  } else if (isOutgoing && ts >= startOfTodayMs()) {
+    database.prepare("UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?").run(threadId);
   }
 
   // Webhook event có thể về TRỄ (poll 5s + latency Meta) — tin gửi trước đang
@@ -1189,7 +1225,13 @@ function processMessagingEvent(event, source, io, database) {
   const contactPsid = isOutgoing ? String(event.recipient?.id || '') : senderPsid;
   if (!contactPsid) return null;
   const text = message.text || '';
-  const ts = Number(event.timestamp || Date.now());
+  const rawEventTs = Number(event.timestamp || Date.now());
+  const ts = (Number.isFinite(rawEventTs) && rawEventTs > 0) ? Math.min(rawEventTs, Date.now() + 60000) : Date.now();
+  const hasWebhookAtt = Array.isArray(message.attachments) && message.attachments.some((a) => a && a.payload && a.payload.url);
+  const trimmedWebhookText = String(text || '').trim();
+  if (!hasWebhookAtt && (!trimmedWebhookText || isKnownPageSystemNotice(trimmedWebhookText) || isSystemOrMetadataText(trimmedWebhookText))) {
+    return null;
+  }
 
   // B2: tra cache ấm trước — watcher/warm đã ghim thread cũ t_<conv> cho psid
   // này thì tin đổ thẳng vào thread cũ, không tạo twin psid nữa. Cache trượt
@@ -1199,6 +1241,10 @@ function processMessagingEvent(event, source, io, database) {
     ? ConversationRepository.getThread(pageThreadCache.get(cacheKey), database)
     : null;
   if (cachedThread && String(cachedThread.source_id || '') !== String(source.id)) cachedThread = null;
+  if (!cachedThread) {
+    const bySender = database.prepare("SELECT t.id, t.source_id, t.account_id, COALESCE(t.external_thread_id, t.id) AS external_thread_id FROM threads t JOIN messages m ON m.thread_id = t.id WHERE t.source_id = ? AND m.sender_id = ? ORDER BY m.id DESC LIMIT 1").get(source.id, contactPsid);
+    if (bySender) { cachedThread = bySender; rememberPageThread(source.id, contactPsid, bySender.id); }
+  }
 
   // Đa page / đa account: cùng một khách có thể nhắn NHIỀU page (thậm chí
   // qua account khác) — thread bare psid đã tồn tại ở nguồn KHÁC thì buộc
@@ -1225,8 +1271,8 @@ function processMessagingEvent(event, source, io, database) {
     source_id: source.id,
     external_thread_id: externalThreadId,
     contact_name: null,
-    last_message: (text || '[Đính kèm]').substring(0, 200),
-    is_unread: isOutgoing ? 0 : 1,
+    last_message: (trimmedWebhookText || (hasWebhookAtt ? '[Đính kèm]' : '')).substring(0, 200) || null,
+    is_unread: isOutgoing ? 0 : undefined,
   }, database);
   if (!thread) return null;
   rememberPageThread(source.id, contactPsid, thread.id);
@@ -1282,7 +1328,7 @@ function processMessagingEvent(event, source, io, database) {
       audio_url: a.payload?.url || null,
       file_url: a.payload?.url || null,
     })) } : undefined,
-  }, database, { senderId: senderPsid, io });
+  }, database, { senderId: senderPsid, markUnread: !isOutgoing, io });
 
   if (insertId == null) return null; // trùng mid — đã có
 
@@ -1299,6 +1345,8 @@ function processMessagingEvent(event, source, io, database) {
   console.log('[PageApi] 💬 Tin Page mới: mid=' + message.mid + ' thread=' + thread.id + ' page=' + pageId + (isEcho ? ' (echo)' : ''));
   if (io) {
     io.emit('NEW_MESSAGE', messageData);
+    const allThreadMsgs = database.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY COALESCE(sequence_order, id) ASC, id ASC').all(thread.id);
+    io.emit('THREAD_MESSAGES_UPDATED', { thread_id: thread.id, account_id: thread.account_id || source.owner_account_id || null, messages: allThreadMsgs, authoritative: true });
     io.emit('THREAD_LIST_UPDATED', { thread_id: thread.id, account_id: thread.account_id });
   }
   return messageData;
@@ -1356,7 +1404,7 @@ function ensurePageThread(source, contactPsid, contactName, database, { convId }
   if (linked) {
     const incomingName = String(contactName || '').trim();
     database.prepare(
-      'UPDATE threads SET contact_name = COALESCE(?, contact_name), is_unread = 0 WHERE id = ?'
+      'UPDATE threads SET contact_name = COALESCE(?, contact_name) WHERE id = ?'
     ).run(incomingName && incomingName !== 'Khách hàng' ? incomingName : null, linked.id);
     const linkedThread = ConversationRepository.getThread(linked.id, database);
     if (!linkedThread) return null;
@@ -1458,13 +1506,30 @@ async function watchPageConversations(source, io, database) {
       if (msgData.error) { failed++; watcherLog('kéo tin conv ' + conv.id + ' LỖI: ' + (msgData.error.message || '')); continue; }
       const thread = ensurePageThread(source, psid, participant?.name || null, database, { convId: conv.id });
       if (!thread) { failed++; watcherLog('conv ' + conv.id + ': ensurePageThread trả null (psid=' + psid + ')'); continue; }
-      for (const msg of (msgData.data || []).reverse()) {
+      let convInserted = 0; for (const msg of (msgData.data || []).reverse()) {
         await enrichAttachmentUrls(msg, token, database);
         const id = insertGraphMessage(thread.id, source, msg, database, { markUnread: true, io });
-        if (id != null) insertedNew++;
-        else if (backfillMediaUrlOnExistingRow(msg, database)) insertedNew++;
+        if (id != null) {
+          insertedNew++; convInserted++;
+          if (io) {
+            const savedRow = database.prepare('SELECT * FROM messages WHERE id = ?').get(id);
+            if (savedRow) io.emit('NEW_MESSAGE', { ...savedRow, thread_id: thread.id, account_id: thread.account_id || source.owner_account_id || null, source_id: source.id, source_type: 'page_messenger', source_name: source.display_name, page_id: String(source.external_id) });
+          }
+        } else if (backfillMediaUrlOnExistingRow(msg, database)) {
+          insertedNew++; convInserted++;
+          if (io && msg.id) {
+            const updatedRow = database.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(String(msg.id));
+            if (updatedRow) io.emit('NEW_MESSAGE', { ...updatedRow, thread_id: thread.id, account_id: thread.account_id || source.owner_account_id || null, source_id: source.id, source_type: 'page_messenger', source_name: source.display_name, page_id: String(source.external_id) });
+          }
+        }
       }
-      const lastMsg = (msgData.data || [])[0];
+      if (convInserted > 0 && io) {
+        const allThreadMsgs = database.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY COALESCE(sequence_order, id) ASC, id ASC').all(thread.id);
+        io.emit('THREAD_MESSAGES_UPDATED', { thread_id: thread.id, account_id: thread.account_id || source.owner_account_id || null, messages: allThreadMsgs, authoritative: true });
+        io.emit('THREAD_LIST_UPDATED', { thread_id: thread.id, account_id: thread.account_id || source.owner_account_id || null, new_messages: convInserted, page_id: source.external_id });
+      }
+      alignPageThreadFromStoredMessages(thread.id, database);
+      const lastMsg = null;
       if (lastMsg) {
         ConversationRepository.alignThreadActivity(
           thread.id,
