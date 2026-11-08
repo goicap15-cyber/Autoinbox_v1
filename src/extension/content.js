@@ -437,7 +437,7 @@
       setTimeout(() => videoBlobHydration.pending.delete(rid), 45000);
     } catch (_) {}
   }
-  const isDedicatedBackgroundTab = /(?:[?&])crm_tab_role=(?:history|discovery|requests|request_action)/i.test(window.location.search);
+  const isDedicatedBackgroundTab = /(?:[?&])crm_tab_role=(?:requests|request_action)\b/i.test(window.location.search);
   // Direction ledger: Messenger may replay a rendered outgoing bubble as an
   // incoming DOM row while React hydrates its aria metadata.
   const recentObservedOutgoing = new Map();
@@ -1188,7 +1188,7 @@
     }
 
     // Ã¢â€â‚¬Ã¢â€â‚¬ TÃƒÂ¬m tÃ¡ÂºÂ¥t cÃ¡ÂºÂ£ leaf bubbles Ã¢â€â‚¬Ã¢â€€
-    const searchRoot = isRealtime ? node : messageRow;
+    const searchRoot = messageRow || node;
     const allBubbles = searchRoot.querySelectorAll?.('div[dir="auto"], span[dir="auto"]');
     const leafBubbles = [];
     if (allBubbles && allBubbles.length > 0) {
@@ -1933,6 +1933,7 @@
   // ngay lập tức làm 2 renderer Chrome chạy ~100% CPU (reproduced 2026-09-18).
   // Gom mutation lại, xử lý tối đa mỗi 250ms — độ trễ không đáng kể với sync.
   let crmChatObserverBatch = null;
+  const pendingDeferredIncomingIds = new Set();
   const chatObserver = new MutationObserver((mutations) => {
     if (isDedicatedBackgroundTab) return;
     if (crmChatObserverBatch) {
@@ -1944,7 +1945,7 @@
       const batch = crmChatObserverBatch;
       crmChatObserverBatch = null;
       try { processChatMutations(batch); } catch (_) {}
-    }, 250);
+    }, 80);
   });
 
   // Forward một quan sát bubble về background -> backend. Tách riêng để đường
@@ -2225,31 +2226,24 @@
           markObservedOutgoing(thread_id, parsed.content);
           return;
         }
-        lastObservedMessages.set(fbMessageId, observationSignature);
-        bubbleFamilyTracker.markSeen(verdict.key);
-        if (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
-
-        const tsMs = parseLabelTimestampMs(parsed.effective_label, resolveDividerDateMs(parsed.dom_anchor || row));
-        const tsSource = tsMs ? 'facebook_label' : 'realtime_fallback';
-
         if (parsed.is_outgoing) markObservedOutgoing(thread_id, parsed.content);
 
-        // Row CHƯA có native id (React hydrate trễ): đợi ~1.5s rồi đọc lại đúng
+        // Row CHƯA có native id (React hydrate trễ): đợi ~200ms rồi đọc lại đúng
         // node đó - nếu mid thật đã gắn thì forward bằng mid (server tự khớp,
-        // hết nhân đôi khi mở thread); vẫn không có thì forward bản dom_ như cũ.
+        // hết nhân đôi khi mở thread); vẫn không có thì forward bản dom_ ngay.
+        // KHÔNG gọi lastObservedMessages.set(fbMessageId) trước khi defer vì sẽ
+        // khiến điều kiện trong timeout thấy đã observed và drop mất tin khách!
         if (!parsed.is_outgoing && !parsed.native_id && !parsed.media_url
           && (!parsed.media_type || parsed.media_type === 'text')) {
+          if (pendingDeferredIncomingIds.has(fbMessageId)) return;
+          pendingDeferredIncomingIds.add(fbMessageId);
           setTimeout(() => {
+            pendingDeferredIncomingIds.delete(fbMessageId);
             try {
               let toForward = parsed;
               let idToUse = fbMessageId;
               let positionToUse = domPosition;
               let deferredVerdict = null;
-              // Re-parse đúng article của bong bóng này (parsed.dom_anchor),
-              // KHÔNG re-parse mutation root: root chứa 2 tin giống nhau đã
-              // khiến find() trả bubble #1 cho CẢ HAI timer - lần forward thứ
-              // hai dùng lại id của tin đầu và server gộp cặp tin thành 1 row
-              // (reproduce 2026-10-08: nhắn "alo" 2 lần chỉ còn 1).
               const rereadScope = parsed.dom_anchor || node;
               const rereadAll = parseMessagesFromDOMNode(rereadScope, true);
               const rereadContentMatch = (item) => !item.is_outgoing
@@ -2273,15 +2267,22 @@
               if (deferredVerdict && deferredVerdict.duplicate) return;
               if (lastObservedMessages.get(idToUse) !== deferredSignature) {
                 lastObservedMessages.set(idToUse, deferredSignature);
-                bubbleFamilyTracker.markSeen(deferredVerdict ? deferredVerdict.key : null);
+                lastObservedMessages.set(fbMessageId, observationSignature);
+                bubbleFamilyTracker.markSeen(deferredVerdict ? deferredVerdict.key : verdict.key);
                 forwardIncomingDomObservation(thread_id, toForward, idToUse, contactAvatar, positionToUse);
               }
             } catch (_) {
-              try { forwardIncomingDomObservation(thread_id, parsed, fbMessageId, contactAvatar, domPosition); } catch (_) {}
+              try {
+                lastObservedMessages.set(fbMessageId, observationSignature);
+                forwardIncomingDomObservation(thread_id, parsed, fbMessageId, contactAvatar, domPosition);
+              } catch (_) {}
             }
-          }, 1500);
+          }, 200);
           return;
         }
+        lastObservedMessages.set(fbMessageId, observationSignature);
+        bubbleFamilyTracker.markSeen(verdict.key);
+        if (lastObservedMessages.size > 2000) lastObservedMessages.delete(lastObservedMessages.keys().next().value);
         forwardIncomingDomObservation(thread_id, parsed, fbMessageId, contactAvatar, domPosition);
       });
     });
@@ -2300,17 +2301,21 @@
       || document.querySelector('div[role="main"] [role="log"]');
     if (!log) return;
     const rows = Array.from(log.querySelectorAll('div[role="row"], div[role="article"]')).slice(-24);
-    for (const row of rows) {
+    const tailThresholdIdx = Math.max(0, rows.length - 6);
+    for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+      const row = rows[rowIdx];
+      const isTailRow = rowIdx >= tailThresholdIdx;
       const rowParsed = parseMessagesFromDOMNode(row, true);
       const rowVerdicts = bubbleFamilyTracker.resolveBatch(toTrackerItems(thread_id, rowParsed));
       for (let parsedIdx = 0; parsedIdx < rowParsed.length; parsedIdx++) {
         const parsed = rowParsed[parsedIdx];
         const verdict = rowVerdicts[parsedIdx];
         markDomOccurrence(parsed, row);
-        // Tail reconciliation is hydration recovery, so require Facebook's
-        // durable identity. Virtualized history without a native id can remount
-        // after our own video send and must never become a new CRM message.
-        if (!parsed.native_id) continue;
+        const allowSyntheticIncomingTail = !parsed.is_outgoing
+          && isTailRow
+          && (Date.now() - lastThreadAttachAt) > 2500
+          && !pendingDeferredIncomingIds.has(verdict.id);
+        if (!parsed.native_id && !allowSyntheticIncomingTail) continue;
         const parsedText = String(parsed.content || '').toLocaleLowerCase('vi-VN');
         const isCallRow = /(?:cu?c g?i|nh?|b? l?|audio call|video call|missed call|call ended)/i.test(parsedText);
         const isMediaRow = Boolean(parsed.media_url || (parsed.media_type && parsed.media_type !== 'text'));
@@ -2396,7 +2401,7 @@
   observerPaused = false;
   // 250ms đốt CPU liên tục trên trang đông mutation (reproduced 2026-09-18:
 // 2 renderer Chrome ~100%/lõi). 1500ms vẫn đủ nhanh cho việc đối chiếu.
-setInterval(reconcileLatestIncomingMessages, 1500);
+setInterval(reconcileLatestIncomingMessages, 700);
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Call Log Scanner Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€€
   // Quét span[dir="auto"] chÃ¡Â»Â©a text cuÃ¡Â»â„¢c gÃ¡Â»Âi mÃ¡Â»â€”i 2 giÃƒÂ¢y.

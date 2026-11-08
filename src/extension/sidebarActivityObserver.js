@@ -183,7 +183,7 @@
     // Trần gửi 1.2s: đợt mutation dồn dập không được bắn từng cái một; thay
     // đổi thật vẫn được bảo toàn nhờ timer đuổi cuối đợt.
     const now = Date.now();
-    const waitMs = 1200 - (now - lastEmitAt);
+    const waitMs = 350 - (now - lastEmitAt);
     if (waitMs > 0) {
       if (!trailingTimer) {
         trailingTimer = setTimeout(() => { trailingTimer = null; emitIfChanged(); }, waitMs);
@@ -238,7 +238,7 @@
   document.addEventListener('visibilitychange', schedule);
   document.addEventListener('pointerdown', onPointerDown, true);
   document.addEventListener('click', schedule, true);
-  const fallbackTimer = setInterval(emitIfChanged, 500);
+  const fallbackTimer = setInterval(emitIfChanged, 400);
   globalThis.__FB_CRM_SIDEBAR_ACTIVITY_OBSERVER__ = {
     disconnect() {
       observer.disconnect();

@@ -1977,7 +1977,7 @@ function relaySidebarActivityThreads(threads, origin, observedAt = 0) {
   }));
   const relaySig = lightweightThreads.map((t) => `${t.thread_id}|${t.is_unread ? 1 : 0}|${t.user_read_on_fb ? 1 : 0}|${t.last_message || ''}|${t.row_time_text || ''}`).join('\n');
   const prevRelay = lastHintRelaySig.get(user_id);
-  if (prevRelay && prevRelay.sig === relaySig && Date.now() - prevRelay.at < 8000) return false;
+  if (prevRelay && prevRelay.sig === relaySig && Date.now() - prevRelay.at < 2500) return false;
   lastHintRelaySig.set(user_id, { sig: relaySig, at: Date.now() });
   sendToBackend('SYNC_THREADS_RESULT', {
     account_id: user_id,
@@ -2191,7 +2191,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // allowAnyFbTab=true: bat ky tab facebook.com nao cung duoc coi la interaction (cho call events)
   async function resolveSenderTabRole(senderTab, allowAnyFbTab, allowIncomingRealtime = false) {
     await loadTabRegistry();
-    if (senderTab?.id && manualHistoryTabOwners.has(senderTab.id)) return 'history';
+    if (senderTab?.id && manualHistoryTabOwners.has(senderTab.id)) return 'history_scrolling';
     let senderRole = FbCrmMessengerTabRoles.roleForTab([...tabRegistry.entries()], user_id, senderTab?.id);
     if (!senderRole && senderTab?.id) {
       var tabUrl = senderTab.url || senderTab.pendingUrl || '';
@@ -9048,12 +9048,13 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     sendToBackend('THREAD_MESSAGES_SYNCED', { account_id: targetAcc, thread_id, messages: [], reason: 'navigation_superseded', mode, cursor });
     return;
   }
-  const manualHistoryOwner = usesVisibleCrmTab ? navigationToken?.sequence : null;
-  if (usesVisibleCrmTab) manualHistoryTabOwners.set(tab.id, manualHistoryOwner);
+  const isScrollingOlderHistory = mode === 'older' || Number(scroll_delta) > 0 || bulkHistorySyncInFlight;
+  const manualHistoryOwner = isScrollingOlderHistory ? (navigationToken?.sequence || Date.now()) : null;
+  if (isScrollingOlderHistory && manualHistoryOwner != null) manualHistoryTabOwners.set(tab.id, manualHistoryOwner);
   const lastCrmThreadId = usesVisibleCrmTab ? String(crmHistoryThreadByTab.get(tab.id) || '') : '';
   const forceCleanViewport = usesVisibleCrmTab && Boolean(lastCrmThreadId) && lastCrmThreadId !== navigationThreadId;
   const releaseManualHistoryOwner = () => {
-    if (usesVisibleCrmTab && manualHistoryTabOwners.get(tab.id) === manualHistoryOwner) {
+    if (manualHistoryOwner != null && manualHistoryTabOwners.get(tab.id) === manualHistoryOwner) {
       manualHistoryTabOwners.delete(tab.id);
     }
   };
@@ -9962,6 +9963,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         const messages = [];
         const boundaryIds = new Set([cursor?.newest_message_id, cursor?.oldest_message_id].filter(Boolean));
         const occurrencesMap = {};
+        const nativeIdCounts = new Map();
         const seenBubblesInPass = new Set();
 
         // ── Composer/UI exclusion (tuyệt đối không lấy text từ vùng soạn tin/header/nav/sidebar) ──
@@ -10447,9 +10449,18 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
 
             const identityKey = `${targetThreadId}|${dirKey}|${textHash}`;
             const labelHash = stringHash(currentLabel || String(tsMs));
-            // Same text may be sent repeatedly in the same minute. The per-pass
-            // occurrence is stable in DOM order and keeps each physical bubble.
-            const deterministicId = nativeId || `dom_${targetThreadId}_hash_${textHash}_${labelHash}_${dirKey}_occ_${occIndex}`;
+            // Same text may be sent repeatedly in the same minute, and a single
+            // article [data-message-id] can hold several consecutive bubbles.
+            // Suffix subsequent bubbles in the same nativeId family with __bubble_N
+            // so history sync never drops consecutive messages sharing one wrapper.
+            let deterministicId;
+            if (nativeId) {
+              const nativeOcc = nativeIdCounts.get(nativeId) || 0;
+              nativeIdCounts.set(nativeId, nativeOcc + 1);
+              deterministicId = nativeOcc === 0 ? nativeId : `${nativeId}__bubble_${nativeOcc}`;
+            } else {
+              deterministicId = `dom_${targetThreadId}_hash_${textHash}_${labelHash}_${dirKey}_occ_${occIndex}`;
+            }
 
             if (!messages.some(m => m.fb_message_id === deterministicId)) {
               // Preserve Facebook DOM order for messages with the same minute.

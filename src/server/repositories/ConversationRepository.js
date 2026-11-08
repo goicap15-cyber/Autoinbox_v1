@@ -753,46 +753,36 @@ class ConversationRepository {
           const bubbleFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
           const bubbleFamilyBase = bubbleFamilyId.length >= 12
             ? database.prepare(`
-                SELECT id, content, media_url FROM messages
+                SELECT id, content, media_url, sender_name FROM messages
                 WHERE thread_id = ? AND fb_message_id = ?
                 LIMIT 1
               `).get(threadId, bubbleFamilyId)
             : null;
           if (bubbleFamilyBase) {
-            if (content && String(bubbleFamilyBase.content || '').trim() !== String(content).trim()) {
-              database.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, bubbleFamilyBase.id);
-            }
-            if (mediaUrl && !bubbleFamilyBase.media_url) {
-              database.prepare('UPDATE messages SET media_url = ? WHERE id = ?').run(mediaUrl, bubbleFamilyBase.id);
-            }
-            result.skippedCount += 1;
-            continue;
-          }
-          if (bubbleFamilyId.length >= 12) {
-            if (pendingBubbleMerges.has(bubbleFamilyId)) {
-              const stash = pendingBubbleMerges.get(bubbleFamilyId);
-              if (!stash.content && content) stash.content = content;
-              if (!stash.mediaUrl && mediaUrl) stash.mediaUrl = mediaUrl;
+            const baseText = String(bubbleFamilyBase.content || '').trim();
+            const incomingText = String(content || '').trim();
+            const baseSender = String(bubbleFamilyBase.sender_name || senderName || '').trim();
+            const isBaseEmptyOrSenderHeader = !baseText
+              || (baseSender && baseText.toLowerCase() === baseSender.toLowerCase());
+            if (baseText === incomingText || isBaseEmptyOrSenderHeader) {
+              if (incomingText && baseText !== incomingText) {
+                database.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, bubbleFamilyBase.id);
+              }
+              if (mediaUrl && !bubbleFamilyBase.media_url) {
+                database.prepare('UPDATE messages SET media_url = ? WHERE id = ?').run(mediaUrl, bubbleFamilyBase.id);
+              }
               result.skippedCount += 1;
               continue;
             }
-            if (batchBaseIds.has(bubbleFamilyId)) {
-              // Base cùng batch nhưng chưa xử lý xong: hoãn bubble lại, giải
-              // quyết sau vòng lặp khi base đã nằm trong DB (hoặc đã bị guard bỏ).
-              pendingBubbleMerges.set(bubbleFamilyId, {
-                content, mediaUrl, mediaType,
-                senderId,
-                isOutgoing,
-                timestampMs: observedTimestampMs,
-                timestampSource: observedTimestampSource,
-                createdAt: observedCreatedAt
-              });
-              continue;
-            }
+            // Nếu bubbleFamilyBase đã chứa nội dung tin nhắn thật KHÁC với
+            // incomingText, đây là bong bóng thứ N thật trong cùng article
+            // mid.$X -> giữ nguyên stableId (mid.$X__bubble_N) để không mất tin!
+          } else if (bubbleFamilyId.length >= 12 && !batchBaseIds.has(bubbleFamilyId)) {
             // Không có base đâu cả (DB lẫn batch): bubble đầu tiên làm đại
-            // diện dưới id base - observation sau (base hoặc bubble khác) tự
-            // khớp existing thay vì insert row thứ hai.
+            // diện dưới id base, đồng thời đánh dấu vào batchBaseIds để các
+            // bubble tiếp theo trong cùng article giữ nguyên __bubble_2, __bubble_3.
             stableId = bubbleFamilyId;
+            batchBaseIds.add(bubbleFamilyId);
           }
         }
         // Otid thuần số + out=0: đối xứng guard WS — otid do client MÌNH sinh
@@ -815,6 +805,40 @@ class ConversationRepository {
           if (midOwnerRow && midOwnerRow.thread_id !== threadId) {
             stableId = `${stableId}::${threadId}`;
             existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+          } else if (existing && mediaType === 'text' && !mediaUrl && content) {
+            // Cùng threadId + cùng stableId nhưng nội dung text KHÁC nhau hoàn toàn
+            // (do nhiều bong bóng liên tiếp trong 1 article dùng chung data-message-id):
+            // tách sang slot __bubble_N để không ghi đè mất bong bóng trước đó.
+            const existingText = String(existing.content || '').trim();
+            const newText = String(content || '').trim();
+            const existingSender = String(existing.sender_name || senderName || '').trim();
+            const isExistingSenderHeader = existingSender && existingText.toLowerCase() === existingSender.toLowerCase();
+            if (existingText && newText && existingText !== newText && !isExistingSenderHeader
+              && !/^sidebar_preview_|^pending_/.test(String(stableId))) {
+              const baseFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
+              const likeEsc = baseFamilyId.replace(/[_%]/g, (c) => `\\${c}`);
+              const sameTextInFamily = database.prepare(`
+                SELECT fb_message_id FROM messages
+                WHERE thread_id = ?
+                  AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+                  AND TRIM(COALESCE(content, '')) = ?
+                LIMIT 1
+              `).get(threadId, baseFamilyId, `${likeEsc}__bubble_%`, newText);
+              if (sameTextInFamily) {
+                stableId = sameTextInFamily.fb_message_id;
+                existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+              } else {
+                for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
+                  const candidateBubbleId = `${baseFamilyId}__bubble_${bIdx}`;
+                  const slotTaken = database.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateBubbleId);
+                  if (!slotTaken) {
+                    stableId = candidateBubbleId;
+                    existing = null;
+                    break;
+                  }
+                }
+              }
+            }
           }
         }
         let promotedSidebarPreview = false;

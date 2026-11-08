@@ -3829,7 +3829,46 @@ wss.on('connection', (ws, req) => {
           // jGrG__bubble_2 + __bubble_3 trong thread Hai Anh). Bỏ qua cả hai
           // chiều trôi (suffix->thuần và thuần->suffix); id khớp EXACT thì
           // để luồng INSERT IGNORE/squat-heal phía dưới xử lý như cũ.
-          const existingStableMessage = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+          let existingStableMessage = db.prepare('SELECT id, thread_id, content, sender_name, media_type, media_url FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+          // Nếu stableMessageId đã tồn tại trong CÙNG thread nhưng mang nội dung
+          // text thật KHÁC (2 bong bóng liên tiếp trong cùng article chia sẻ
+          // data-message-id), cấp hậu tố __bubble_N để không bị INSERT OR IGNORE nuốt mất!
+          if (existingStableMessage
+            && String(existingStableMessage.thread_id) === String(m.thread_id)
+            && (!m.media_type || m.media_type === 'text') && !m.media_url
+            && String(m.content || '').trim()
+            && !/^sidebar_preview_|^pending_/.test(String(stableMessageId))) {
+            const existTxt = String(existingStableMessage.content || '').trim();
+            const incomingTxt = String(m.content || '').trim();
+            const existSender = String(existingStableMessage.sender_name || m.member_name || m.sender_name || '').trim();
+            const isExistSenderHeader = existSender && existTxt.toLowerCase() === existSender.toLowerCase();
+            if (existTxt && incomingTxt && existTxt !== incomingTxt && !isExistSenderHeader) {
+              const baseFamId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+              const escFam = baseFamId.replace(/[_%]/g, (c) => `\\${c}`);
+              const existingSameText = db.prepare(`
+                SELECT id, fb_message_id, thread_id, content, sender_name, media_type, media_url
+                FROM messages
+                WHERE thread_id = ?
+                  AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+                  AND TRIM(COALESCE(content, '')) = ?
+                LIMIT 1
+              `).get(m.thread_id, baseFamId, `${escFam}__bubble_%`, incomingTxt);
+              if (existingSameText) {
+                stableMessageId = existingSameText.fb_message_id;
+                existingStableMessage = existingSameText;
+              } else {
+                for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
+                  const candidateId = `${baseFamId}__bubble_${bIdx}`;
+                  const taken = db.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateId);
+                  if (!taken) {
+                    stableMessageId = candidateId;
+                    existingStableMessage = null;
+                    break;
+                  }
+                }
+              }
+            }
+          }
           if (!existingStableMessage && !m.client_message_id) {
             const driftFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
             const likeEscaped = driftFamilyId.replace(/[_%]/g, (c) => `\\${c}`);
@@ -5060,14 +5099,23 @@ wss.on('connection', (ws, req) => {
                 // (bất kỳ chiều, không phải provisional) không bao giờ là tin
                 // mới. 100 tin gần nhất đủ che mọi text lặp ngắn ("ok", "dạ").
                 const recentRealMessages = db.prepare(`
-                  SELECT content FROM messages
+                  SELECT content, timestamp_ms FROM messages
                   WHERE thread_id = ? AND fb_message_id NOT LIKE 'sidebar_preview_%'
                   ORDER BY COALESCE(timestamp_ms, 0) DESC
                   LIMIT 100
                 `).all(canonicalThreadId);
                 const normalizedPreview = normalizePreviewText(previewContent);
+                // Khi chấm xanh chưa đọc trên FB vừa lật (unread_flipped=true),
+                // tin ngắn lặp lại ("ok", "dạ", "alo") là tin MỚI thật trừ khi
+                // tin mới nhất trong 15s vừa qua đã có sẵn nội dung đó.
                 const normalizedDupe = normalizedPreview
-                  ? recentRealMessages.some((m) => normalizePreviewText(m.content) === normalizedPreview)
+                  ? (changed.unread_flipped
+                    ? Boolean(
+                        recentRealMessages[0]
+                        && normalizePreviewText(recentRealMessages[0].content) === normalizedPreview
+                        && (Date.now() - Number(recentRealMessages[0].timestamp_ms || 0)) < 15000
+                      )
+                    : recentRealMessages.some((m) => normalizePreviewText(m.content) === normalizedPreview))
                   : false;
                 if (!normalizedDupe) {
                 const previewPersistence = ConversationRepository.saveMessagesTransaction(canonicalThreadId, [{
@@ -5202,19 +5250,14 @@ wss.on('connection', (ws, req) => {
                 }
               }
 
-              if (changed.page_id) {
-                // 2026-10-03: chỉ job Page còn được điều hướng từ hint (lane
-                // Page dùng tab Business Suite riêng). Job cá nhân bỏ hẳn - tab
-                // history cá nhân chỉ di chuyển theo operator (click/kéo);
-                // preview + bump đã chạy ở trên, nội dung đầy đủ sync khi click
-                // (crm_navigation) hoặc khi hội thoại đang mở ở tab chat.
+              if (changed.page_id || changed.media_only_hint) {
                 InboxSyncScheduler.enqueueThreadSync({
                   ...changed,
                   thread_id: canonicalThreadId,
                   reason: 'sidebar_incoming',
-                allow_navigation: true,
-                priority: 'high',
-                sync_mode: 'incremental'
+                  allow_navigation: true,
+                  priority: 'high',
+                  sync_mode: 'incremental'
                 });
               }
             }

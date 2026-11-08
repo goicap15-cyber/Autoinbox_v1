@@ -1,8 +1,8 @@
 {
-  "version": "1.0.22",
-  "releasedAt": "2026-11-08T06:31:40.135Z",
-  "notes": "Sửa triệt để lỗi nhân đôi ảnh và nhân đôi tin nhắn khi gửi trên Messenger cá nhân",
+  "version": "1.0.23",
+  "releasedAt": "2026-11-08T06:56:54.797Z",
+  "notes": "Tăng tốc đồng bộ tin nhắn khách realtime và sửa triệt để lỗi thiếu tin nhắn cũ/mới",
   "requiresRestart": true,
-  "sizeBytes": 3085777,
-  "sha256": "975d4b42212e00f0909af147a888f3682a19a77ddd0306ccb6d00a2318e4959d"
+  "sizeBytes": 3086877,
+  "sha256": "e9a15ead3adf7d8f8f2d9758462cd7c3e6fd174ac6f8e440245da4fc9e7444e8"
 }
