@@ -1746,7 +1746,7 @@ function connectWebSocket() {
                 console.log(`[FB Engine] [PAGE_NAV_LOCK] Business Suite tab for page=${pid} locked to thread=${tid}`);
               } else if (String(message.data?.reason || '') === 'crm_navigation') {
                 userNavigationLockThreadId = String(message.data?.thread_id || '');
-                userNavigationLockUntil = Date.now() + 30000;
+                userNavigationLockUntil = Date.now() + 8000;
                 if (bulkHistorySyncInFlight) {
                   bulkHistorySyncAbortRequested = true;
                   console.log('[FB Engine] [BULK_HISTORY] Abort requested by user-click navigation.');
@@ -7451,6 +7451,13 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
           const discovered = resume ? new Map(sectionCheckpoint.threads) : new Map();
           let roundsWithoutNew = 0;
           const maxDiscoveryRounds = isRealtimeRequestScan && target.requestSection ? 12 : (isRealtimeScan ? 1 : 60);
+          if (isRealtimeInboxScan && !target.requestSection) {
+            await chrome.scripting.executeScript({
+              target: { tabId: target.tab.id },
+              func: moveMessengerDiscoverySidebar,
+              args: ['restore']
+            }).catch(() => {});
+          }
           for (let round = 0; round < maxDiscoveryRounds && discovered.size < 500; round += 1) {
             if (Date.now() >= deadline || discoverySyncCancelledAccounts.has(accountKey)) {
               budgetExpired = Date.now() >= deadline;
@@ -7526,10 +7533,11 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
               }
             }
             // Send new threads immediately to backend so CRM UI updates live
-            // Stream Inbox for fast UI feedback. Requests are held until the
-            // final cross-folder dedupe so a stale request surface can never
-            // temporarily move normal conversations into the waiting tab.
-            const shouldStreamBatch = (target.inboxFolder || 'INBOX') === 'INBOX'
+            // Stream Inbox for fast UI feedback during multi-round full scans.
+            // Single-round realtime Inbox scans emit once at the end of the round
+            // so the partial frame cannot consume previousThread.last_message /
+            // hintUnreadTracker before the final frame arrives.
+            const shouldStreamBatch = (!isRealtimeInboxScan && (target.inboxFolder || 'INBOX') === 'INBOX')
               || (isRealtimeRequestScan && Boolean(target.requestSection));
             if (newBatch.length > 0 && shouldStreamBatch) {
               sendToBackend('SYNC_THREADS_RESULT', {
@@ -7542,8 +7550,10 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
                   contact_name: t.name || t.contact_name,
                   last_message: t.last_message,
                   is_unread: t.is_unread,
+                  user_read_on_fb: t.user_read_on_fb === true,
                   is_like: t.is_like === true,
                   preview_is_outgoing: t.preview_is_outgoing === true,
+                  row_time_text: t.row_time_text || '',
                   avatar_url: t.avatar_url || null,
                   avatar_base64: t.avatar_base64 || null,
                   thread_url: t.thread_url || null,
@@ -7562,117 +7572,10 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
             checkpoint.sections.set(sectionKey, sectionCheckpoint);
             checkpoint.updated_at = Date.now();
             console.log('[FB Engine] [DISCOVERY] account=' + account_id + ' round=' + (round + 1) + ' total=' + discovered.size + ' visible=' + visible.length);
-            // 2026-10-16: bỏ break "scans each selected button once" cho quét
-            // requests nền - nó khiến list chỉ đọc đúng 1 màn hình, user không
-            // bao giờ thấy khách nằm dưới (reproduce: list Spam dài chỉ thấy
-            // vài row đầu). Requests giờ dùng chung vòng cuộn bên dưới như
-            // quét full: cuộn từng viewport, dừng khi list cạn.
-            // Messenger virtualizes the list and often pauses at the bottom of
-            // the currently loaded chunk. Give it several load windows before
-            // deciding that the real end has been reached.
             if (isRealtimeInboxScan && !target.requestSection) {
-              // The old realtime branch stopped before moveMessengerDiscoverySidebar,
-              // then the cleanup below restored the list to the top. It could
-              // therefore rescan only the first visible conversations forever.
-              // Advance exactly one viewport per lightweight tick; keep that
-              // position for the next tick and cycle back to the saved top at
-              // the real end of the sidebar.
-              const realtimeMove = await chrome.scripting.executeScript({
-                target: { tabId: target.tab.id },
-                func: moveMessengerDiscoverySidebar,
-                args: ['step']
-              }).catch(() => []);
-              let realtimeMoveState = realtimeMove?.[0]?.result || {};
-              if (!realtimeMoveState.moved && !realtimeMoveState.atEnd && realtimeMoveState.point) {
-                // Some Messenger builds ignore programmatic scrollTop on their
-                // virtual list and react only to a trusted wheel. Reuse the
-                // existing CDP input adapter strictly as a no-movement fallback.
-                const trustedSidebarWheel = await dispatchTrustedHistoryWheel(
-                  target.tab.id,
-                  realtimeMoveState.point,
-                  Math.max(420, Number(realtimeMoveState.maxTop || 0) > 0 ? 720 : 520)
-                );
-                if (trustedSidebarWheel.success) {
-                  await delay(700);
-                  const trustedMoveProbe = await chrome.scripting.executeScript({
-                    target: { tabId: target.tab.id },
-                    func: (beforeTop) => {
-                      const scroller = document.querySelector('[data-crm-discovery-scroller="true"]');
-                      if (!scroller) return { found: false, moved: true, atEnd: false, trusted: true };
-                      const afterTop = Number(scroller.scrollTop || 0);
-                      const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-                      return {
-                        found: true,
-                        moved: afterTop !== Number(beforeTop || 0),
-                        before: Number(beforeTop || 0),
-                        after: afterTop,
-                        maxTop,
-                        scrollHeight: scroller.scrollHeight,
-                        clientHeight: scroller.clientHeight,
-                        atEnd: maxTop > 0 && afterTop >= maxTop - 20,
-                        trusted: true
-                      };
-                    },
-                    args: [Number(realtimeMoveState.before || 0)]
-                  }).then((rows) => rows?.[0]?.result).catch(() => null);
-                  realtimeMoveState = trustedMoveProbe || { ...realtimeMoveState, trusted: true };
-                }
-                console.log(`[FB Engine] [DISCOVERY_REALTIME] trusted_scroll=${!!trustedSidebarWheel.success} moved=${!!realtimeMoveState.moved}`);
-              }
-              if (realtimeMoveState.atEnd) {
-                const tailKey = accountKey + ':' + target.tab.id;
-                const previousTail = discoveryRealtimeTailStates.get(tailKey) || { stalls: 0, height: 0, signature: '' };
-                // Hold this bottom while Messenger resolves its lazy loader,
-                // then step again. A temporary chunk boundary must never send
-                // the conversation list straight back to the top.
-                await delay(1400);
-                const tailProbeRows = await chrome.scripting.executeScript({
-                  target: { tabId: target.tab.id },
-                  func: moveMessengerDiscoverySidebar,
-                  args: ['step']
-                }).catch(() => []);
-                const tailProbe = tailProbeRows?.[0]?.result || {};
-                const oldHeight = Math.max(
-                  Number(realtimeMoveState.scrollHeight || 0),
-                  Number(previousTail.height || 0)
-                );
-                const grew = Number(tailProbe.scrollHeight || 0) > oldHeight + 2
-                  || Number(tailProbe.maxTop || 0) > Number(realtimeMoveState.maxTop || 0) + 2
-                  || (tailProbe.tailSignature && tailProbe.tailSignature !== (realtimeMoveState.tailSignature || previousTail.signature));
-                const advanced = grew || tailProbe.moved || tailProbe.atEnd === false;
-                if (advanced) {
-                  discoveryRealtimeTailStates.set(tailKey, {
-                    stalls: 0,
-                    height: Number(tailProbe.scrollHeight || realtimeMoveState.scrollHeight || 0),
-                    signature: tailProbe.tailSignature || realtimeMoveState.tailSignature || ''
-                  });
-                  console.log('[FB Engine] [DISCOVERY_REALTIME] Lazy-load grew; keeping current sidebar position.');
-                  await delay(450);
-                } else {
-                  const stalls = Number(previousTail.stalls || 0) + 1;
-                  discoveryRealtimeTailStates.set(tailKey, {
-                    stalls,
-                    height: Number(tailProbe.scrollHeight || realtimeMoveState.scrollHeight || 0),
-                    signature: tailProbe.tailSignature || realtimeMoveState.tailSignature || previousTail.signature || ''
-                  });
-                  if (stalls >= 3) {
-                    await chrome.scripting.executeScript({
-                      target: { tabId: target.tab.id },
-                      func: moveMessengerDiscoverySidebar,
-                      args: ['restore']
-                    }).catch(() => {});
-                    discoveryRealtimeTailStates.delete(tailKey);
-                    console.log('[FB Engine] [DISCOVERY_REALTIME] Stable sidebar end confirmed; cycling to top.');
-                  } else {
-                    console.log('[FB Engine] [DISCOVERY_REALTIME] Waiting at lazy-load tail confirmation ' + stalls + '/3.');
-                  }
-                }
-              } else {
-                discoveryRealtimeTailStates.delete(accountKey + ':' + target.tab.id);
-                // Let React mount the next virtual page before the scheduler's
-                // following realtime tick reads it.
-                await delay(450);
-              }
+              // Giữ thanh cuộn sidebar luôn ở đầu danh sách (scrollTop = 0) trong
+              // chế độ quét realtime để toàn bộ tin nhắn mới của nhiều khách hàng
+              // nhảy lên đầu đều nằm trong vùng DOM đang mount và được bắt tức thì.
               break;
             }
             if (roundsWithoutNew >= 8) break;
@@ -8214,24 +8117,59 @@ function scrapeFacebookSidebar() {
           if (!bgM) continue;
           const bgAlpha = bgM[4] === undefined ? 1 : Number(bgM[4]);
           if (bgAlpha < 0.2) continue;
-          if (+bgM[3] >= 180 && +bgM[1] <= 90 && +bgM[2] >= 50 && +bgM[2] <= 170) { hasUnreadDot = true; break; }
+          if (+bgM[3] >= 175 && +bgM[1] <= 100 && +bgM[2] >= 40 && +bgM[2] <= 185) { hasUnreadDot = true; break; }
         }
       }
-      // 4. Lấy đoạn tin nhắn cuối
-      // "Trả lời?"... là span UI (nút/mENU trên row) chứ không phải tin nhắn —
-      // snippet thật trống (media/poll) thì bỏ qua thay vì nhặt rác.
-      const SIDEBAR_SNIPPET_JUNK_RE = /^(?:trả\s*lời\s*\??|đang gõ(?: tin nhắn)?|đã xem(?: tin nhắn)?|đã nhìn(?: tin nhắn)?|xem tin nhắn|tin nhắn mới|gửi tin nhắn|hủy bỏ|đang gọi\W*)$/i;
-      const spans = rowContainer.querySelectorAll('span');
+      // 4. Lấy đoạn tin nhắn cuối & thời gian relative
+      const SIDEBAR_SNIPPET_JUNK_RE = /^(?:trả\s*lời\s*\??|đang gõ(?: tin nhắn)?|đã xem(?: tin nhắn)?|đã nhìn(?: tin nhắn)?|xem tin nhắn|tin nhắn mới|gửi tin nhắn|hủy bỏ|đang gọi\W*|tin nhắn chưa đọc\s*:?|unread messages?\s*:?)$/iu;
+      const SIDEBAR_TIME_LINE_RE = /^(?:bây giờ|just now|vừa xong|vài giây|a few seconds ago|hôm qua|yesterday|thứ\s+[a-zà-ỹ]+|chủ\s+nhật|mon|tue|wed|thu|fri|sat|sun|\d{1,2}:\d{2}|\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y|min|mins|hr|hrs|wk|yr)(?:\s*(?:trước|ago))?)$/iu;
+      const stripRowDecorations = (val) => String(val || '')
+        .replace(/^(?:Tin nhắn chưa đọc|Unread messages?)\s*:\s*/iu, '')
+        .replace(/\s*[·•]\s*(?:trả\s*lời\s*\??)\s*$/iu, '')
+        .replace(/\s*[·•]\s*(?:bây giờ|just now|vừa xong|vài giây|a few seconds ago|hôm qua|yesterday|thứ\s+[a-zà-ỹ]+|chủ\s+nhật|mon|tue|wed|thu|fri|sat|sun|\d{1,2}:\d{2}|\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y|min|mins|hr|hrs|wk|yr)(?:\s*(?:trước|ago))?)(?:\s*[·•]?\s*trả\s*lời\s*\??)?\s*$/iu, '')
+        .replace(/^[\s\u00b7\u2022.\-|•·]+|[\s\u00b7\u2022.\-|•·]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      let row_time_text = '';
+      const inlineTimeMatch = rawContainerText.match(/[·•]\s*((?:bây giờ|just now|vừa xong|vài giây|a few seconds ago|hôm qua|yesterday|thứ\s+[a-zà-ỹ]+|chủ\s+nhật|mon|tue|wed|thu|fri|sat|sun|\d{1,2}:\d{2}|\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y|min|mins|hr|hrs|wk|yr)(?:\s*(?:trước|ago))?))(?=\s|$|\n|[·•])/iu);
+      if (inlineTimeMatch) {
+        row_time_text = inlineTimeMatch[1].trim().slice(0, 24);
+      }
+
+      const spans = rowContainer.querySelectorAll('span, div[dir="auto"]');
       let last_message = '';
       for (const span of spans) {
-        const txt = span.textContent.trim();
-        const isSeparatorJunk = /^[\s\u00b7\u2022.\-|•·]+$/.test(txt);
-        if (txt && !isSeparatorJunk && txt !== name && !txt.includes(name) && !isSystemText(txt) && !SIDEBAR_SNIPPET_JUNK_RE.test(txt) && txt.length > 2 && txt.length < 200 && !/^\d+\s*(?:ngày|giờ|phút|năm|s|m|h|d|y)$/i.test(txt)) last_message = txt;
+        if (span.querySelector('span, div[dir="auto"]')) continue;
+        const rawSpanTxt = String(span.textContent || '').replace(/^[\s\u00b7\u2022.\-|•·]+|[\s\u00b7\u2022.\-|•·]+$/g, '').trim();
+        if (!rawSpanTxt) continue;
+        if (!row_time_text && rawSpanTxt.length <= 24 && SIDEBAR_TIME_LINE_RE.test(rawSpanTxt)) {
+          row_time_text = rawSpanTxt;
+          continue;
+        }
+        const txt = stripRowDecorations(rawSpanTxt);
+        if (!txt) continue;
+        if (SIDEBAR_TIME_LINE_RE.test(txt) || SIDEBAR_SNIPPET_JUNK_RE.test(txt) || PRESENCE_EXACT.test(txt)) continue;
+        if (txt === name || (name && txt.startsWith(name) && txt.length <= name.length + 2)) continue;
+        if (!isSystemText(txt) && txt.length >= 1 && txt.length < 200) {
+          last_message = (name && txt.startsWith(name) && txt.length > name.length)
+            ? stripRowDecorations(txt.slice(name.length)) || txt
+            : txt;
+        }
       }
-      // Dòng thời gian relative ("Bây giờ"/"1 phút"/"12:30"): server dùng làm
-      // bằng chứng tin vừa đến cho media thuần trên thread đã unread sẵn.
-      const SIDEBAR_TIME_LINE_RE = /^(?:bây giờ|just now|vừa xong|vài giây|a few seconds ago|hôm qua|yesterday|thứ [a-zà-ỹ]+|mon|tue|wed|thu|fri|sat|sun|\d{1,2}:\d{2}|\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y)(?:\s*(?:trước|ago))?)$/iu;
-      const row_time_text = (String(rowContainer.innerText || '').split(/\n+/).map((l) => l.trim()).reverse().find((l) => l && l.length <= 24 && SIDEBAR_TIME_LINE_RE.test(l)) || '');
+      if (!row_time_text) {
+        row_time_text = (rawContainerText.split(/\n+/).map((l) => l.replace(/^[\s\u00b7\u2022.\-|•·]+|[\s\u00b7\u2022.\-|•·]+$/g, '').trim()).reverse().find((l) => l && l.length <= 24 && SIDEBAR_TIME_LINE_RE.test(l)) || '');
+      }
+      if (!last_message) {
+        const lineCandidates = rawContainerText
+          .replace(/((?:Tin nhắn chưa đọc|Unread messages?)\s*:)/giu, '\n$1\n')
+          .split(/\n+/)
+          .map(stripRowDecorations)
+          .filter((l) => l && l !== name && l.length >= 1 && l.length < 200 && !SIDEBAR_TIME_LINE_RE.test(l) && !SIDEBAR_SNIPPET_JUNK_RE.test(l) && !PRESENCE_EXACT.test(l) && !isSystemText(l));
+        if (lineCandidates.length > 0) {
+          last_message = lineCandidates[lineCandidates.length - 1];
+        }
+      }
 
       // Icon-only Like has no text preview and Facebook may omit the unread dot.
       // Sidebar rows contain no composer quick-like control, so the exact SVG title is safe evidence.
@@ -8242,7 +8180,7 @@ function scrapeFacebookSidebar() {
       // Hidden/background Messenger tabs may mark the open conversation read
       // before CRM sees it. Direction is therefore more reliable than unread:
       // Facebook prefixes our own sidebar previews with Bạn:/You:.
-      const preview_is_outgoing = /^(?:Bạn|You)\s*:/i.test(String(last_message || '').trim());
+      const preview_is_outgoing = /^(?:Bạn|Tôi|You)\s*:/iu.test(String(last_message || '').trim()) || /^(?:Bạn đã gửi|You sent)/iu.test(String(last_message || '').trim());
       // 5. Lấy Avatar chuẩn phạm vi row (thẻ img, SVG image, background-image)
       let avatar_url = null;
       let avatar_base64 = null;
@@ -8929,7 +8867,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   // Page dùng tab Business Suite riêng. Preview + bump tin khách đã chạy ở
   // server; nội dung đầy đủ sync khi operator click/kéo hoặc khi hội thoại
   // đang mở sẵn ở tab chat (observer bắt trực tiếp).
-  const pageOnlyReasons = new Set(['initial_sweep', 'sidebar_incoming']);
+  const pageOnlyReasons = new Set(['initial_sweep']);
   const baseReason = FbCrmMessengerTabRoles.stripSyncReasonSuffix(reason);
   if (!_history_tab_id && (allow_navigation !== true || !allowedReasons.has(baseReason)
     || (!page_id && pageOnlyReasons.has(baseReason)))) {
@@ -10637,6 +10575,9 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     return false;
   } finally {
     releaseManualHistoryOwner();
+    if (baseReason === 'crm_navigation' && userNavigationLockThreadId === String(thread_id || '')) {
+      userNavigationLockUntil = Math.min(userNavigationLockUntil, Date.now() + 1200);
+    }
     if (previousActiveTabId) {
       await chrome.tabs.update(previousActiveTabId, { active: true }).catch(() => null);
     }

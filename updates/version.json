@@ -1,8 +1,8 @@
 {
-  "version": "1.0.24",
-  "releasedAt": "2026-11-08T07:29:47.849Z",
-  "notes": "Sửa lỗi đồng bộ nhiều ảnh/video, chống đẩy nhầm ảnh khách sang phải và xoá nút Like ảo",
+  "version": "1.0.25",
+  "releasedAt": "2026-11-08T08:04:36.324Z",
+  "notes": "Tăng tốc độ bắt và đồng bộ tin nhắn tức thì khi nhiều khách hàng nhắn tin cùng lúc (Messenger cá nhân & Fanpage)",
   "requiresRestart": true,
-  "sizeBytes": 3085704,
-  "sha256": "b35e24977a0e33bd1c09d854abd91271d3a16a676cd2462b2a6fb1716d8fba0c"
+  "sizeBytes": 3082101,
+  "sha256": "8769241f589e7288c45e700aa5fafaf66ae51abfd7e62f4d4100433c1178dbd9"
 }
