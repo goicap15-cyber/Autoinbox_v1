@@ -1505,6 +1505,12 @@
       const bubbleText = cleanBubbleText(bubble.textContent);
       return !bubbleText || isClockMinuteFragment(bubbleText, effectiveLabel);
     });
+    // Some Messenger builds expose no semantic title for a received Like, but
+    // the message row still contains its SVG and a dir=auto timestamp minute.
+    // In that exact shape the minute (e.g. 55) must become the Like glyph.
+    // (merge v1.0.22-26: upstream rewrite dropped this line — restored, bg.js
+    // side vẫn giữ tại nhánh leafBubbles history-sync.)
+    if (!rowEmojiContent && hasOnlyClockFragments && messageRow.querySelector?.('svg')) rowEmojiContent = '👍';
     if (rowEmojiContent && (finalBubbles.length === 0 || hasOnlyClockFragments) && !isPhotoMessage && !isVideoMessage) {
       // Messenger gộp NHIỀU like/sticker giống nhau gửi liên tiếp vào MỘT
       // article - phải phát MỘT message cho TỪNG emoji, nếu không nửa số

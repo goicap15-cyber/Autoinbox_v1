@@ -50,8 +50,10 @@ test('Messenger-typed outgoing text passes all three gates when it has a real mi
   assert.equal(/&& !\/\^\(\?:dom_\|pending_\|history_\)\/\.test\(echoFamilyMid\)/.test(background), true);
   assert.equal(/&& !echoHasRealMid\s*\)/.test(background), true);
   // gate 3 - anti-ghost: dom_observer + mid thật -> khớp theo mid, không khớp nội dung
+  // (merge v1.0.22-26: upstream tách SQL thành nhánh mid-family + bare-snowflake,
+  // vẫn giữ is_outgoing = 1 làm điều kiện gốc)
   assert.equal(/const obsEchoHasRealMid = m\.source === 'dom_observer' && obsEchoMid/.test(server), true);
-  assert.equal(/AND is_outgoing = 1 AND fb_message_id = \?/.test(server), true);
+  assert.equal(/WHERE thread_id = \? AND is_outgoing = 1\s*\n\s*AND \(\s*\n\s*fb_message_id = \?/.test(server), true);
   // nhánh khớp nội dung 300s vẫn còn cho echo không có mid thật + page
   assert.equal(/AND datetime\(created_at\) >= datetime\('now', '-300 seconds'\)/.test(server), true);
 });

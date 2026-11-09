@@ -22,12 +22,17 @@ test('legacy personal and interaction keys map only to chat', () => {
   assert.equal(Roles.roleForTab([[Roles.roleKey('a1', 'interaction'), 8]], 'a1', 8), 'chat');
 });
 
-test('campaign, history and request tabs never forward realtime rows', () => {
-  for (const role of ['campaign', 'history', 'requests', 'request_action']) {
+test('campaign and request tabs never forward realtime rows; history forwards per upstream v1.0.23', () => {
+  for (const role of ['campaign', 'requests', 'request_action']) {
     assert.equal(Roles.canForwardRealtime(role), false);
     assert.equal(Roles.canForwardIncomingRealtime(role), false);
     assert.equal(Roles.canForwardCallRealtime(role), false);
   }
+  // merge v1.0.22-26: upstream cho tab history đứng yên nhận tin realtime
+  // (tab history đang cuộn dùng 'history_scrolling').
+  assert.equal(Roles.canForwardRealtime('history'), true);
+  assert.equal(Roles.canForwardIncomingRealtime('history'), true);
+  assert.equal(Roles.canForwardCallRealtime('history'), true);
 });
 
 test('only chat and discovery surfaces forward realtime events', () => {

@@ -73,6 +73,9 @@ class OutboundDomCorrelationService {
             OR fb_message_id LIKE 'dom_%'
             OR fb_message_id LIKE '%__bubble_%'
             OR (fb_message_id GLOB '[0-9]*' AND fb_message_id NOT LIKE '%@msgr.%')
+            -- CRM row đã được nâng lên mid thật (xác nhận bằng đường khác) vẫn
+            -- phải nhận _media echo muộn, không để thành row media đôi.
+            OR client_message_id IS NOT NULL
           )
           AND (attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))
         ORDER BY id DESC

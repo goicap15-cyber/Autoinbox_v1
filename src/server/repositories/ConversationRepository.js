@@ -992,7 +992,7 @@ class ConversationRepository {
           if (bubbleFamilyBase) {
             const baseText = String(bubbleFamilyBase.content || '').trim();
             const incomingText = String(content || '').trim();
-            const baseSender = String(bubbleFamilyBase.sender_name || senderName || '').trim();
+            const baseSender = String(bubbleFamilyBase.sender_name || memberName || '').trim();
             const isBaseEmptyOrSenderHeader = !baseText
               || (baseSender && baseText.toLowerCase() === baseSender.toLowerCase());
             if (baseText === incomingText || isBaseEmptyOrSenderHeader) {
@@ -1071,7 +1071,7 @@ class ConversationRepository {
             // tách sang slot __bubble_N để không ghi đè mất bong bóng trước đó.
             const existingText = String(existing.content || '').trim();
             const newText = String(content || '').trim();
-            const existingSender = String(existing.sender_name || senderName || '').trim();
+            const existingSender = String(existing.sender_name || memberName || '').trim();
             const isExistingSenderHeader = existingSender && existingText.toLowerCase() === existingSender.toLowerCase();
             if (existingText && newText && existingText !== newText && !isExistingSenderHeader
               && !/^sidebar_preview_|^pending_/.test(String(stableId))) {

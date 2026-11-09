@@ -27,6 +27,7 @@ test('T009: luồng xử lý PAGE_THREAD_MESSAGES_SYNCED_V1, ACK và idempotency
         content TEXT,
         media_type TEXT DEFAULT 'text',
         media_url TEXT,
+        attachment_id TEXT,
         is_outgoing BOOLEAN NOT NULL DEFAULT 0,
         sender_role TEXT DEFAULT 'customer',
         sequence_order INTEGER,

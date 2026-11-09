@@ -7,7 +7,7 @@ const CALL_TS = 1794125340000; // 2026-11-08, giờ thật của call row reprod
 
 function createDb() {
   const db = new Database(':memory:');
-  db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, fb_message_id TEXT UNIQUE, client_message_id TEXT, sender_id TEXT, sender_name TEXT, content TEXT, media_type TEXT, media_url TEXT, timestamp_ms INTEGER, timestamp_source TEXT, is_outgoing INTEGER, sender_role TEXT, sequence_order REAL, direction_status TEXT, created_at TEXT, reply_to_text TEXT)`);
+  db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, fb_message_id TEXT UNIQUE, client_message_id TEXT, sender_id TEXT, sender_name TEXT, content TEXT, media_type TEXT, media_url TEXT, attachment_id TEXT, timestamp_ms INTEGER, timestamp_source TEXT, is_outgoing INTEGER, sender_role TEXT, sequence_order REAL, direction_status TEXT, created_at TEXT, reply_to_text TEXT)`);
   return db;
 }
 

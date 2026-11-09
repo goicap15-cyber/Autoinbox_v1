@@ -120,5 +120,11 @@ test('fb-native mid.$ bubble re-render merges into its existing base row', () =>
     { fb_message_id: 'mid.$gAATFVsrbFr6nO46iHGhCkm20x_0V__bubble_2', sender_id: 'CONTACT', content: 'ok e', timestamp_ms: ts, is_outgoing: false, timestamp_source: 'facebook_label', source: 'facebook_label' }
   ], db);
   const rows = db.prepare('SELECT fb_message_id, content FROM messages ORDER BY id').all();
-  assert.deepEqual(rows, [{ fb_message_id: 'mid.$gAATFVsrbFr6nO46iHGhCkm20x_0V', content: 'ok e' }]);
+  // merge v1.0.22-26 (upstream v1.0.23 multi-bubble preserve): base giữ nội
+  // dung thật của nó; lá cùng article nhưng KHÁC text được giữ thành row riêng
+  // thay vì ghi đè mất một trong hai bubble.
+  assert.deepEqual(rows, [
+    { fb_message_id: 'mid.$gAATFVsrbFr6nO46iHGhCkm20x_0V', content: 'Mạnh Thiện' },
+    { fb_message_id: 'mid.$gAATFVsrbFr6nO46iHGhCkm20x_0V__bubble_1', content: 'ok e' }
+  ]);
 }));

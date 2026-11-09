@@ -5,7 +5,7 @@ const ConversationRepository = require('../../src/server/repositories/Conversati
 
 function createDb() {
   const db = new Database(':memory:');
-  db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, fb_message_id TEXT UNIQUE, client_message_id TEXT, sender_id TEXT, sender_name TEXT, content TEXT, media_type TEXT, media_url TEXT, timestamp_ms INTEGER, timestamp_source TEXT, is_outgoing INTEGER, sender_role TEXT, sequence_order REAL, direction_status TEXT, created_at TEXT, reply_to_text TEXT)`);
+  db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT, fb_message_id TEXT UNIQUE, client_message_id TEXT, sender_id TEXT, sender_name TEXT, content TEXT, media_type TEXT, media_url TEXT, attachment_id TEXT, timestamp_ms INTEGER, timestamp_source TEXT, is_outgoing INTEGER, sender_role TEXT, sequence_order REAL, direction_status TEXT, created_at TEXT, reply_to_text TEXT)`);
   return db;
 }
 
