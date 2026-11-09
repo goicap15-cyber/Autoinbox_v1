@@ -1746,7 +1746,7 @@ function connectWebSocket() {
                 console.log(`[FB Engine] [PAGE_NAV_LOCK] Business Suite tab for page=${pid} locked to thread=${tid}`);
               } else if (String(message.data?.reason || '') === 'crm_navigation') {
                 userNavigationLockThreadId = String(message.data?.thread_id || '');
-                userNavigationLockUntil = Date.now() + 30000;
+                userNavigationLockUntil = Date.now() + 8000;
                 if (bulkHistorySyncInFlight) {
                   bulkHistorySyncAbortRequested = true;
                   console.log('[FB Engine] [BULK_HISTORY] Abort requested by user-click navigation.');
@@ -1977,7 +1977,7 @@ function relaySidebarActivityThreads(threads, origin, observedAt = 0) {
   }));
   const relaySig = lightweightThreads.map((t) => `${t.thread_id}|${t.is_unread ? 1 : 0}|${t.user_read_on_fb ? 1 : 0}|${t.last_message || ''}|${t.row_time_text || ''}`).join('\n');
   const prevRelay = lastHintRelaySig.get(user_id);
-  if (prevRelay && prevRelay.sig === relaySig && Date.now() - prevRelay.at < 8000) return false;
+  if (prevRelay && prevRelay.sig === relaySig && Date.now() - prevRelay.at < 2500) return false;
   lastHintRelaySig.set(user_id, { sig: relaySig, at: Date.now() });
   sendToBackend('SYNC_THREADS_RESULT', {
     account_id: user_id,
@@ -2191,7 +2191,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // allowAnyFbTab=true: bat ky tab facebook.com nao cung duoc coi la interaction (cho call events)
   async function resolveSenderTabRole(senderTab, allowAnyFbTab, allowIncomingRealtime = false) {
     await loadTabRegistry();
-    if (senderTab?.id && manualHistoryTabOwners.has(senderTab.id)) return 'history';
+    if (senderTab?.id && manualHistoryTabOwners.has(senderTab.id)) return 'history_scrolling';
     let senderRole = FbCrmMessengerTabRoles.roleForTab([...tabRegistry.entries()], user_id, senderTab?.id);
     if (!senderRole && senderTab?.id) {
       var tabUrl = senderTab.url || senderTab.pendingUrl || '';
@@ -7451,6 +7451,13 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
           const discovered = resume ? new Map(sectionCheckpoint.threads) : new Map();
           let roundsWithoutNew = 0;
           const maxDiscoveryRounds = isRealtimeRequestScan && target.requestSection ? 12 : (isRealtimeScan ? 1 : 60);
+          if (isRealtimeInboxScan && !target.requestSection) {
+            await chrome.scripting.executeScript({
+              target: { tabId: target.tab.id },
+              func: moveMessengerDiscoverySidebar,
+              args: ['restore']
+            }).catch(() => {});
+          }
           for (let round = 0; round < maxDiscoveryRounds && discovered.size < 500; round += 1) {
             if (Date.now() >= deadline || discoverySyncCancelledAccounts.has(accountKey)) {
               budgetExpired = Date.now() >= deadline;
@@ -7526,10 +7533,11 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
               }
             }
             // Send new threads immediately to backend so CRM UI updates live
-            // Stream Inbox for fast UI feedback. Requests are held until the
-            // final cross-folder dedupe so a stale request surface can never
-            // temporarily move normal conversations into the waiting tab.
-            const shouldStreamBatch = (target.inboxFolder || 'INBOX') === 'INBOX'
+            // Stream Inbox for fast UI feedback during multi-round full scans.
+            // Single-round realtime Inbox scans emit once at the end of the round
+            // so the partial frame cannot consume previousThread.last_message /
+            // hintUnreadTracker before the final frame arrives.
+            const shouldStreamBatch = (!isRealtimeInboxScan && (target.inboxFolder || 'INBOX') === 'INBOX')
               || (isRealtimeRequestScan && Boolean(target.requestSection));
             if (newBatch.length > 0 && shouldStreamBatch) {
               sendToBackend('SYNC_THREADS_RESULT', {
@@ -7542,8 +7550,10 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
                   contact_name: t.name || t.contact_name,
                   last_message: t.last_message,
                   is_unread: t.is_unread,
+                  user_read_on_fb: t.user_read_on_fb === true,
                   is_like: t.is_like === true,
                   preview_is_outgoing: t.preview_is_outgoing === true,
+                  row_time_text: t.row_time_text || '',
                   avatar_url: t.avatar_url || null,
                   avatar_base64: t.avatar_base64 || null,
                   thread_url: t.thread_url || null,
@@ -7562,117 +7572,10 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
             checkpoint.sections.set(sectionKey, sectionCheckpoint);
             checkpoint.updated_at = Date.now();
             console.log('[FB Engine] [DISCOVERY] account=' + account_id + ' round=' + (round + 1) + ' total=' + discovered.size + ' visible=' + visible.length);
-            // 2026-10-16: bỏ break "scans each selected button once" cho quét
-            // requests nền - nó khiến list chỉ đọc đúng 1 màn hình, user không
-            // bao giờ thấy khách nằm dưới (reproduce: list Spam dài chỉ thấy
-            // vài row đầu). Requests giờ dùng chung vòng cuộn bên dưới như
-            // quét full: cuộn từng viewport, dừng khi list cạn.
-            // Messenger virtualizes the list and often pauses at the bottom of
-            // the currently loaded chunk. Give it several load windows before
-            // deciding that the real end has been reached.
             if (isRealtimeInboxScan && !target.requestSection) {
-              // The old realtime branch stopped before moveMessengerDiscoverySidebar,
-              // then the cleanup below restored the list to the top. It could
-              // therefore rescan only the first visible conversations forever.
-              // Advance exactly one viewport per lightweight tick; keep that
-              // position for the next tick and cycle back to the saved top at
-              // the real end of the sidebar.
-              const realtimeMove = await chrome.scripting.executeScript({
-                target: { tabId: target.tab.id },
-                func: moveMessengerDiscoverySidebar,
-                args: ['step']
-              }).catch(() => []);
-              let realtimeMoveState = realtimeMove?.[0]?.result || {};
-              if (!realtimeMoveState.moved && !realtimeMoveState.atEnd && realtimeMoveState.point) {
-                // Some Messenger builds ignore programmatic scrollTop on their
-                // virtual list and react only to a trusted wheel. Reuse the
-                // existing CDP input adapter strictly as a no-movement fallback.
-                const trustedSidebarWheel = await dispatchTrustedHistoryWheel(
-                  target.tab.id,
-                  realtimeMoveState.point,
-                  Math.max(420, Number(realtimeMoveState.maxTop || 0) > 0 ? 720 : 520)
-                );
-                if (trustedSidebarWheel.success) {
-                  await delay(700);
-                  const trustedMoveProbe = await chrome.scripting.executeScript({
-                    target: { tabId: target.tab.id },
-                    func: (beforeTop) => {
-                      const scroller = document.querySelector('[data-crm-discovery-scroller="true"]');
-                      if (!scroller) return { found: false, moved: true, atEnd: false, trusted: true };
-                      const afterTop = Number(scroller.scrollTop || 0);
-                      const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-                      return {
-                        found: true,
-                        moved: afterTop !== Number(beforeTop || 0),
-                        before: Number(beforeTop || 0),
-                        after: afterTop,
-                        maxTop,
-                        scrollHeight: scroller.scrollHeight,
-                        clientHeight: scroller.clientHeight,
-                        atEnd: maxTop > 0 && afterTop >= maxTop - 20,
-                        trusted: true
-                      };
-                    },
-                    args: [Number(realtimeMoveState.before || 0)]
-                  }).then((rows) => rows?.[0]?.result).catch(() => null);
-                  realtimeMoveState = trustedMoveProbe || { ...realtimeMoveState, trusted: true };
-                }
-                console.log(`[FB Engine] [DISCOVERY_REALTIME] trusted_scroll=${!!trustedSidebarWheel.success} moved=${!!realtimeMoveState.moved}`);
-              }
-              if (realtimeMoveState.atEnd) {
-                const tailKey = accountKey + ':' + target.tab.id;
-                const previousTail = discoveryRealtimeTailStates.get(tailKey) || { stalls: 0, height: 0, signature: '' };
-                // Hold this bottom while Messenger resolves its lazy loader,
-                // then step again. A temporary chunk boundary must never send
-                // the conversation list straight back to the top.
-                await delay(1400);
-                const tailProbeRows = await chrome.scripting.executeScript({
-                  target: { tabId: target.tab.id },
-                  func: moveMessengerDiscoverySidebar,
-                  args: ['step']
-                }).catch(() => []);
-                const tailProbe = tailProbeRows?.[0]?.result || {};
-                const oldHeight = Math.max(
-                  Number(realtimeMoveState.scrollHeight || 0),
-                  Number(previousTail.height || 0)
-                );
-                const grew = Number(tailProbe.scrollHeight || 0) > oldHeight + 2
-                  || Number(tailProbe.maxTop || 0) > Number(realtimeMoveState.maxTop || 0) + 2
-                  || (tailProbe.tailSignature && tailProbe.tailSignature !== (realtimeMoveState.tailSignature || previousTail.signature));
-                const advanced = grew || tailProbe.moved || tailProbe.atEnd === false;
-                if (advanced) {
-                  discoveryRealtimeTailStates.set(tailKey, {
-                    stalls: 0,
-                    height: Number(tailProbe.scrollHeight || realtimeMoveState.scrollHeight || 0),
-                    signature: tailProbe.tailSignature || realtimeMoveState.tailSignature || ''
-                  });
-                  console.log('[FB Engine] [DISCOVERY_REALTIME] Lazy-load grew; keeping current sidebar position.');
-                  await delay(450);
-                } else {
-                  const stalls = Number(previousTail.stalls || 0) + 1;
-                  discoveryRealtimeTailStates.set(tailKey, {
-                    stalls,
-                    height: Number(tailProbe.scrollHeight || realtimeMoveState.scrollHeight || 0),
-                    signature: tailProbe.tailSignature || realtimeMoveState.tailSignature || previousTail.signature || ''
-                  });
-                  if (stalls >= 3) {
-                    await chrome.scripting.executeScript({
-                      target: { tabId: target.tab.id },
-                      func: moveMessengerDiscoverySidebar,
-                      args: ['restore']
-                    }).catch(() => {});
-                    discoveryRealtimeTailStates.delete(tailKey);
-                    console.log('[FB Engine] [DISCOVERY_REALTIME] Stable sidebar end confirmed; cycling to top.');
-                  } else {
-                    console.log('[FB Engine] [DISCOVERY_REALTIME] Waiting at lazy-load tail confirmation ' + stalls + '/3.');
-                  }
-                }
-              } else {
-                discoveryRealtimeTailStates.delete(accountKey + ':' + target.tab.id);
-                // Let React mount the next virtual page before the scheduler's
-                // following realtime tick reads it.
-                await delay(450);
-              }
+              // Giữ thanh cuộn sidebar luôn ở đầu danh sách (scrollTop = 0) trong
+              // chế độ quét realtime để toàn bộ tin nhắn mới của nhiều khách hàng
+              // nhảy lên đầu đều nằm trong vùng DOM đang mount và được bắt tức thì.
               break;
             }
             if (roundsWithoutNew >= 8) break;
@@ -8214,24 +8117,59 @@ function scrapeFacebookSidebar() {
           if (!bgM) continue;
           const bgAlpha = bgM[4] === undefined ? 1 : Number(bgM[4]);
           if (bgAlpha < 0.2) continue;
-          if (+bgM[3] >= 180 && +bgM[1] <= 90 && +bgM[2] >= 50 && +bgM[2] <= 170) { hasUnreadDot = true; break; }
+          if (+bgM[3] >= 175 && +bgM[1] <= 100 && +bgM[2] >= 40 && +bgM[2] <= 185) { hasUnreadDot = true; break; }
         }
       }
-      // 4. Lấy đoạn tin nhắn cuối
-      // "Trả lời?"... là span UI (nút/mENU trên row) chứ không phải tin nhắn —
-      // snippet thật trống (media/poll) thì bỏ qua thay vì nhặt rác.
-      const SIDEBAR_SNIPPET_JUNK_RE = /^(?:trả\s*lời\s*\??|đang gõ(?: tin nhắn)?|đã xem(?: tin nhắn)?|đã nhìn(?: tin nhắn)?|xem tin nhắn|tin nhắn mới|gửi tin nhắn|hủy bỏ|đang gọi\W*)$/i;
-      const spans = rowContainer.querySelectorAll('span');
+      // 4. Lấy đoạn tin nhắn cuối & thời gian relative
+      const SIDEBAR_SNIPPET_JUNK_RE = /^(?:trả\s*lời\s*\??|đang gõ(?: tin nhắn)?|đã xem(?: tin nhắn)?|đã nhìn(?: tin nhắn)?|xem tin nhắn|tin nhắn mới|gửi tin nhắn|hủy bỏ|đang gọi\W*|tin nhắn chưa đọc\s*:?|unread messages?\s*:?)$/iu;
+      const SIDEBAR_TIME_LINE_RE = /^(?:bây giờ|just now|vừa xong|vài giây|a few seconds ago|hôm qua|yesterday|thứ\s+[a-zà-ỹ]+|chủ\s+nhật|mon|tue|wed|thu|fri|sat|sun|\d{1,2}:\d{2}|\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y|min|mins|hr|hrs|wk|yr)(?:\s*(?:trước|ago))?)$/iu;
+      const stripRowDecorations = (val) => String(val || '')
+        .replace(/^(?:Tin nhắn chưa đọc|Unread messages?)\s*:\s*/iu, '')
+        .replace(/\s*[·•]\s*(?:trả\s*lời\s*\??)\s*$/iu, '')
+        .replace(/\s*[·•]\s*(?:bây giờ|just now|vừa xong|vài giây|a few seconds ago|hôm qua|yesterday|thứ\s+[a-zà-ỹ]+|chủ\s+nhật|mon|tue|wed|thu|fri|sat|sun|\d{1,2}:\d{2}|\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y|min|mins|hr|hrs|wk|yr)(?:\s*(?:trước|ago))?)(?:\s*[·•]?\s*trả\s*lời\s*\??)?\s*$/iu, '')
+        .replace(/^[\s\u00b7\u2022.\-|•·]+|[\s\u00b7\u2022.\-|•·]+$/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      let row_time_text = '';
+      const inlineTimeMatch = rawContainerText.match(/[·•]\s*((?:bây giờ|just now|vừa xong|vài giây|a few seconds ago|hôm qua|yesterday|thứ\s+[a-zà-ỹ]+|chủ\s+nhật|mon|tue|wed|thu|fri|sat|sun|\d{1,2}:\d{2}|\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y|min|mins|hr|hrs|wk|yr)(?:\s*(?:trước|ago))?))(?=\s|$|\n|[·•])/iu);
+      if (inlineTimeMatch) {
+        row_time_text = inlineTimeMatch[1].trim().slice(0, 24);
+      }
+
+      const spans = rowContainer.querySelectorAll('span, div[dir="auto"]');
       let last_message = '';
       for (const span of spans) {
-        const txt = span.textContent.trim();
-        const isSeparatorJunk = /^[\s\u00b7\u2022.\-|•·]+$/.test(txt);
-        if (txt && !isSeparatorJunk && txt !== name && !txt.includes(name) && !isSystemText(txt) && !SIDEBAR_SNIPPET_JUNK_RE.test(txt) && txt.length > 2 && txt.length < 200 && !/^\d+\s*(?:ngày|giờ|phút|năm|s|m|h|d|y)$/i.test(txt)) last_message = txt;
+        if (span.querySelector('span, div[dir="auto"]')) continue;
+        const rawSpanTxt = String(span.textContent || '').replace(/^[\s\u00b7\u2022.\-|•·]+|[\s\u00b7\u2022.\-|•·]+$/g, '').trim();
+        if (!rawSpanTxt) continue;
+        if (!row_time_text && rawSpanTxt.length <= 24 && SIDEBAR_TIME_LINE_RE.test(rawSpanTxt)) {
+          row_time_text = rawSpanTxt;
+          continue;
+        }
+        const txt = stripRowDecorations(rawSpanTxt);
+        if (!txt) continue;
+        if (SIDEBAR_TIME_LINE_RE.test(txt) || SIDEBAR_SNIPPET_JUNK_RE.test(txt) || PRESENCE_EXACT.test(txt)) continue;
+        if (txt === name || (name && txt.startsWith(name) && txt.length <= name.length + 2)) continue;
+        if (!isSystemText(txt) && txt.length >= 1 && txt.length < 200) {
+          last_message = (name && txt.startsWith(name) && txt.length > name.length)
+            ? stripRowDecorations(txt.slice(name.length)) || txt
+            : txt;
+        }
       }
-      // Dòng thời gian relative ("Bây giờ"/"1 phút"/"12:30"): server dùng làm
-      // bằng chứng tin vừa đến cho media thuần trên thread đã unread sẵn.
-      const SIDEBAR_TIME_LINE_RE = /^(?:bây giờ|just now|vừa xong|vài giây|a few seconds ago|hôm qua|yesterday|thứ [a-zà-ỹ]+|mon|tue|wed|thu|fri|sat|sun|\d{1,2}:\d{2}|\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y)(?:\s*(?:trước|ago))?)$/iu;
-      const row_time_text = (String(rowContainer.innerText || '').split(/\n+/).map((l) => l.trim()).reverse().find((l) => l && l.length <= 24 && SIDEBAR_TIME_LINE_RE.test(l)) || '');
+      if (!row_time_text) {
+        row_time_text = (rawContainerText.split(/\n+/).map((l) => l.replace(/^[\s\u00b7\u2022.\-|•·]+|[\s\u00b7\u2022.\-|•·]+$/g, '').trim()).reverse().find((l) => l && l.length <= 24 && SIDEBAR_TIME_LINE_RE.test(l)) || '');
+      }
+      if (!last_message) {
+        const lineCandidates = rawContainerText
+          .replace(/((?:Tin nhắn chưa đọc|Unread messages?)\s*:)/giu, '\n$1\n')
+          .split(/\n+/)
+          .map(stripRowDecorations)
+          .filter((l) => l && l !== name && l.length >= 1 && l.length < 200 && !SIDEBAR_TIME_LINE_RE.test(l) && !SIDEBAR_SNIPPET_JUNK_RE.test(l) && !PRESENCE_EXACT.test(l) && !isSystemText(l));
+        if (lineCandidates.length > 0) {
+          last_message = lineCandidates[lineCandidates.length - 1];
+        }
+      }
 
       // Icon-only Like has no text preview and Facebook may omit the unread dot.
       // Sidebar rows contain no composer quick-like control, so the exact SVG title is safe evidence.
@@ -8242,7 +8180,7 @@ function scrapeFacebookSidebar() {
       // Hidden/background Messenger tabs may mark the open conversation read
       // before CRM sees it. Direction is therefore more reliable than unread:
       // Facebook prefixes our own sidebar previews with Bạn:/You:.
-      const preview_is_outgoing = /^(?:Bạn|You)\s*:/i.test(String(last_message || '').trim());
+      const preview_is_outgoing = /^(?:Bạn|Tôi|You)\s*:/iu.test(String(last_message || '').trim()) || /^(?:Bạn đã gửi|You sent)/iu.test(String(last_message || '').trim());
       // 5. Lấy Avatar chuẩn phạm vi row (thẻ img, SVG image, background-image)
       let avatar_url = null;
       let avatar_base64 = null;
@@ -8929,7 +8867,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   // Page dùng tab Business Suite riêng. Preview + bump tin khách đã chạy ở
   // server; nội dung đầy đủ sync khi operator click/kéo hoặc khi hội thoại
   // đang mở sẵn ở tab chat (observer bắt trực tiếp).
-  const pageOnlyReasons = new Set(['initial_sweep', 'sidebar_incoming']);
+  const pageOnlyReasons = new Set(['initial_sweep']);
   const baseReason = FbCrmMessengerTabRoles.stripSyncReasonSuffix(reason);
   if (!_history_tab_id && (allow_navigation !== true || !allowedReasons.has(baseReason)
     || (!page_id && pageOnlyReasons.has(baseReason)))) {
@@ -9048,12 +8986,13 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     sendToBackend('THREAD_MESSAGES_SYNCED', { account_id: targetAcc, thread_id, messages: [], reason: 'navigation_superseded', mode, cursor });
     return;
   }
-  const manualHistoryOwner = usesVisibleCrmTab ? navigationToken?.sequence : null;
-  if (usesVisibleCrmTab) manualHistoryTabOwners.set(tab.id, manualHistoryOwner);
+  const isScrollingOlderHistory = mode === 'older' || Number(scroll_delta) > 0 || bulkHistorySyncInFlight;
+  const manualHistoryOwner = isScrollingOlderHistory ? (navigationToken?.sequence || Date.now()) : null;
+  if (isScrollingOlderHistory && manualHistoryOwner != null) manualHistoryTabOwners.set(tab.id, manualHistoryOwner);
   const lastCrmThreadId = usesVisibleCrmTab ? String(crmHistoryThreadByTab.get(tab.id) || '') : '';
   const forceCleanViewport = usesVisibleCrmTab && Boolean(lastCrmThreadId) && lastCrmThreadId !== navigationThreadId;
   const releaseManualHistoryOwner = () => {
-    if (usesVisibleCrmTab && manualHistoryTabOwners.get(tab.id) === manualHistoryOwner) {
+    if (manualHistoryOwner != null && manualHistoryTabOwners.get(tab.id) === manualHistoryOwner) {
       manualHistoryTabOwners.delete(tab.id);
     }
   };
@@ -9827,7 +9766,10 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           // Pill ngày EN ("Oct 16, 2026, 10:49 AM") + mảnh pill cắt DOM
           // ("58 AM by Khang") - DOM history nhặt thành tin rác (2026-11-03).
           /^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}(?:,?\s+\d{1,2}:\d{2}\s*(?:AM|PM)?)?$/i,
-          /^\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s+by\s+[A-ZÀ-ỸĐ][\p{L}\p{M}\s.]{0,40}$/u
+          /^\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s+by\s+[A-ZÀ-ỸĐ][\p{L}\p{M}\s.]{0,40}$/u,
+          /^(?:(?:Bạn|Tôi|You|[^\n]{1,80})\s+)?(?:đã gửi|sent|shared)\s+(?:(?:một|\d+|an?|one)\s+)?(?:ảnh|bức ảnh|photo|photos|image|images|video|videos|tệp|file|files|tập tin|nhãn dán|sticker|GIF|tin nhắn thoại|file âm thanh|voice message|audio)(?:\s+đính kèm)?\.?$/iu,
+          /^(?:[^\n]{1,60}[\s\u00a0]*[·•][\s\u00a0]*)?(?:Đã chỉnh sửa|Edited)\.?$/iu,
+          /^(?:drive\.google\.com|docs\.google\.com|Google Docs|Google Drive|youtube\.com|youtu\.be|facebook\.com|fb\.watch|tiktok\.com|vt\.tiktok\.com|instagram\.com|zalo\.me|shopee\.vn|lazada\.vn|tiki\.vn|maps\.app\.goo\.gl|goo\.gl|bit\.ly)$/i
         ];
 
         function isSystemText(txt) {
@@ -9960,8 +9902,36 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         }
 
         const messages = [];
+        function extractMidTimestampMs(nativeId) {
+          const raw = String(nativeId || '').replace(/__bubble_\d+$/, '').replace(/_media(?:_\d+)?$/, '').trim();
+          const midMatch = raw.match(/^mid\.\$([A-Za-z0-9_-]{20,44})$/);
+          if (midMatch) {
+            try {
+              const b64 = midMatch[1].replace(/-/g, '+').replace(/_/g, '/');
+              const bin = atob(b64);
+              if (bin.length >= 16) {
+                let last8 = 0n;
+                for (let i = bin.length - 8; i < bin.length; i++) {
+                  last8 = (last8 << 8n) | BigInt(bin.charCodeAt(i) & 0xff);
+                }
+                const sf = (last8 & 0x03ffffffffffffffn) << 6n;
+                const ts = Number(sf >> 22n);
+                if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return ts;
+              }
+            } catch (_) {}
+          }
+          const sfMatch = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
+          if (sfMatch) {
+            try {
+              const ts = Number(BigInt(sfMatch[1]) >> 22n);
+              if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return ts;
+            } catch (_) {}
+          }
+          return 0;
+        }
         const boundaryIds = new Set([cursor?.newest_message_id, cursor?.oldest_message_id].filter(Boolean));
         const occurrencesMap = {};
+        const nativeIdCounts = new Map();
         const seenBubblesInPass = new Set();
 
         // ── Composer/UI exclusion (tuyệt đối không lấy text từ vùng soạn tin/header/nav/sidebar) ──
@@ -9982,8 +9952,8 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               || (element.tagName === 'TITLE' ? element.textContent : '') || '').trim();
             if (!value) continue;
             if (value.length <= 16 && /^\p{Extended_Pictographic}[\p{Extended_Pictographic}\uFE0F\u20D0-\u20FF]*$/u.test(value)) return value;
-            if (/(?:giơ ngón tay cái|thumbs?\\s*up|\\blike\\b|thích|👍)/i.test(value)
-              && (element.matches?.('img, svg, title, [role="img"]') || element.closest?.('svg'))) return '👍';
+            if (/(?:k\u00fd hi\u1ec7u gi\u01a1 ng\u00f3n tay c\u00e1i|thumbs?\s*up\s*symbol)/i.test(value)
+              && (element.matches?.('title') || element.closest?.('svg'))) return '👍';
           }
           const directText = String(container.textContent || '').trim();
           return directText.length <= 4 && /^\p{Extended_Pictographic}+$/u.test(directText) ? directText : '';
@@ -10138,44 +10108,38 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (b.closest(COMPOSER_EXCLUDE)) return false;
             return !b.querySelector('div[dir="auto"], span[dir="auto"]');
           });
+          if (leafBubbles.length > 1 && leafBubbles.some((b) => !b.closest('a[href]'))) {
+            leafBubbles = leafBubbles.filter((b) => !b.closest('a[href]'));
+          }
 
-          // A Messenger video frequently uses a transient blob: URL and may
-          // not have videoWidth yet while the hidden history tab is scraping.
-          // Treat the VIDEO element itself as authoritative media evidence;
-          // keep the old geometry-based image filtering for avatars/photos.
-          const videoElement = Array.from(row.querySelectorAll('video')).find((element) => !element.closest(COMPOSER_EXCLUDE)) || null;
-          // Hidden/history Messenger can render a video as a semantic control
-          // before mounting the actual <video> element. Keep this in parity
-          // with content.js so those rows are not silently dropped.
+          const videoElements = Array.from(row.querySelectorAll('video')).filter((element) => !element.closest(COMPOSER_EXCLUDE));
+          const videoElement = videoElements[0] || null;
           const semanticVideoElement = Array.from(row.querySelectorAll('[role=img]')).find((element) => {
             if (element.closest(COMPOSER_EXCLUDE)) return false;
             const label = String(element.getAttribute('aria-label') || element.getAttribute('title') || '').trim();
             return /(?:ph\u00e1t|m\u1edf|xem|play|open|watch)?\s*video/i.test(label)
               && !/(?:cu\u1ed9c g\u1ecdi|video call|call video)/i.test(label);
           }) || null;
-          const mediaElement = videoElement || Array.from(row.querySelectorAll('img[src]')).find((element) => {
+          const photoElements = Array.from(row.querySelectorAll('img[src]')).filter((element) => {
+            if (element.closest(COMPOSER_EXCLUDE)) return false;
             const rect = element.getBoundingClientRect();
-            // Use rendered geometry first. Avatars often have a large source
-            // bitmap (hundreds of pixels) but are rendered as a 28-40px circle;
-            // Math.max(naturalWidth, rect.width) therefore misclassified them
-            // as message photos.
             const width = rect.width || element.naturalWidth || element.videoWidth || 0;
             const height = rect.height || element.naturalHeight || element.videoHeight || 0;
-            const alt = String(element.getAttribute('alt') || element.getAttribute('aria-label') || '').toLowerCase();
+            const alt = String(element.getAttribute('alt') || element.getAttribute('aria-label') || '').trim();
+            if (/^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i.test(alt)) return true;
+            const altLower = alt.toLowerCase();
             const normalizedContactName = String(contactName || '').trim().toLowerCase();
-            const namesContact = normalizedContactName && alt.includes(normalizedContactName);
+            const namesContact = normalizedContactName && altLower.includes(normalizedContactName);
             const isSmallProfileImage = width <= 64 && height <= 64;
             const isLikelyAvatar = namesContact || isSmallProfileImage;
             return !isLikelyAvatar && width >= 72 && height >= 72;
           });
+          const mediaElement = videoElement || photoElements[0] || null;
           const mediaAnchor = row.querySelector('a[href*="fbcdn"], a[href*=".mp4"], a[href*="video"]');
           const videoPoster = videoElement?.poster || videoElement?.getAttribute?.('poster') || null;
           const rawMediaUrl = mediaElement?.currentSrc || mediaElement?.src
             || mediaElement?.querySelector?.('source[src]')?.src
             || mediaAnchor?.href || videoPoster || null;
-          // MSE videos expose blob: as currentSrc, but their poster remains a
-          // stable fbcdn/data image. Persist that thumbnail so CRM renders the
-          // video message instead of a bare "[Video]" placeholder.
           const mediaUrl = rawMediaUrl && !String(rawMediaUrl).startsWith('blob:')
             ? rawMediaUrl
             : (videoPoster && !String(videoPoster).startsWith('blob:') ? videoPoster : null);
@@ -10183,18 +10147,18 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             || /\.mp4(?:\?|$)|video/i.test(String(mediaUrl || ''));
           const mediaType = isVideoMessage ? 'video' : (mediaUrl ? 'image' : null);
 
-          // Some Like rows expose their timestamp minute (37/37sáng) as
-          // the only dir=auto leaf. Replace that UI fragment with the row's
-          // semantic thumbs-up so it cannot be persisted as message content.
           const hasOnlyClockFragments = leafBubbles.length > 0 && leafBubbles.every((bubble) => {
             const bubbleText = cleanText(bubble.textContent || '');
             return !bubbleText || isClockMinuteFragment(bubbleText, effectiveLabel);
           });
           if (!rowEmojiContent && hasOnlyClockFragments && row.querySelector('svg')) rowEmojiContent = '👍';
-          if (rowEmojiContent && (leafBubbles.length === 0 || hasOnlyClockFragments) && !mediaUrl && !isVideoMessage) leafBubbles = [row];
-          // H2 (2026-11-09): KHÔNG return sớm khi leafBubbles rỗng — row
-          // bubble phức tạp có thể không có lá dir=auto nào; fallback
-          // aria-label cuối row còn cứu được text báo cáo.
+          if (rowEmojiContent && (leafBubbles.length === 0 || hasOnlyClockFragments) && !mediaUrl && !isVideoMessage && photoElements.length === 0) leafBubbles = [row];
+          // upstream v1.0.26: row thuần chrome (không lá, không media, không
+          // photo — kiểu "Đã gửi 1 ảnh") bị bỏ sớm, không sinh row rác.
+          // H2 (2026-11-09): các trường hợp CÒN LẠI (bubble phức tạp còn
+          // media/photo) KHÔNG return sớm — fallback aria-label cuối row còn
+          // cứu được text báo cáo.
+          if (leafBubbles.length === 0 && !mediaUrl && !isVideoMessage && photoElements.length === 0) return;
 
           // H5 (2026-11-09): history sync chưa từng extract quote reply (chỉ
           // CẮT khối quote khỏi content) -> tin rep lần đầu bắt bằng quét lại
@@ -10231,11 +10195,14 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (['AM', 'SA', 'SÁNG'].includes(clockSuffix) && clockHour === 12) clockHour = 0;
             clockMinutes = clockHour * 60 + Number(clockMatch[2]);
           }
-          const timestampHasExplicitDate = /(?:hôm qua|yesterday|thứ\s+(?:hai|ba|tư|năm|sáu|bảy)|chủ nhật|\bT[2-7]\b|\bCN\b|\d{1,2}\s*tháng\s*\d{1,2}|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b)/i.test(timestampLabel);
-          let tsMs = unixSeconds > 0
-            ? unixSeconds * 1000
-            : (dateTimeValue && Number.isFinite(Date.parse(dateTimeValue)) ? Date.parse(dateTimeValue) : parseTimeFromLabel(timestampLabel, lastFallbackTime || null, false));
-          let tsSource = tsMs ? (unixSeconds > 0 || dateTimeValue ? 'facebook_timestamp' : 'facebook_label') : 'fallback';
+          const rowMidTs = extractMidTimestampMs(nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id'));
+          const timestampHasExplicitDate = Boolean(rowMidTs > 0) || /(?:hôm qua|yesterday|thứ\s+(?:hai|ba|tư|năm|sáu|bảy)|chủ nhật|\bT[2-7]\b|\bCN\b|\d{1,2}\s*tháng\s*\d{1,2}|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b)/i.test(timestampLabel);
+          let tsMs = rowMidTs > 0
+            ? rowMidTs
+            : (unixSeconds > 0
+              ? unixSeconds * 1000
+              : (dateTimeValue && Number.isFinite(Date.parse(dateTimeValue)) ? Date.parse(dateTimeValue) : parseTimeFromLabel(timestampLabel, lastFallbackTime || null, false)));
+          let tsSource = rowMidTs > 0 ? 'facebook_payload' : (tsMs ? (unixSeconds > 0 || dateTimeValue ? 'facebook_timestamp' : 'facebook_label') : 'fallback');
 
           if (tsMs) {
             lastFallbackTime = tsMs;
@@ -10244,7 +10211,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           }
 
           let rowMediaMessage = null;
-          if (mediaUrl || isVideoMessage) {
+          if (mediaUrl || isVideoMessage || photoElements.length > 0) {
             // Alignment from the REAL media element wins: aria-labels can be
             // inherited from a surrounding accessibility wrapper and describe a
             // NEIGHBOURING bubble (reproduce 2026-10-30: customer video+map
@@ -10254,17 +10221,32 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // reads >= 0.80 and mislabels every media row as outgoing.
             let mediaOutgoing = null;
             let mediaDirectionEvidence = 'geometry';
+            const directionBoxEl = messageLog || historyDirectionContainer;
+            const directionRect = directionBoxEl.getBoundingClientRect();
+            const hasLeftAvatarInRow = directionRect.width > 0 && Array.from(row.querySelectorAll('img[src]')).some((img) => {
+              if (img.closest(COMPOSER_EXCLUDE)) return false;
+              const alt = String(img.getAttribute('alt') || '').trim();
+              if (/^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i.test(alt)) return false;
+              const r = img.getBoundingClientRect();
+              if (!r || r.width < 18 || r.width > 64 || r.height < 18 || r.height > 64) return false;
+              const leftGap = r.left - directionRect.left;
+              const rightGap = directionRect.right - r.right;
+              return leftGap >= -8 && leftGap <= 96 && leftGap < rightGap;
+            });
+            if (hasLeftAvatarInRow) {
+              mediaOutgoing = false;
+              mediaDirectionEvidence = 'avatar';
+            }
             const measuredMediaEl = mediaElement || mediaAnchor || semanticVideoElement || null;
-            if (measuredMediaEl) {
+            if (mediaOutgoing === null && measuredMediaEl) {
               const mediaRect = measuredMediaEl.getBoundingClientRect();
-              const directionRect = historyDirectionContainer.getBoundingClientRect();
               if (directionRect.width > 0 && mediaRect.width > 0) {
-                // For wide media elements (> 40% of container), use right edge proximity.
-                const mediaWidthRatio = mediaRect.width / directionRect.width;
-                if (mediaWidthRatio > 0.40) {
-                  const rightEdgeRatio = (mediaRect.right - directionRect.left) / directionRect.width;
-                  if (rightEdgeRatio >= 0.80) mediaOutgoing = true;
-                  else if (rightEdgeRatio <= 0.60) mediaOutgoing = false;
+                const leftGap = Math.max(0, mediaRect.left - directionRect.left);
+                const rightGap = Math.max(0, directionRect.right - mediaRect.right);
+                if (leftGap <= 96 && leftGap < rightGap) {
+                  mediaOutgoing = false;
+                } else if (rightGap <= Math.max(96, directionRect.width * 0.22) && rightGap < leftGap) {
+                  mediaOutgoing = true;
                 } else {
                   const relativeCenter = (mediaRect.left + mediaRect.width / 2 - directionRect.left) / directionRect.width;
                   if (relativeCenter >= 0.55) mediaOutgoing = true;
@@ -10279,18 +10261,15 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             }
             const mediaNativeId = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id')
               || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id') || row.getAttribute('data-id') || null;
-            const mediaStableId = mediaNativeId
-              ? `${mediaNativeId}_media`
-              : `dom_${targetThreadId}_media_${stringHash(mediaUrl || `${effectiveLabel}:${idx}:video`)}`;
-            // Tên thành viên giải từ label media - ảnh/video trong NHÓM cũng
-            // phải hiện đúng người gửi thay vì tên nhóm.
-            const mediaSenderMatch = effectiveLabel.match(/Tin nh\u1eafn do ([^]+?) g\u1eedi l\u00fac/i) || effectiveLabel.match(/Message sent by ([^]+?) at/i);
+            const mediaSenderMatch = effectiveLabel.match(/Tin nh\u1eafn do ([^]+?) g\u1eedi l\u00fac/i) || effectiveLabel.match(/Message sent by ([^]+?) at/i) || effectiveLabel.match(/Message sent [^]*? by ([^:]+?):/i);
+            if (mediaSenderMatch && !/^(?:B\u1ea1n|You)$/i.test(mediaSenderMatch[1].trim())) {
+              mediaOutgoing = false;
+              mediaDirectionEvidence = 'label_name';
+            }
             let mediaMemberName = (!mediaOutgoing && mediaSenderMatch
               && !/^(?:B\u1ea1n|You)$/i.test(mediaSenderMatch[1].trim()))
               ? mediaSenderMatch[1].trim()
               : '';
-            // Ảnh/video ở NHÓM dùng label article "Lúc <giờ>, <Tên>: ..." —
-            // regex format cũ không khớp nên member_name rỗng.
             const mediaArticleLabel = nativeIdEl?.getAttribute('aria-label')
               || row.getAttribute('aria-label') || '';
             const mediaArticleSender = mediaArticleLabel.match(/^Lúc\s+.*,\s*([^:]+?):\s+(.+)$/);
@@ -10299,34 +10278,54 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               mediaMemberName = mediaArticleSender[1].trim();
               mediaDirectionEvidence = 'label_name';
             }
-            messages.push({
-              fb_message_id: mediaStableId,
-              thread_id: targetThreadId,
-              sender_id: mediaOutgoing ? 'current_user' : null,
-              sender_name: mediaOutgoing ? 'Bạn' : (contactName || 'Khách hàng'),
-              member_name: mediaMemberName || null,
-              member_avatar: mediaMemberName ? extractHistoryMemberAvatar(row, mediaMemberName) : null,
-              // Keep a visible, persisted record even when Facebook exposes
-              // only blob: media. If a stable fbcdn/mp4 URL is present the
-              // existing downloader and video player continue unchanged.
-              content: '',
-              media_type: mediaType,
-              media_url: mediaUrl,
-              reply_quote_text: rowReplyQuoteText || null,
-              is_outgoing: mediaOutgoing ? 1 : 0,
-              direction_evidence: mediaDirectionEvidence,
-              sender_role: mediaOutgoing ? 'operator' : 'customer',
-              source: 'dom_history_sync',
-              timestamp_ms: tsMs ? tsMs + dom_order : 0,
-              timestamp_source: tsSource,
-              dom_order,
-              sequence_order: dom_order,
-              _clock_minutes: clockMinutes,
-              _timestamp_has_explicit_date: timestampHasExplicitDate,
-              created_at: new Date(tsMs ? tsMs + dom_order : Date.now()).toISOString()
+            const rowMediaList = [];
+            for (const pEl of photoElements) {
+              const pSrc = pEl.currentSrc || pEl.src || '';
+              const pUrl = pSrc && !String(pSrc).startsWith('blob:') ? pSrc : null;
+              if (pUrl) rowMediaList.push({ type: 'image', url: pUrl, el: pEl });
+            }
+            if (isVideoMessage) {
+              rowMediaList.push({ type: 'video', url: mediaUrl, el: videoElement || semanticVideoElement });
+            } else if (rowMediaList.length === 0 && mediaUrl) {
+              rowMediaList.push({ type: mediaType || 'image', url: mediaUrl, el: mediaElement });
+            }
+            rowMediaList.forEach((mItem, mIdx) => {
+              const itemNativeEl = mItem.el?.closest?.('[data-message-id], [data-id], [id^="mid."]');
+              const itemNativeId = itemNativeEl?.getAttribute?.('data-message-id')
+                || itemNativeEl?.getAttribute?.('data-id')
+                || itemNativeEl?.getAttribute?.('id')
+                || mediaNativeId;
+              const mediaStableId = itemNativeId
+                ? (mIdx > 0 ? `${itemNativeId}_media_${mIdx}` : `${itemNativeId}_media`)
+                : `dom_${targetThreadId}_media_${stringHash((mItem.url || `${effectiveLabel}:${idx}:video`) + `:${mIdx}`)}`;
+              messages.push({
+                fb_message_id: mediaStableId,
+                thread_id: targetThreadId,
+                sender_id: mediaOutgoing ? 'current_user' : null,
+                sender_name: mediaOutgoing ? 'Bạn' : (mediaMemberName || contactName || 'Khách hàng'),
+                member_name: mediaMemberName || null,
+                member_avatar: mediaMemberName ? extractHistoryMemberAvatar(row, mediaMemberName) : null,
+                content: '',
+                media_type: mItem.type,
+                media_url: mItem.url,
+                // H5 (2026-11-09): quote của article gắn vào row media đầu
+                // tiên (mirror content.js idx===0).
+                reply_quote_text: mIdx === 0 ? (rowReplyQuoteText || null) : null,
+                is_outgoing: mediaOutgoing ? 1 : 0,
+                direction_evidence: mediaDirectionEvidence,
+                sender_role: mediaOutgoing ? 'operator' : 'customer',
+                source: 'dom_history_sync',
+                timestamp_ms: tsMs ? tsMs + dom_order : 0,
+                timestamp_source: tsSource,
+                dom_order,
+                sequence_order: dom_order,
+                _clock_minutes: clockMinutes,
+                _timestamp_has_explicit_date: timestampHasExplicitDate,
+                created_at: new Date(tsMs ? tsMs + dom_order : Date.now()).toISOString()
+              });
+              if (mIdx === 0) rowMediaMessage = messages[messages.length - 1];
+              dom_order++;
             });
-            rowMediaMessage = messages[messages.length - 1];
-            dom_order++;
           }
 
           let bubble_idx = 0;
@@ -10374,24 +10373,10 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                     isOutgoing = true;
                     senderName = 'Bạn';
                     directionMatched = true;
-                  } else if (contactName) {
-                    // Nhãn "Lúc ..., <Tên>:" của Messenger ghi tên NGƯỜI GỬI.
-                    // Khớp fuzzy (nickname "Khang" ⊂ contact "Lê Văn
-                    // KhangRryuutrtuu"; đuôi " · 2 phút" của sidebar phải cắt)
-                    // = tin khách. Exact thuần hụt nickname rồi rơi nhánh
-                    // "không khớp = tin mình" bóp tin khách thành tin đi
-                    // (reproduce 2026-11-03). Đồng bộ historyRowSupport.js.
-                    const cleanContact = String(contactName).replace(/\s·\s[^·]*$/, '').trim().toLowerCase();
-                    const labelName = rawSender.toLowerCase();
-                    if (cleanContact.length >= 3 && labelName.length >= 3
-                      && (cleanContact.includes(labelName) || labelName.includes(cleanContact))) {
-                      isOutgoing = false;
-                      senderName = rawSender;
-                      labelSenderName = rawSender;
-                    } else {
-                      isOutgoing = true;
-                      senderName = 'Bạn';
-                    }
+                  } else {
+                    isOutgoing = false;
+                    senderName = rawSender;
+                    labelSenderName = rawSender;
                     directionMatched = true;
                   }
                 }
@@ -10534,14 +10519,33 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
 
             const identityKey = `${targetThreadId}|${dirKey}|${textHash}`;
             const labelHash = stringHash(currentLabel || String(tsMs));
-            // Same text may be sent repeatedly in the same minute. The per-pass
-            // occurrence is stable in DOM order and keeps each physical bubble.
-            const deterministicId = nativeId || `dom_${targetThreadId}_hash_${textHash}_${labelHash}_${dirKey}_occ_${occIndex}`;
+            // Same text may be sent repeatedly in the same minute, and a single
+            // article [data-message-id] can hold several consecutive bubbles.
+            // Suffix subsequent bubbles in the same nativeId family with __bubble_N
+            // so history sync never drops consecutive messages sharing one wrapper.
+            let deterministicId;
+            if (nativeId) {
+              const nativeOcc = nativeIdCounts.get(nativeId) || 0;
+              nativeIdCounts.set(nativeId, nativeOcc + 1);
+              deterministicId = nativeOcc === 0 ? nativeId : `${nativeId}__bubble_${nativeOcc}`;
+            } else {
+              deterministicId = `dom_${targetThreadId}_hash_${textHash}_${labelHash}_${dirKey}_occ_${occIndex}`;
+            }
 
             if (!messages.some(m => m.fb_message_id === deterministicId)) {
-              // Preserve Facebook DOM order for messages with the same minute.
-              // A bounded offset is deterministic within the canonical oldest→newest pass.
-              const finalTsMs = tsMs ? tsMs + dom_order : 0;
+              const bubbleMidTs = extractMidTimestampMs(nativeId) || tsMs;
+              const finalTsMs = bubbleMidTs ? bubbleMidTs + dom_order : 0;
+              let replyQuoteText = null;
+              const quoteRootEl = ownArticleEl || row;
+              const quoteEls = quoteRootEl?.querySelectorAll?.('[aria-label]') || [];
+              for (const qEl of quoteEls) {
+                const qAria = String(qEl.getAttribute('aria-label') || '');
+                if (/tin nhắn (đã trả lời|gốc)|replied-to message|original message/i.test(qAria)) {
+                  const qRaw = String(qEl.textContent || '').replace(/\s+/g, ' ').trim();
+                  replyQuoteText = qRaw.replace(/^(?:Tin nhắn gốc|Original message|Replied[- ]to message)\s*:\s*/i, '').trim().slice(0, 500) || null;
+                  break;
+                }
+              }
 
               messages.push({
                 fb_message_id: deterministicId,
@@ -10557,11 +10561,11 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                 sender_role: isOutgoing ? 'operator' : 'customer',
                 source: 'dom_history_sync',
                 timestamp_ms: finalTsMs,
-                timestamp_source: tsSource,
+                timestamp_source: extractMidTimestampMs(nativeId) ? 'facebook_payload' : tsSource,
                 dom_order,
                 sequence_order: dom_order,
                 _clock_minutes: clockMinutes,
-                _timestamp_has_explicit_date: timestampHasExplicitDate,
+                _timestamp_has_explicit_date: Boolean(extractMidTimestampMs(nativeId)) || timestampHasExplicitDate,
                 created_at: new Date(finalTsMs || Date.now()).toISOString()
               });
             }
@@ -10768,6 +10772,9 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     return false;
   } finally {
     releaseManualHistoryOwner();
+    if (baseReason === 'crm_navigation' && userNavigationLockThreadId === String(thread_id || '')) {
+      userNavigationLockUntil = Math.min(userNavigationLockUntil, Date.now() + 1200);
+    }
     if (previousActiveTabId) {
       await chrome.tabs.update(previousActiveTabId, { active: true }).catch(() => null);
     }

@@ -46,6 +46,14 @@ function getVerifiedContactName(contact) {
   return isPlaceholderContactName(name) ? '' : name;
 }
 
+const extractBareSnowflakeId = (fbMessageId) => {
+  const raw = String(fbMessageId || '').trim();
+  if (!raw || raw.includes('__bubble_') || raw.endsWith('_media')) return null;
+  const cleaned = raw.replace(/::[^:]+$/, '');
+  const m = cleaned.match(/^(?:\d+@msgr\.)?(\d{15,21})$/);
+  return m ? m[1] : null;
+};
+
 const extractSnowflakeBigInt = (fbMessageId) => {
   const raw = String(fbMessageId || '').replace(/__bubble_\d+$/, '').trim();
   const m = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
@@ -107,12 +115,16 @@ const sortMessagesChronologically = (items = []) => items
   })
   .map(({ message }) => message);
 
-const messageIdentities = (message) => [
-  message?.client_message_id ? `client:${message.client_message_id}` : null,
-  message?.attachment_id ? `attachment:${message.attachment_id}` : null,
-  message?.fb_message_id ? `fb:${message.fb_message_id}` : null,
-  message?.id != null ? `id:${message.id}` : null
-].filter(Boolean);
+const messageIdentities = (message) => {
+  const bareSf = extractBareSnowflakeId(message?.fb_message_id);
+  return [
+    message?.client_message_id ? `client:${message.client_message_id}` : null,
+    message?.attachment_id ? `attachment:${message.attachment_id}` : null,
+    message?.fb_message_id ? `fb:${message.fb_message_id}` : null,
+    bareSf ? `sf:${bareSf}` : null,
+    message?.id != null ? `id:${message.id}` : null
+  ].filter(Boolean);
+};
 
 const messageSnapshotSignature = (items = []) => items.map((message) => JSON.stringify([
   messageIdentities(message),
@@ -185,14 +197,15 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
     let matchedIndex = messageIdentities(message)
       .map((key) => indexByIdentity.get(key))
       .find((index) => index !== undefined);
-    if (matchedIndex === undefined && message?.is_outgoing && String(message?.fb_message_id || '').startsWith('mid.')) {
+    const msgFbId = String(message?.fb_message_id || '');
+    if (matchedIndex === undefined && message?.is_outgoing && (msgFbId.startsWith('mid.') || msgFbId.includes('@msgr.'))) {
       const incomingText = String(message.content || '').trim();
       const incomingAt = Number(message.timestamp_ms) || Date.parse(message.created_at || '') || 0;
       const optimisticIdx = result.findIndex((candidate) => {
         if (!candidate?.is_outgoing) return false;
         const candFbId = String(candidate?.fb_message_id || '');
         const candClientId = String(candidate?.client_message_id || '');
-        const isTemporary = candClientId || candFbId.startsWith('pending_') || !candFbId.startsWith('mid.');
+        const isTemporary = candClientId || candFbId.startsWith('pending_') || (!candFbId.startsWith('mid.') && !candFbId.includes('@msgr.'));
         if (!isTemporary) return false;
         if (String(candidate.content || '').trim() !== incomingText) return false;
         const candidateAt = Number(candidate.timestamp_ms) || Date.parse(candidate.created_at || '') || 0;
@@ -250,6 +263,10 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
     result[matchedIndex] = {
       ...previous,
       ...message,
+      client_message_id: message.client_message_id || previous.client_message_id,
+      attachment_id: message.attachment_id || previous.attachment_id,
+      local_media_path: message.local_media_path || previous.local_media_path,
+      media_url: previous.attachment_id ? (previous.media_url || message.media_url) : (message.media_url || previous.media_url),
       status: incomingIsTerminalSuccess
         ? incomingStatus
         : (message.status || message.delivery_status || previous.status),
@@ -347,7 +364,53 @@ const reconcileOutgoingTextEchoes = (items = []) => {
   });
 
   withoutIncomingEchoes.forEach((message) => {
-    if (!message?.is_outgoing || !isPlainText(message) || !normalizedText(message)) {
+    if (!isOutgoing(message)) {
+      result.push(message);
+      return;
+    }
+    if (!isPlainText(message)) {
+      const messageAt = messageTime(message);
+      const mediaType = String(message?.media_type || 'image').toLowerCase();
+      const mediaMatchIndex = result.findIndex((candidate) => {
+        if (!isOutgoing(candidate) || isPlainText(candidate)) return false;
+        const candMediaType = String(candidate?.media_type || 'image').toLowerCase();
+        if (candMediaType !== mediaType) return false;
+        const asymmetricClientEcho = Boolean(candidate.client_message_id || candidate.attachment_id)
+          !== Boolean(message.client_message_id || message.attachment_id);
+        if (!asymmetricClientEcho) return false;
+        const candidateAt = messageTime(candidate);
+        return !candidateAt || !messageAt || Math.abs(candidateAt - messageAt) <= 45000;
+      });
+      if (mediaMatchIndex < 0) {
+        result.push(message);
+        return;
+      }
+      const previous = result[mediaMatchIndex];
+      const crmRow = (previous.client_message_id || previous.attachment_id) ? previous : message;
+      const domRow = crmRow === previous ? message : previous;
+      const domFbId = String(domRow.fb_message_id || '');
+      const crmFbId = String(crmRow.fb_message_id || '');
+      const preferredFbId = (domFbId && !domFbId.startsWith('pending_') && !domFbId.includes('__bubble_'))
+        ? domFbId
+        : (crmFbId || domFbId);
+      result[mediaMatchIndex] = {
+        ...domRow,
+        ...crmRow,
+        id: crmRow.id ?? domRow.id,
+        client_message_id: crmRow.client_message_id || domRow.client_message_id,
+        attachment_id: crmRow.attachment_id || domRow.attachment_id,
+        media_url: crmRow.media_url || domRow.media_url,
+        local_media_path: crmRow.local_media_path || domRow.local_media_path,
+        fb_message_id: preferredFbId,
+        timestamp_ms: extractSnowflakeTimestampMs(preferredFbId) || crmRow.timestamp_ms || domRow.timestamp_ms,
+        ui_render_key: previous.ui_render_key || message.ui_render_key,
+        ui_position_locked: previous.ui_position_locked || message.ui_position_locked,
+        order_anchor_ms: previous.order_anchor_ms || message.order_anchor_ms,
+        sequence_order: previous.sequence_order ?? message.sequence_order
+      };
+      return;
+    }
+    if (!normalizedText(message)) {
       result.push(message);
       return;
     }
@@ -1126,19 +1189,20 @@ export default function App() {
           // Text can be intentionally sent twice. Only a still-pending local
           // bubble may absorb its own DOM confirmation; a sent text is final.
           const localDelivery = String(message.delivery_status || message.status || '').toLowerCase();
-          const awaitingTextConfirmation = ['pending', 'sending', 'queued', 'awaiting_confirmation'].includes(localDelivery);
+          const localBareSf = extractBareSnowflakeId(localFbId);
+          const incomingBareSf = extractBareSnowflakeId(incomingFbId);
+          const sameBareSnowflake = Boolean(localBareSf && incomingBareSf && localBareSf === incomingBareSf);
+          const localHasProvisionalId = !localFbId
+            || localFbId.startsWith('pending_')
+            || (/^\d+$/.test(localFbId) && incomingFbId.includes('@msgr.'));
+          const awaitingTextConfirmation = ['pending', 'sending', 'queued', 'awaiting_confirmation'].includes(localDelivery)
+            || localHasProvisionalId
+            || sameBareSnowflake;
           return newIsMedia
             ? existingIsMedia && sameAttachment && sameMediaType
             : awaitingTextConfirmation && !existingIsMedia && String(message.content || '') === String(newMsg.content || '');
         });
         if (newMsg.client_message_id) {
-          // Feature 021: a Page send's local optimistic bubble is created
-          // with the CRM's own id, but the server necessarily broadcasts a
-          // different 'queue_'-derived id for it (background.js echoes that
-          // exact id back for DOM/network correlation, so the server can't
-          // just reuse the CRM's id there). original_client_message_id lets
-          // us find that local bubble by its original id and reconcile it to
-          // the server's id, instead of rendering a second, orphaned bubble.
           const existsIdx = currentMsgs.findIndex(m =>
             m.client_message_id === newMsg.client_message_id ||
             (newMsg.original_client_message_id && m.client_message_id === newMsg.original_client_message_id)
@@ -1148,10 +1212,13 @@ export default function App() {
             updated[existsIdx] = {
               ...currentMsgs[existsIdx],
               ...newMsg,
+              attachment_id: newMsg.attachment_id || currentMsgs[existsIdx].attachment_id,
               local_media_path: newMsg.local_media_path || currentMsgs[existsIdx].local_media_path,
-              media_url: newMsg.media_url || currentMsgs[existsIdx].media_url,
+              media_url: currentMsgs[existsIdx].attachment_id
+                ? (currentMsgs[existsIdx].media_url || newMsg.media_url)
+                : (newMsg.media_url || currentMsgs[existsIdx].media_url),
               media_type: newMsg.media_type || currentMsgs[existsIdx].media_type,
-              client_message_id: newMsg.client_message_id,
+              client_message_id: newMsg.client_message_id || currentMsgs[existsIdx].client_message_id,
               ui_render_key: currentMsgs[existsIdx]?.ui_render_key,
               ui_position_locked: currentMsgs[existsIdx]?.ui_position_locked,
               order_anchor_ms: currentMsgs[existsIdx]?.order_anchor_ms,
@@ -1163,6 +1230,12 @@ export default function App() {
             updated[optimisticIdx] = {
               ...currentMsgs[optimisticIdx],
               ...newMsg,
+              attachment_id: newMsg.attachment_id || currentMsgs[optimisticIdx].attachment_id,
+              local_media_path: newMsg.local_media_path || currentMsgs[optimisticIdx].local_media_path,
+              media_url: currentMsgs[optimisticIdx].attachment_id
+                ? (currentMsgs[optimisticIdx].media_url || newMsg.media_url)
+                : (newMsg.media_url || currentMsgs[optimisticIdx].media_url),
+              client_message_id: newMsg.client_message_id || currentMsgs[optimisticIdx].client_message_id,
               ui_render_key: currentMsgs[optimisticIdx]?.ui_render_key,
               ui_position_locked: currentMsgs[optimisticIdx]?.ui_position_locked,
               order_anchor_ms: currentMsgs[optimisticIdx]?.order_anchor_ms,
@@ -1174,8 +1247,10 @@ export default function App() {
               status: newMsg.status || newMsg.delivery_status || 'sent' }]);
           }
         } else {
+          const incomingBareSf = extractBareSnowflakeId(newMsg.fb_message_id);
           const existsIdx = currentMsgs.findIndex((message) => (
             (newMsg.fb_message_id && message.fb_message_id === newMsg.fb_message_id) ||
+            (incomingBareSf && extractBareSnowflakeId(message.fb_message_id) === incomingBareSf) ||
             (newMsg.id != null && message.id === newMsg.id) ||
             (!newMsg.is_outgoing && !message.is_outgoing &&
               (String(message.fb_message_id || '').startsWith('sidebar_preview_') || newMsg.provisional_incoming) &&
@@ -1187,6 +1262,12 @@ export default function App() {
             updated[mergeIdx] = {
               ...currentMsgs[mergeIdx],
               ...newMsg,
+              client_message_id: newMsg.client_message_id || currentMsgs[mergeIdx]?.client_message_id,
+              attachment_id: newMsg.attachment_id || currentMsgs[mergeIdx]?.attachment_id,
+              local_media_path: newMsg.local_media_path || currentMsgs[mergeIdx]?.local_media_path,
+              media_url: currentMsgs[mergeIdx]?.attachment_id
+                ? (currentMsgs[mergeIdx]?.media_url || newMsg.media_url)
+                : (newMsg.media_url || currentMsgs[mergeIdx]?.media_url),
               ui_render_key: currentMsgs[mergeIdx]?.ui_render_key,
               ui_position_locked: currentMsgs[mergeIdx]?.ui_position_locked,
               order_anchor_ms: currentMsgs[mergeIdx]?.order_anchor_ms,

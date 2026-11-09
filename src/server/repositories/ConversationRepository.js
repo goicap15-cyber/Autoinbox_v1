@@ -84,7 +84,20 @@ class ConversationRepository {
   }
 
   static extractSnowflakeBigInt(fbMessageId) {
-    const raw = String(fbMessageId || '').replace(/__bubble_\d+$/, '').trim();
+    const raw = String(fbMessageId || '').replace(/__bubble_\d+$/, '').replace(/_media(?:_\d+)?$/, '').trim();
+    const midMatch = raw.match(/^mid\.\$([A-Za-z0-9_-]{20,44})$/);
+    if (midMatch) {
+      try {
+        const b64 = midMatch[1].replace(/-/g, '+').replace(/_/g, '/');
+        const buf = Buffer.from(b64, 'base64');
+        if (buf.length >= 16) {
+          const last8 = buf.readBigUInt64BE(buf.length - 8);
+          const sf = (last8 & 0x03ffffffffffffffn) << 6n;
+          const ts = Number(sf >> 22n);
+          if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return sf;
+        }
+      } catch (_) {}
+    }
     const m = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
     if (!m) return null;
     try {
@@ -693,7 +706,7 @@ class ConversationRepository {
         sender_name = COALESCE(excluded.sender_name, messages.sender_name),
         content = CASE WHEN excluded.content IS NOT NULL AND excluded.content <> '' THEN excluded.content ELSE messages.content END,
         media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
-        media_url = COALESCE(excluded.media_url, messages.media_url),
+        media_url = CASE WHEN messages.attachment_id IS NOT NULL AND messages.media_url IS NOT NULL THEN messages.media_url ELSE COALESCE(excluded.media_url, messages.media_url) END,
         -- Một lần quét lại thiếu thông tin thời gian (ts <= 0) không được xóa
         -- timestamp đã lưu - tin cũ bị "mất thời gian" sẽ bị normalize xếp nhầm ngày.
         -- Quét lại cũng không được đẩy timestamp đã lưu tiến lên: DOM/sidebar
@@ -762,7 +775,7 @@ class ConversationRepository {
         // H5 (2026-11-09): quote reply do background.js history sync extract
         // (msg.reply_quote_text) - batch từng bỏ qua trường này nên tin rep
         // lần đầu bắt bằng quét lại mất "Trả lời tin nhắn của X".
-        const replyQuoteText = String(msg.reply_quote_text || '').replace(/\s+/g, ' ').trim().slice(0, 500) || null;
+        const replyQuoteText = String(msg.reply_quote_text || msg.reply_to_text || '').replace(/\s+/g, ' ').trim().slice(0, 500) || null;
         const senderRole = isOutgoing ? 'operator' : 'customer';
         const observedSequence = Number.isFinite(Number(msg.sequence_order ?? msg.dom_order))
           ? Number(msg.sequence_order ?? msg.dom_order)
@@ -929,59 +942,107 @@ class ConversationRepository {
         // gốc dán nhầm tên người gửi còn text thật nằm dưới id __bubble_N).
         // KHÔNG áp cho id anchor kiểu peer@msgr.N__bubble_N - đó là id tổng
         // hợp cho pending outgoing, có thể là tin thật riêng (like-group).
+        if (/^mid\.\$/.test(String(stableId))) {
+          const bubbleFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
+          const incomingText = String(content || '').trim();
+          const isIncomingLinkCardFile = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(incomingText);
+          if (bubbleFamilyId.length >= 12 && incomingText && !isPureEmojiContent && mediaType === 'text' && !mediaUrl) {
+            const likeEscFam = bubbleFamilyId.replace(/[_%]/g, (c) => `\\${c}`);
+            const familyRows = database.prepare(`
+              SELECT id, fb_message_id, content, media_url, sender_name FROM messages
+              WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+              ORDER BY id ASC
+            `).all(threadId, bubbleFamilyId, `${likeEscFam}__bubble_%`);
+            let handledByFamily = false;
+            for (const famRow of familyRows) {
+              const famText = String(famRow.content || '').trim();
+              if (!famText) continue;
+              const isFamLinkCardFile = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(famText);
+              if (famText === incomingText) {
+                stableId = famRow.fb_message_id;
+                handledByFamily = true;
+                break;
+              }
+              if ((famText.length > incomingText.length && famText.includes(incomingText) && incomingText.length >= 6)
+                || (isIncomingLinkCardFile && /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(famText))) {
+                result.skippedCount += 1;
+                handledByFamily = 'skip';
+                break;
+              }
+              if ((incomingText.length > famText.length && incomingText.includes(famText) && famText.length >= 6)
+                || (isFamLinkCardFile && /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(incomingText))) {
+                database.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, famRow.id);
+                stableId = famRow.fb_message_id;
+                handledByFamily = true;
+                break;
+              }
+            }
+            if (handledByFamily === 'skip') continue;
+          }
+        }
         if (/^mid\.\$/.test(String(stableId)) && /__bubble_\d+$/.test(String(stableId))) {
           const bubbleFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
           const bubbleFamilyBase = bubbleFamilyId.length >= 12
             ? database.prepare(`
-                SELECT id, content, media_url, reply_to_text FROM messages
+                SELECT id, content, media_url, sender_name, reply_to_text FROM messages
                 WHERE thread_id = ? AND fb_message_id = ?
                 LIMIT 1
               `).get(threadId, bubbleFamilyId)
             : null;
           if (bubbleFamilyBase) {
-            if (content && String(bubbleFamilyBase.content || '').trim() !== String(content).trim()) {
-              database.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, bubbleFamilyBase.id);
-            }
-            if (mediaUrl && !bubbleFamilyBase.media_url) {
-              database.prepare('UPDATE messages SET media_url = ? WHERE id = ?').run(mediaUrl, bubbleFamilyBase.id);
-            }
-            // H5 (2026-11-09): article reply quét lại emit id __bubble_N kèm
-            // quote trong khi base chỉ có content trần - quote phải chảy vào
-            // base trước khi lá bị skip, nếu không mất "Trả lời tin nhắn của X"
-            // (reproduce: "chuển luôn nhe s" thread ORDER MEDIA).
-            if (replyQuoteText && !String(bubbleFamilyBase.reply_to_text || '').trim()) {
-              database.prepare('UPDATE messages SET reply_to_text = ? WHERE id = ?').run(replyQuoteText, bubbleFamilyBase.id);
-            }
-            result.skippedCount += 1;
-            continue;
-          }
-          if (bubbleFamilyId.length >= 12) {
-            if (pendingBubbleMerges.has(bubbleFamilyId)) {
-              const stash = pendingBubbleMerges.get(bubbleFamilyId);
-              if (!stash.content && content) stash.content = content;
-              if (!stash.mediaUrl && mediaUrl) stash.mediaUrl = mediaUrl;
-              if (!stash.replyQuoteText && replyQuoteText) stash.replyQuoteText = replyQuoteText;
+            const baseText = String(bubbleFamilyBase.content || '').trim();
+            const incomingText = String(content || '').trim();
+            const baseSender = String(bubbleFamilyBase.sender_name || senderName || '').trim();
+            const isBaseEmptyOrSenderHeader = !baseText
+              || (baseSender && baseText.toLowerCase() === baseSender.toLowerCase());
+            if (baseText === incomingText || isBaseEmptyOrSenderHeader) {
+              if (incomingText && baseText !== incomingText) {
+                database.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, bubbleFamilyBase.id);
+              }
+              if (mediaUrl && !bubbleFamilyBase.media_url) {
+                database.prepare('UPDATE messages SET media_url = ? WHERE id = ?').run(mediaUrl, bubbleFamilyBase.id);
+              }
+              // H5 (2026-11-09): quote của lá phải chảy vào base trước khi lá bị
+              // skip (cả 2 nhánh skip: trùng content lẫn base shell), nếu không
+              // mất "Trả lời tin nhắn của X" (reproduce "chuển luôn nhe s"
+              // thread ORDER MEDIA).
+              if (replyQuoteText && !String(bubbleFamilyBase.reply_to_text || '').trim()) {
+                database.prepare('UPDATE messages SET reply_to_text = ? WHERE id = ?').run(replyQuoteText, bubbleFamilyBase.id);
+              }
               result.skippedCount += 1;
               continue;
             }
-            if (batchBaseIds.has(bubbleFamilyId)) {
-              // Base cùng batch nhưng chưa xử lý xong: hoãn bubble lại, giải
-              // quyết sau vòng lặp khi base đã nằm trong DB (hoặc đã bị guard bỏ).
-              pendingBubbleMerges.set(bubbleFamilyId, {
-                content, mediaUrl, mediaType,
-                senderId,
-                isOutgoing,
-                replyQuoteText,
-                timestampMs: observedTimestampMs,
-                timestampSource: observedTimestampSource,
-                createdAt: observedCreatedAt
-              });
-              continue;
-            }
+            // Nếu bubbleFamilyBase đã chứa nội dung tin nhắn thật KHÁC với
+            // incomingText, đây là bong bóng thứ N thật trong cùng article
+            // mid.$X -> giữ nguyên stableId (mid.$X__bubble_N) để không mất tin
+            // (upstream v1.0.26). Lá tự mang quote qua INSERT; downstream cấp
+            // slot __bubble_N trống hoặc trỏ về row trùng text trong family.
+          } else if (bubbleFamilyId.length >= 12 && pendingBubbleMerges.has(bubbleFamilyId)) {
+            const stash = pendingBubbleMerges.get(bubbleFamilyId);
+            if (!stash.content && content) stash.content = content;
+            if (!stash.mediaUrl && mediaUrl) stash.mediaUrl = mediaUrl;
+            if (!stash.replyQuoteText && replyQuoteText) stash.replyQuoteText = replyQuoteText;
+            result.skippedCount += 1;
+            continue;
+          } else if (bubbleFamilyId.length >= 12 && batchBaseIds.has(bubbleFamilyId)) {
+            // Base cùng batch nhưng chưa xử lý xong: hoãn bubble lại, giải
+            // quyết sau vòng lặp khi base đã nằm trong DB (hoặc đã bị guard bỏ).
+            pendingBubbleMerges.set(bubbleFamilyId, {
+              content, mediaUrl, mediaType,
+              senderId,
+              isOutgoing,
+              replyQuoteText,
+              timestampMs: observedTimestampMs,
+              timestampSource: observedTimestampSource,
+              createdAt: observedCreatedAt
+            });
+            continue;
+          } else if (bubbleFamilyId.length >= 12) {
             // Không có base đâu cả (DB lẫn batch): bubble đầu tiên làm đại
-            // diện dưới id base - observation sau (base hoặc bubble khác) tự
-            // khớp existing thay vì insert row thứ hai.
+            // diện dưới id base, đồng thời đánh dấu vào batchBaseIds để các
+            // bubble tiếp theo trong cùng article giữ nguyên __bubble_2, __bubble_3.
             stableId = bubbleFamilyId;
+            batchBaseIds.add(bubbleFamilyId);
           }
         }
         // Otid thuần số + out=0: đối xứng guard WS — otid do client MÌNH sinh
@@ -1004,6 +1065,40 @@ class ConversationRepository {
           if (midOwnerRow && midOwnerRow.thread_id !== threadId) {
             stableId = `${stableId}::${threadId}`;
             existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+          } else if (existing && mediaType === 'text' && !mediaUrl && content) {
+            // Cùng threadId + cùng stableId nhưng nội dung text KHÁC nhau hoàn toàn
+            // (do nhiều bong bóng liên tiếp trong 1 article dùng chung data-message-id):
+            // tách sang slot __bubble_N để không ghi đè mất bong bóng trước đó.
+            const existingText = String(existing.content || '').trim();
+            const newText = String(content || '').trim();
+            const existingSender = String(existing.sender_name || senderName || '').trim();
+            const isExistingSenderHeader = existingSender && existingText.toLowerCase() === existingSender.toLowerCase();
+            if (existingText && newText && existingText !== newText && !isExistingSenderHeader
+              && !/^sidebar_preview_|^pending_/.test(String(stableId))) {
+              const baseFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
+              const likeEsc = baseFamilyId.replace(/[_%]/g, (c) => `\\${c}`);
+              const sameTextInFamily = database.prepare(`
+                SELECT fb_message_id FROM messages
+                WHERE thread_id = ?
+                  AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+                  AND TRIM(COALESCE(content, '')) = ?
+                LIMIT 1
+              `).get(threadId, baseFamilyId, `${likeEsc}__bubble_%`, newText);
+              if (sameTextInFamily) {
+                stableId = sameTextInFamily.fb_message_id;
+                existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+              } else {
+                for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
+                  const candidateBubbleId = `${baseFamilyId}__bubble_${bIdx}`;
+                  const slotTaken = database.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateBubbleId);
+                  if (!slotTaken) {
+                    stableId = candidateBubbleId;
+                    existing = null;
+                    break;
+                  }
+                }
+              }
+            }
           }
         }
         let promotedSidebarPreview = false;
@@ -1026,22 +1121,92 @@ class ConversationRepository {
             }
           } catch (_) { /* non-fatal: fall through to normal insert path */ }
         }
-        if (!existing && isOutgoing && msg.fb_message_id && String(msg.fb_message_id).startsWith('mid.') && content) {
+        if (!existing && isOutgoing && msg.fb_message_id) {
           try {
-            const pendingCandidate = database.prepare(`
-              SELECT id, fb_message_id, client_message_id FROM messages
-              WHERE thread_id = ? AND is_outgoing = 1
-                AND (fb_message_id LIKE 'pending_%' OR delivery_status = 'pending')
-                AND COALESCE(content, '') = COALESCE(?, '')
-                AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 120000)
-              ORDER BY id DESC LIMIT 1
-            `).get(threadId, content, observedTimestampMs, observedTimestampMs);
-            if (pendingCandidate) {
-              database.prepare(
-                'UPDATE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\') WHERE id = ?'
-              ).run(String(msg.fb_message_id), pendingCandidate.id);
-              stableId = String(msg.fb_message_id);
-              existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+            const cleanedFbId = String(msg.fb_message_id)
+              .replace(/::[^:]+$/, '')
+              .replace(/_media$/, '')
+              .replace(/__bubble_\d+$/, '')
+              .trim();
+            const bareSfMatch = cleanedFbId.match(/^(?:\d+@msgr\.)?(\d{15,21})$/);
+            const bareSf = bareSfMatch ? bareSfMatch[1] : null;
+            if (bareSf) {
+              const sfCandidate = database.prepare(`
+                SELECT id, fb_message_id FROM messages
+                WHERE thread_id = ? AND is_outgoing = 1
+                  AND (fb_message_id = ? OR fb_message_id LIKE '%@msgr.' || ?)
+                ORDER BY id DESC LIMIT 1
+              `).get(threadId, bareSf, bareSf);
+              if (sfCandidate) {
+                if (String(msg.fb_message_id).includes('@msgr.') && !String(sfCandidate.fb_message_id).includes('@msgr.')) {
+                  database.prepare('UPDATE OR IGNORE messages SET fb_message_id = ? WHERE id = ?')
+                    .run(String(msg.fb_message_id), sfCandidate.id);
+                  stableId = String(msg.fb_message_id);
+                } else {
+                  stableId = String(sfCandidate.fb_message_id);
+                }
+                existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+              }
+            }
+            const isCanonicalIncomingId = String(msg.fb_message_id).startsWith('mid.')
+              || String(msg.fb_message_id).includes('@msgr.')
+              || /^\d{15,21}$/.test(String(msg.fb_message_id));
+            if (!existing && isCanonicalIncomingId && !/__bubble_\d+$/.test(String(msg.fb_message_id))) {
+              if (mediaType === 'text' && !mediaUrl && content) {
+                const pendingCandidate = database.prepare(`
+                  SELECT id, fb_message_id, client_message_id FROM messages
+                  WHERE thread_id = ? AND is_outgoing = 1
+                    AND (
+                      fb_message_id LIKE 'pending_%'
+                      OR delivery_status = 'pending'
+                      OR (fb_message_id GLOB '[0-9]*' AND fb_message_id NOT LIKE '%@msgr.%')
+                    )
+                    AND COALESCE(content, '') = COALESCE(?, '')
+                    AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 120000)
+                  ORDER BY id DESC LIMIT 1
+                `).get(threadId, content, observedTimestampMs, observedTimestampMs);
+                if (pendingCandidate) {
+                  database.prepare(
+                    'UPDATE OR IGNORE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\') WHERE id = ?'
+                  ).run(String(msg.fb_message_id), pendingCandidate.id);
+                  stableId = String(msg.fb_message_id);
+                  existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+                }
+              } else if (mediaType !== 'text' || mediaUrl) {
+                const mediaCandidate = database.prepare(`
+                  SELECT id, fb_message_id, client_message_id, created_at, timestamp_ms FROM messages
+                  WHERE thread_id = ? AND is_outgoing = 1
+                    AND (attachment_id IS NOT NULL OR client_message_id IS NOT NULL)
+                    AND (
+                      fb_message_id LIKE 'pending_%'
+                      OR delivery_status = 'pending'
+                      OR fb_message_id LIKE '%__bubble_%'
+                      OR (fb_message_id GLOB '[0-9]*' AND fb_message_id NOT LIKE '%@msgr.%')
+                    )
+                    AND (attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))
+                    AND datetime(created_at) >= datetime('now', '-180 seconds')
+                  ORDER BY id DESC LIMIT 1
+                `).get(threadId);
+                if (mediaCandidate) {
+                  try {
+                    const OutboundConfirmationService = require('../services/OutboundConfirmationService');
+                    OutboundConfirmationService.confirmObservation({
+                      threadId,
+                      fbMessageId: String(msg.fb_message_id),
+                      isOutgoing: true,
+                      mediaType: mediaType !== 'text' ? mediaType : 'image',
+                      content: content || '',
+                      observedAt: observedTimestampMs || Date.now(),
+                      confirmationSource: 'history_sync'
+                    }, { database });
+                  } catch (_) {}
+                  database.prepare(
+                    'UPDATE OR IGNORE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\'), delivery_error = NULL WHERE id = ?'
+                  ).run(String(msg.fb_message_id), mediaCandidate.id);
+                  stableId = String(msg.fb_message_id);
+                  existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+                }
+              }
             }
           } catch (_) { /* non-fatal */ }
         }
@@ -1194,6 +1359,14 @@ class ConversationRepository {
           const mediaChanged = (mediaUrl && existing.media_url !== mediaUrl) || (mediaType !== 'text' && existing.media_type !== mediaType);
           const changed = existing.content !== content || mediaChanged || timestampChanged || directionChanged || sequenceChanged || roleChanged || senderNameChanged;
           if (!changed) {
+            // v1.0.26 (upstream): quote reply đến sau phải được điền cả khi row
+            // không đổi gì khác - nhánh no-change không chạy INSERT/UPSERT nên
+            // ON CONFLICT fill không có cơ hội chạy.
+            if (replyQuoteText) {
+              try {
+                database.prepare("UPDATE messages SET reply_to_text = COALESCE(NULLIF(TRIM(COALESCE(reply_to_text, '')), ''), ?) WHERE fb_message_id = ? AND (reply_to_text IS NULL OR TRIM(reply_to_text) = '')").run(replyQuoteText, stableId);
+              } catch (_) {}
+            }
             if (promotedSidebarPreview) result.updatedIds.push(stableId);
             else result.skippedCount += 1;
             if (!upsertIsOutgoing && content && !/^sidebar_preview_/.test(stableId)) incomingAbsorbContents.push(content);
@@ -1216,9 +1389,34 @@ class ConversationRepository {
       // Giải quyết bubble đã hoãn: base giờ đã đi qua vòng lặp.
       for (const [familyId, stash] of pendingBubbleMerges) {
         const baseRow = database.prepare(
-          'SELECT id, content, media_url, media_type, reply_to_text FROM messages WHERE thread_id = ? AND fb_message_id = ? LIMIT 1'
+          'SELECT id, content, media_url, media_type, sender_name, reply_to_text FROM messages WHERE thread_id = ? AND fb_message_id = ? LIMIT 1'
         ).get(threadId, familyId);
         if (baseRow) {
+          const baseText = String(baseRow.content || '').trim();
+          const stashText = String(stash.content || '').trim();
+          const baseSenderHdr = String(baseRow.sender_name || '').trim();
+          const isShellBaseRow = !baseText
+            || (baseSenderHdr && baseText.toLowerCase() === baseSenderHdr.toLowerCase());
+          // upstream v1.0.26: base đã có nội dung thật KHÁC stash -> stash là
+          // bong bóng thứ N thật, KHÔNG được đè mất content base - cấp slot
+          // __bubble_N riêng (đồng bộ ngữ nghĩa family guard ở trên).
+          if (stashText && baseText && !isShellBaseRow && baseText !== stashText
+            && baseRow.media_type === 'text' && !baseRow.media_url) {
+            let slotId = null;
+            for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
+              const candidateBubbleId = `${familyId}__bubble_${bIdx}`;
+              if (!database.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateBubbleId)) {
+                slotId = candidateBubbleId;
+                break;
+              }
+            }
+            const ownBubbleId = slotId || `${familyId}__bubble_x${Date.now() % 100000}`;
+            insertMsg.run(threadId, ownBubbleId, stash.senderId, null, stash.content, stash.mediaType || 'text', stash.mediaUrl,
+              stash.timestampMs, stash.timestampSource, stash.isOutgoing,
+              stash.isOutgoing ? 'operator' : 'customer', null, 'confirmed', stash.createdAt, stash.replyQuoteText || null);
+            result.insertedIds.push(ownBubbleId);
+            if (!stash.isOutgoing && stash.content) incomingAbsorbContents.push(stash.content);
+          } else {
           // F2: base call row không được bơm chrome lá ('Call back') đè nhãn
           // đã chuẩn hóa - nội dung call row chỉ qua normalizeCallRowContent.
           if (stash.content && baseRow.media_type !== 'call' && String(baseRow.content || '').trim() !== String(stash.content).trim()) {
@@ -1230,6 +1428,7 @@ class ConversationRepository {
           // H5 (2026-11-09): quote của lá hoãn cũng phải chảy vào base đã lưu.
           if (stash.replyQuoteText && !String(baseRow.reply_to_text || '').trim()) {
             database.prepare('UPDATE messages SET reply_to_text = ? WHERE id = ?').run(stash.replyQuoteText, baseRow.id);
+          }
           }
         } else {
           // Base bị guard bỏ hoặc không tồn tại: bubble đại diện lên đời base.
@@ -1257,18 +1456,37 @@ class ConversationRepository {
 
   static normalizeMessageSequence(threadId, database = getDefaultDb()) {
     const rows = database.prepare(`
-      SELECT id, fb_message_id, timestamp_ms, created_at, sequence_order
+      SELECT id, fb_message_id, client_message_id, attachment_id, timestamp_ms, created_at, sequence_order
       FROM messages
       WHERE thread_id = ?
     `).all(threadId);
 
     if (rows.length === 0) return 0;
 
+    function parseRowCreatedMs(row) {
+      if (!row?.created_at) return 0;
+      const s = String(row.created_at).trim();
+      if (s.endsWith('Z') || s.includes('T')) return Date.parse(s) || 0;
+      return Date.parse(s.replace(' ', 'T') + 'Z') || 0;
+    }
+
     // Backfill timestamp_ms từ E2EE Snowflake ID nếu tin nhắn bị thiếu timestamp_ms (= 0)
     // hoặc bị đóng dấu nhầm bằng giờ quét lại (lệch > 2 giây so với giờ gốc trên server FB).
+    // Ngoại lệ: row do CRM tạo (client_message_id / attachment_id) bị gắn nhầm anchor cũ __bubble_N
+    // không bao giờ được lùi timestamp_ms về ngày hôm qua theo anchor cũ.
     const updateTsStmt = database.prepare("UPDATE messages SET timestamp_ms = ?, timestamp_source = 'facebook_payload' WHERE id = ?");
     for (const row of rows) {
+      const createdMs = parseRowCreatedMs(row);
+      const isCrmRowWithBubbleAnchor = Boolean(row.client_message_id || row.attachment_id)
+        && /__bubble_\d+$/.test(String(row.fb_message_id || ''));
       const sfTs = ConversationRepository.extractSnowflakeTimestampMs(row.fb_message_id);
+      if (isCrmRowWithBubbleAnchor && createdMs > 0 && sfTs > 0 && sfTs < createdMs - 30000) {
+        if (Math.abs(Number(row.timestamp_ms || 0) - createdMs) > 2000) {
+          row.timestamp_ms = createdMs;
+          try { updateTsStmt.run(createdMs, row.id); } catch (_) {}
+        }
+        continue;
+      }
       if (sfTs > 0) {
         const curTs = Number(row.timestamp_ms || 0);
         if (curTs <= 0 || Math.abs(curTs - sfTs) > 2000) {
@@ -1281,21 +1499,29 @@ class ConversationRepository {
     if (rows.length < 2) return rows.length;
 
     function parseSafeUtcTimestamp(row) {
+      const createdMs = parseRowCreatedMs(row);
+      const isCrmRowWithBubbleAnchor = Boolean(row?.client_message_id || row?.attachment_id)
+        && /__bubble_\d+$/.test(String(row?.fb_message_id || ''));
       const sfTs = ConversationRepository.extractSnowflakeTimestampMs(row?.fb_message_id);
-      if (sfTs > 0) return sfTs;
+      if (sfTs > 0 && !(isCrmRowWithBubbleAnchor && createdMs > 0 && sfTs < createdMs - 30000)) {
+        return sfTs;
+      }
       const ms = Number(row?.timestamp_ms || 0);
       if (Number.isFinite(ms) && ms > 0) return ms;
-      if (!row?.created_at) return 0;
-      const s = String(row.created_at).trim();
-      if (s.endsWith('Z')) return Date.parse(s) || 0;
-      return Date.parse(s.replace(' ', 'T') + 'Z') || 0;
+      if (Boolean(row?.client_message_id || row?.attachment_id || String(row?.fb_message_id || '').startsWith('sidebar_preview_'))) {
+        return createdMs;
+      }
+      return 0;
     }
 
     rows.sort((a, b) => {
       const sfA = ConversationRepository.extractSnowflakeBigInt(a?.fb_message_id);
       const sfB = ConversationRepository.extractSnowflakeBigInt(b?.fb_message_id);
-      if (sfA !== null && sfB !== null && sfA !== sfB) {
-        return sfA < sfB ? -1 : 1;
+      if (sfA !== null && sfB !== null) {
+        if (sfA !== sfB) return sfA < sfB ? -1 : 1;
+        const occA = ConversationRepository.bubbleOccurrenceId(a?.fb_message_id);
+        const occB = ConversationRepository.bubbleOccurrenceId(b?.fb_message_id);
+        if (occA !== occB) return occA - occB;
       }
 
       const tsA = parseSafeUtcTimestamp(a);
@@ -1307,9 +1533,6 @@ class ConversationRepository {
       const minuteB = tsB > 0 ? Math.floor(tsB / 60000) : 0;
       if (minuteA > 0 && minuteB > 0 && minuteA !== minuteB) {
         return minuteA - minuteB;
-      }
-      if ((minuteA > 0) !== (minuteB > 0)) {
-        return minuteA > 0 ? -1 : 1;
       }
 
       const orderA = a.sequence_order !== null && a.sequence_order !== undefined ? Number(a.sequence_order) : a.id;
@@ -1485,8 +1708,9 @@ class ConversationRepository {
       && (existingMsg.delivery_status === null
         || !['pending', 'sending'].includes(String(existingMsg.delivery_status)));
     const isDecisiveGeometryObservation = isCrawlObservation
-      && directionEvidence === 'geometry'
-      && existingRowHasNoCrmTrace;
+      && (directionEvidence === 'geometry' || (normalizedOutgoing === 0 && (directionEvidence === 'avatar' || directionEvidence === 'label_name')))
+      && existingRowHasNoCrmTrace
+      && Number(existingMsg.is_outgoing) !== normalizedOutgoing;
 
     // Hard guard: if the stored row is already confirmed outgoing (is_outgoing=1),
     // a crawl/history source alone must never flip it to incoming. Only an
@@ -1520,20 +1744,12 @@ class ConversationRepository {
     }
 
     // Chiều ngược: quét lại với nhãn hydrate lỗi thời ("do Bạn gửi") không
-    // được lật row INCOMING đã có tên người gửi thật thành OUTGOING. Tên này
-    // chỉ được điền khi giải được từ nhãn Messenger nên là bằng chứng hướng
-    // đáng tin (reproduce 2026-11-03: heal xong bị lật lại bằng 2-strike).
-    // sender_id='CONTACT' KHÔNG tính: đó là placeholder chung của mọi row
-    // incoming — tính theo nó là giết luôn 2-strike hysteresis của feature 019
-    // (page_dom_observer sửa chiều sai do đoán hình học). Ngoại lệ geometry:
-    // row không dấu vết CRM + quan sát quyết đoán được sửa chiều ngược lại
-    // (chữa heal lật sai tin operator gõ tay).
+    // được lật row INCOMING đã có tên người gửi thật thành OUTGOING.
     const crawlFlipsNamedIncoming = isCrawlObservation
-      && !isDecisiveGeometryObservation
       && Number(existingMsg.is_outgoing) === 0
       && normalizedOutgoing === 1
       && (existingMsg.sender_name
-        && !/^(?:bạn|you)$/i.test(String(existingMsg.sender_name).trim()));
+        && !/^(?:bạn|you|khách hàng|customer|người dùng facebook|facebook user)$/i.test(String(existingMsg.sender_name).trim()));
     if (crawlFlipsNamedIncoming) {
       console.log(`[ConversationRepo] 🛡️ Blocked crawl flip of named incoming row: ${stableMessageId} (source=${source})`);
       directionFlipCandidates.delete(stableMessageId);
@@ -1984,7 +2200,7 @@ class ConversationRepository {
           ELSE messages.content
         END,
         media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
-        media_url = COALESCE(excluded.media_url, messages.media_url),
+        media_url = CASE WHEN messages.attachment_id IS NOT NULL AND messages.media_url IS NOT NULL THEN messages.media_url ELSE COALESCE(excluded.media_url, messages.media_url) END,
         timestamp_ms = CASE WHEN ? = 1 THEN excluded.timestamp_ms ELSE messages.timestamp_ms END,
         timestamp_source = CASE WHEN ? = 1 THEN excluded.timestamp_source ELSE messages.timestamp_source END,
         is_outgoing = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.is_outgoing ELSE messages.is_outgoing END,

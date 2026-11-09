@@ -108,6 +108,9 @@ function isBareVietnamMobileText(text) {
     // 'Bạn đã gửi một file đính kèm.') - không bao giờ là tin nhắn thật.
     /^Bạn đã gửi (?:một )?(?:file|tệp|tập tin|ảnh|video) đính kèm\.?$/i,
     /^You sent (?:an )?attachment\.?$/i,
+    /^(?:(?:Bạn|Tôi|You|[^\n]{1,80})\s+)?(?:đã gửi|sent|shared)\s+(?:(?:một|\d+|an?|one)\s+)?(?:ảnh|bức ảnh|photo|photos|image|images|video|videos|tệp|file|files|tập tin|nhãn dán|sticker|GIF|tin nhắn thoại|file âm thanh|voice message|audio)(?:\s+đính kèm)?\.?$/iu,
+    /^(?:[^\n]{1,60}[\s\u00a0]*[·•][\s\u00a0]*)?(?:Đã chỉnh sửa|Edited)\.?$/iu,
+    /^(?:drive\.google\.com|docs\.google\.com|Google Docs|Google Drive|youtube\.com|youtu\.be|facebook\.com|fb\.watch|tiktok\.com|vt\.tiktok\.com|instagram\.com|zalo\.me|shopee\.vn|lazada\.vn|tiki\.vn|maps\.app\.goo\.gl|goo\.gl|bit\.ly)$/i,
 
     /^Bạn đã phản hồi ghi chú của (?:họ|họ\.|họ\.?)$/i,
     /^Bạn đã trả lời tin của .+\.$/i,

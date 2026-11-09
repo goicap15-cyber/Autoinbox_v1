@@ -102,7 +102,7 @@ const InitialMessageSweepService = require('./services/InitialMessageSweepServic
 // Chức năng Page chạy bằng Messenger Platform chính thức (Graph API + webhook)
 const pageApiService = require('./services/PageApiService');
 const setupAutomation = require('./services/AppSetupAutomation');
-const { isChangedIncomingSidebarPreview, isFreshRowTimeText } = require('./utils/sidebarIncomingDetection');
+const { isChangedIncomingSidebarPreview, isFreshRowTimeText, isStaleRowTimeText } = require('./utils/sidebarIncomingDetection');
 
 // Dedupe media-hint theo thread: dòng thời gian sidebar giữ trạng thái "Bây
 // giờ"/fresh ~1 phút và quét 2s vẫn thấy -> không cho bắn sync lặp.
@@ -2448,14 +2448,50 @@ wss.on('connection', (ws, req) => {
           console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_RESULT_RECEIVED', thread_id: String(thread_id), client_message_id, success: !!success, official_fb_id: !!officialFbId, error_code: error_code || null, error: error || null, at: new Date().toISOString() }));
           
           if (success && officialFbId) {
-            db.prepare(`
-              UPDATE messages 
-              SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL
+            const currentRow = db.prepare(`
+              SELECT id, thread_id, fb_message_id, delivery_status
+              FROM messages
               WHERE client_message_id = ? OR fb_message_id = ?
-            `).run(officialFbId, client_message_id, `pending_${client_message_id}`);
+              ORDER BY id DESC LIMIT 1
+            `).get(client_message_id, `pending_${client_message_id}`);
+            let effectiveFbId = String(officialFbId);
+            if (currentRow) {
+              const currentFbId = String(currentRow.fb_message_id || '');
+              const currentIsCanonical = currentFbId.startsWith('mid.') || currentFbId.includes('@msgr.');
+              const incomingIsBareNumeric = /^\d+$/.test(effectiveFbId);
+              if (currentIsCanonical && incomingIsBareNumeric) {
+                effectiveFbId = currentFbId;
+              }
+              const bareSf = OutboundDomCorrelationService.bareSnowflakePart(effectiveFbId);
+              const conflictingRow = db.prepare(`
+                SELECT id, fb_message_id FROM messages
+                WHERE id <> ? AND (
+                  fb_message_id = ?
+                  OR (? IS NOT NULL AND thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%@msgr.' || ?))
+                )
+                LIMIT 1
+              `).get(currentRow.id, effectiveFbId, bareSf, currentRow.thread_id, bareSf, bareSf);
+              if (conflictingRow) {
+                if (String(conflictingRow.fb_message_id || '').includes('@msgr.')) {
+                  effectiveFbId = String(conflictingRow.fb_message_id);
+                }
+                db.prepare('DELETE FROM messages WHERE id = ?').run(conflictingRow.id);
+              }
+              db.prepare(`
+                UPDATE messages
+                SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL
+                WHERE id = ?
+              `).run(effectiveFbId, currentRow.id);
+            } else {
+              db.prepare(`
+                UPDATE OR IGNORE messages
+                SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL
+                WHERE client_message_id = ? OR fb_message_id = ?
+              `).run(effectiveFbId, client_message_id, `pending_${client_message_id}`);
+            }
             updateQueueStatusFromClientMessage(client_message_id, 'sent');
 
-            io.emit('MESSAGE_SENT', { thread_id, client_message_id, success: true, fb_message_id: officialFbId, status: 'sent' });
+            io.emit('MESSAGE_SENT', { thread_id, client_message_id, success: true, fb_message_id: effectiveFbId, status: 'sent' });
           } else if (error_code === 'COMPOSER_DISPATCHED') {
             // Check if DOM/network confirmation already arrived before this result
             const existingRow = db.prepare(`SELECT id, fb_message_id, media_type, delivery_status, delivery_error FROM messages WHERE client_message_id = ? OR fb_message_id = ?`).get(client_message_id, `pending_${client_message_id}`);
@@ -3359,7 +3395,7 @@ wss.on('connection', (ws, req) => {
                 isOutgoing: true,
                 mediaType: m.media_type || 'text',
                 content: m.content,
-                observedAt: Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now(),
+                observedAt: tsMs || Number(m.timestamp_ms) || Date.parse(m.created_at || '') || Date.now(),
                 confirmationSource: m.source === 'page_dom_observer' ? 'page_dom' : 'personal_dom'
               }, { database: db });
 
@@ -3372,19 +3408,35 @@ wss.on('connection', (ws, req) => {
               }
 
               // Rich recovery had first chance above. If this official id is
-              // still already present, it is now a true duplicate and must
-              // not fall through to another insert.
+              // still already present (exact or same bare Snowflake ID in thread),
+              // it is now a true duplicate and must not fall through to another insert.
               if (m.fb_message_id) {
-                const existingFbId = db.prepare('SELECT id, is_outgoing, delivery_status, direction_status FROM messages WHERE fb_message_id = ?').get(m.fb_message_id);
+                const bareSf = OutboundDomCorrelationService.bareSnowflakePart(m.fb_message_id);
+                const existingFbId = db.prepare(`
+                  SELECT id, fb_message_id, client_message_id, is_outgoing, delivery_status, direction_status
+                  FROM messages
+                  WHERE fb_message_id = ?
+                     OR (? IS NOT NULL AND thread_id = ? AND is_outgoing = 1 AND (fb_message_id = ? OR fb_message_id LIKE '%@msgr.' || ?))
+                  ORDER BY id DESC LIMIT 1
+                `).get(m.fb_message_id, bareSf, canonicalThreadId, bareSf, bareSf);
                 if (existingFbId && existingFbId.is_outgoing === 1 && existingFbId.delivery_status === 'sent') {
-                  if (existingFbId.direction_status === 'pending') {
-                    // Fix B đánh pending cho outgoing yếu chứng, nhưng mọi echo
-                    // sau đều bị chặn tại đây nên reconcile 2-strike không bao
-                    // giờ chạy -> pending kẹt vĩnh viễn, tin mình render như
-                    // tin khách (reproduce 2026-11-03). Observation trusted này
-                    // là lượt xác nhận thứ hai: confirm chiều + đẩy row mới.
+                  const shouldUpgradeId = String(m.fb_message_id).includes('@msgr.') && !String(existingFbId.fb_message_id || '').includes('@msgr.');
+                  if (shouldUpgradeId) {
+                    db.prepare('UPDATE OR IGNORE messages SET fb_message_id = ?, direction_status = ? WHERE id = ?')
+                      .run(m.fb_message_id, 'confirmed', existingFbId.id);
+                  } else if (existingFbId.direction_status === 'pending') {
                     db.prepare("UPDATE messages SET direction_status = 'confirmed' WHERE id = ? AND direction_status = 'pending'").run(existingFbId.id);
+                  }
+                  if (shouldUpgradeId || existingFbId.direction_status === 'pending') {
                     const confirmedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(existingFbId.id);
+                    if (confirmedRow?.client_message_id) {
+                      io.emit('MESSAGE_SENT', {
+                        thread_id: canonicalThreadId,
+                        client_message_id: confirmedRow.client_message_id,
+                        fb_message_id: confirmedRow.fb_message_id,
+                        status: 'sent'
+                      });
+                    }
                     io.emit('NEW_MESSAGE', withAttachmentAccessUrl({
                       ...confirmedRow,
                       thread_id: canonicalThreadId,
@@ -3393,7 +3445,7 @@ wss.on('connection', (ws, req) => {
                       direction_status: 'confirmed',
                       status: confirmedRow.delivery_status || 'sent'
                     }));
-                    console.log(`[WS] ✅ Confirm chiều outgoing cho row pending ${existingFbId.id} (fb_message_id ${m.fb_message_id}).`);
+                    console.log(`[WS] ✅ Đồng bộ/nâng cấp row outgoing ${existingFbId.id} (${existingFbId.fb_message_id} -> ${m.fb_message_id}).`);
                   } else {
                     console.log(`[WS] Known confirmed fb_message_id (${m.fb_message_id}); pending recovery found no candidate.`);
                   }
@@ -3402,37 +3454,31 @@ wss.on('connection', (ws, req) => {
               }
 
               const isMediaConfirmation = OutboundDomCorrelationService.isMediaConfirmationEvent(m);
-              // Spec 039/040: a plain text-content match only proves the caption
-              // rendered on Facebook, not that an attachment/manifest riding
-              // alongside it actually attached and sent (live testing showed
-              // Facebook can post just the caption while the file silently
-              // fails to attach). Excluding queue rows with attachment_id/
-              // manifest_id here forces such dispatches through the explicit
-              // media-confirmation path instead, so they fail safe to
-              // 'unknown' on timeout rather than falsely reporting 'sent'.
               const observedMediaKind = (m.media_type && m.media_type !== 'text')
                 ? (String(m.media_type).startsWith('video') ? 'video' : 'image')
                 : (m.media_url ? 'image' : 'any');
 
               let pending = isMediaConfirmation
-                ? OutboundDomCorrelationService.matchPendingImageOutbound(db, internalThreadId, observedMediaKind)
+                ? OutboundDomCorrelationService.matchPendingImageOutbound(db, internalThreadId, observedMediaKind, tsMs, m.fb_message_id)
                 : db.prepare(`
-                    SELECT outbound.id, outbound.client_message_id FROM messages outbound
+                    SELECT outbound.id, outbound.client_message_id, outbound.thread_id, outbound.attachment_id, outbound.media_type FROM messages outbound
                     LEFT JOIN outbound_attempts attempt ON outbound.latest_attempt_id = attempt.id
                     LEFT JOIN message_queue queued ON (
                       outbound.client_message_id = 'queue_' || queued.id
                       OR attempt.id = queued.outbound_attempt_id
                     )
                     WHERE outbound.thread_id = ? AND outbound.content = ? AND outbound.is_outgoing = 1
-                      AND outbound.delivery_status = 'pending'
+                      AND (
+                        outbound.delivery_status = 'pending'
+                        OR outbound.fb_message_id LIKE 'pending_%'
+                        OR (outbound.fb_message_id GLOB '[0-9]*' AND outbound.fb_message_id NOT LIKE '%@msgr.%')
+                      )
+                      AND datetime(outbound.created_at) >= datetime('now', '-120 seconds')
                       AND outbound.attachment_id IS NULL AND (outbound.media_type IS NULL OR outbound.media_type = 'text')
                       AND (queued.id IS NULL OR (queued.attachment_id IS NULL AND queued.manifest_id IS NULL))
                     ORDER BY outbound.id ASC LIMIT 1
                   `).get(internalThreadId, m.content);
 
-              if (!pending) {
-                pending = OutboundDomCorrelationService.matchPendingImageOutbound(db, internalThreadId, observedMediaKind);
-              }
               if (pending) {
                 const confirmed = OutboundDomCorrelationService.confirmPendingOutbound(db, io, pending, {
                   fbMessageId: m.fb_message_id,
@@ -3446,26 +3492,39 @@ wss.on('connection', (ws, req) => {
                 }
               }
 
-              // Feature 020: Facebook sometimes assigns an outgoing message a
-              // temporary, non-"mid.$" numeric fb_message_id first, then a
-              // permanent "mid.$..." id on a later scan once fully confirmed.
-              // The pending-match above only bridges the FIRST id-arrival (it
-              // consumes the pending row, flipping it to 'sent'); the second
-              // id-arrival finds no pending row left and no existing row
-              // under its own id, so without this check it falls through to
-              // a plain insert - a real duplicate row for the same send.
-              // Recognize "already sent, same content, different id, very
-              // recent" as an id upgrade and update in place instead.
-               // Text rows carry a CRM client_message_id through their whole lifecycle.
-               // Do not use content-based temporary-id upgrades for text:
-               // two identical sends are two independent messages.
-               const observedAsMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
-               if (m.fb_message_id && observedAsMedia) {
-                 const recentSent = OutboundDomCorrelationService.findTemporaryIdUpgrade(
-                   db, canonicalThreadId, { ...m, timestamp_ms: tsMs, created_at: createdAt }, true
-                 );
+              const observedAsMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
+              if (m.fb_message_id) {
+                const recentSent = OutboundDomCorrelationService.findTemporaryIdUpgrade(
+                  db, canonicalThreadId, { ...m, timestamp_ms: tsMs, created_at: createdAt }, observedAsMedia
+                );
                 if (recentSent) {
-                  db.prepare('UPDATE messages SET fb_message_id = ? WHERE id = ?').run(m.fb_message_id, recentSent.id);
+                  const upgradeSfTs = ConversationRepository.extractSnowflakeTimestampMs(m.fb_message_id);
+                  db.prepare(`
+                    UPDATE OR IGNORE messages
+                    SET fb_message_id = ?,
+                        delivery_status = 'sent',
+                        timestamp_ms = CASE WHEN ? > 0 THEN ? ELSE timestamp_ms END,
+                        timestamp_source = CASE WHEN ? > 0 THEN 'facebook_payload' ELSE timestamp_source END
+                    WHERE id = ?
+                  `).run(m.fb_message_id, upgradeSfTs, upgradeSfTs, upgradeSfTs, recentSent.id);
+                  const upgradedRow = db.prepare('SELECT * FROM messages WHERE id = ?').get(recentSent.id);
+                  if (upgradedRow) {
+                    if (upgradedRow.client_message_id) {
+                      io.emit('MESSAGE_SENT', {
+                        thread_id: canonicalThreadId,
+                        client_message_id: upgradedRow.client_message_id,
+                        fb_message_id: upgradedRow.fb_message_id,
+                        status: 'sent'
+                      });
+                    }
+                    io.emit('NEW_MESSAGE', withAttachmentAccessUrl({
+                      ...upgradedRow,
+                      thread_id: canonicalThreadId,
+                      account_id: targetAccountId,
+                      is_outgoing: true,
+                      status: upgradedRow.delivery_status || 'sent'
+                    }));
+                  }
                   console.log(`[WS] Nâng cấp fb_message_id tạm ${recentSent.fb_message_id} -> ${m.fb_message_id} (id ${recentSent.id}), cùng 1 tin gửi đi`);
                   console.log('[OUTBOUND_TRACE]', JSON.stringify({ stage: 'BACKEND_DOM_ID_UPGRADED', thread_id: String(canonicalThreadId), from_fb_message_id: recentSent.fb_message_id, to_fb_message_id: m.fb_message_id, at: new Date().toISOString() }));
                   break;
@@ -3511,15 +3570,27 @@ wss.on('connection', (ws, req) => {
             const isMedia = !!(m.media_url || (m.media_type && m.media_type !== 'text'));
             let outgoingMatch = null;
 
-            if (isMedia) {
+            if (isMedia && m.source !== 'dom_video_hydration') {
+              const obsEchoMid = String(m.fb_message_id || '');
+              const obsEchoBareSf = OutboundDomCorrelationService.bareSnowflakePart(obsEchoMid);
               outgoingMatch = db.prepare(`
-                SELECT id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
+                SELECT id, fb_message_id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
                 WHERE thread_id = ? AND is_outgoing = 1
                   AND (attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))
-                  AND datetime(created_at) >= datetime('now', '-300 seconds')
+                  AND (
+                    (
+                      (? != '' AND (fb_message_id = ? OR (? IS NOT NULL AND (fb_message_id = ? OR fb_message_id LIKE '%@msgr.' || ?))))
+                      AND (media_url IS NOT NULL OR local_media_path IS NOT NULL OR attachment_id IS NOT NULL)
+                    )
+                    OR (
+                      (attachment_id IS NOT NULL OR client_message_id IS NOT NULL)
+                      AND (delivery_status = 'pending' OR fb_message_id LIKE 'pending_%')
+                      AND datetime(created_at) >= datetime('now', '-120 seconds')
+                    )
+                  )
                 ORDER BY id DESC LIMIT 1
-              `).get(canonicalThreadId);
-            } else if (m.content) {
+              `).get(canonicalThreadId, obsEchoMid, obsEchoMid, obsEchoBareSf, obsEchoBareSf, obsEchoBareSf);
+            } else if (m.content && !isMedia) {
               // Echo dom_observer mang mid thật thì khớp theo mid thay vì theo
               // nội dung: khớp nội dung nuốt tin nhắn tay LẶP NỘI DUNG trong
               // 5 phút (reproduce 2026-10-09: 5 tin "alo" nhắn tay trong
@@ -3528,17 +3599,31 @@ wss.on('connection', (ws, req) => {
               // page_dom_observer/composer_confirmation giữ khớp nội dung vì
               // DOM Business Suite dùng id khác Graph API, không so được.
               const obsEchoMid = String(m.fb_message_id || '');
+              const obsEchoBareSf = OutboundDomCorrelationService.bareSnowflakePart(obsEchoMid);
               const obsEchoHasRealMid = m.source === 'dom_observer' && obsEchoMid
                 && !/^(?:dom_|pending_|history_)/.test(obsEchoMid)
                 && !/__bubble_\d+$/.test(obsEchoMid);
               outgoingMatch = obsEchoHasRealMid
                 ? db.prepare(`
-                    SELECT id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
-                    WHERE thread_id = ? AND is_outgoing = 1 AND fb_message_id = ?
+                    SELECT id, fb_message_id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
+                    WHERE thread_id = ? AND is_outgoing = 1
+                      AND (
+                        fb_message_id = ?
+                        OR (? IS NOT NULL AND (fb_message_id = ? OR fb_message_id LIKE '%@msgr.' || ?))
+                        OR (
+                          content = ?
+                          AND (
+                            fb_message_id LIKE 'pending_%'
+                            OR delivery_status = 'pending'
+                            OR (fb_message_id GLOB '[0-9]*' AND fb_message_id NOT LIKE '%@msgr.%')
+                          )
+                          AND datetime(created_at) >= datetime('now', '-120 seconds')
+                        )
+                      )
                     ORDER BY id DESC LIMIT 1
-                  `).get(canonicalThreadId, obsEchoMid)
+                  `).get(canonicalThreadId, obsEchoMid, obsEchoBareSf, obsEchoBareSf, obsEchoBareSf, m.content)
                 : db.prepare(`
-                    SELECT id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
+                    SELECT id, fb_message_id, is_outgoing, delivery_status, direction_status, client_message_id, thread_id FROM messages
                     WHERE thread_id = ? AND content = ? AND is_outgoing = 1
                       AND datetime(created_at) >= datetime('now', '-300 seconds')
                     ORDER BY id DESC LIMIT 1
@@ -3547,7 +3632,14 @@ wss.on('connection', (ws, req) => {
 
             if (outgoingMatch) {
               console.log(`[WS] 🚫 Anti-ghost FINAL: DOM observer bắt lại tin outgoing (id=${outgoingMatch.id}, status=${outgoingMatch.delivery_status}). Discard hoàn toàn.`);
-              if (outgoingMatch.delivery_status === 'pending') {
+              const matchFbId = String(outgoingMatch.fb_message_id || '');
+              const needsIdUpgrade = m.fb_message_id && (
+                outgoingMatch.delivery_status === 'pending'
+                || matchFbId.startsWith('pending_')
+                || matchFbId.includes('__bubble_')
+                || (/^\d+$/.test(matchFbId) && String(m.fb_message_id).includes('@msgr.'))
+              );
+              if (needsIdUpgrade) {
                 OutboundDomCorrelationService.confirmPendingOutbound(db, io, outgoingMatch, {
                   fbMessageId: m.fb_message_id,
                   tsMs,
@@ -3840,8 +3932,105 @@ wss.on('connection', (ws, req) => {
           // jGrG__bubble_2 + __bubble_3 trong thread Hai Anh). Bỏ qua cả hai
           // chiều trôi (suffix->thuần và thuần->suffix); id khớp EXACT thì
           // để luồng INSERT IGNORE/squat-heal phía dưới xử lý như cũ.
-          const existingStableMessage = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(stableMessageId);
-          if (!existingStableMessage && !m.client_message_id) {
+          let existingStableMessage = db.prepare('SELECT id, thread_id, content, sender_name, media_type, media_url FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+          // Nếu stableMessageId đã tồn tại trong CÙNG thread nhưng mang nội dung
+          // text thật KHÁC (2 bong bóng liên tiếp trong cùng article chia sẻ
+          // data-message-id), cấp hậu tố __bubble_N để không bị INSERT OR IGNORE nuốt mất!
+          if (existingStableMessage
+            && String(existingStableMessage.thread_id) === String(m.thread_id)
+            && !/^sidebar_preview_|^pending_/.test(String(stableMessageId))) {
+            const isIncomingMediaRow = Boolean((m.media_type && m.media_type !== 'text') || m.media_url);
+            const isExistingMediaRow = Boolean((existingStableMessage.media_type && existingStableMessage.media_type !== 'text') || existingStableMessage.media_url);
+            if (!isIncomingMediaRow && String(m.content || '').trim()) {
+              const existTxt = String(existingStableMessage.content || '').trim();
+              const incomingTxt = String(m.content || '').trim();
+              const existSender = String(existingStableMessage.sender_name || m.member_name || m.sender_name || '').trim();
+              const isExistSenderHeader = existSender && existTxt.toLowerCase() === existSender.toLowerCase();
+              if (existTxt && incomingTxt && existTxt !== incomingTxt && !isExistSenderHeader) {
+                const baseFamId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+                const escFam = baseFamId.replace(/[_%]/g, (c) => `\\${c}`);
+                const existingSameText = db.prepare(`
+                  SELECT id, fb_message_id, thread_id, content, sender_name, media_type, media_url
+                  FROM messages
+                  WHERE thread_id = ?
+                    AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+                    AND TRIM(COALESCE(content, '')) = ?
+                  LIMIT 1
+                `).get(m.thread_id, baseFamId, `${escFam}__bubble_%`, incomingTxt);
+                if (existingSameText) {
+                  stableMessageId = existingSameText.fb_message_id;
+                  existingStableMessage = existingSameText;
+                } else {
+                  const isIncomingLinkCard = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(incomingTxt);
+                  const isExistLinkCard = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(existTxt);
+                  const familyRows = db.prepare(`
+                    SELECT id, fb_message_id, thread_id, content, sender_name, media_type, media_url
+                    FROM messages
+                    WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+                  `).all(m.thread_id, baseFamId, `${escFam}__bubble_%`);
+                  const superRow = familyRows.find((r) => {
+                    const rt = String(r.content || '').trim();
+                    return (rt.length > incomingTxt.length && rt.includes(incomingTxt) && incomingTxt.length >= 6)
+                      || (isIncomingLinkCard && /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(rt));
+                  });
+                  if (superRow) {
+                    break;
+                  }
+                  const subRow = familyRows.find((r) => {
+                    const rt = String(r.content || '').trim();
+                    return (incomingTxt.length > rt.length && incomingTxt.includes(rt) && rt.length >= 6)
+                      || (/\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(rt) && /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(incomingTxt));
+                  });
+                  if (subRow || isExistLinkCard) {
+                    const targetRow = subRow || existingStableMessage;
+                    db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(m.content, targetRow.id);
+                    stableMessageId = targetRow.fb_message_id || stableMessageId;
+                    existingStableMessage = { ...targetRow, content: m.content };
+                  } else {
+                    for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
+                      const candidateId = `${baseFamId}__bubble_${bIdx}`;
+                      const taken = db.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateId);
+                      if (!taken) {
+                        stableMessageId = candidateId;
+                        existingStableMessage = null;
+                        break;
+                      }
+                    }
+                  }
+                }
+              }
+            } else if (isIncomingMediaRow && isExistingMediaRow && m.media_url && existingStableMessage.media_url
+              && String(m.media_url) !== String(existingStableMessage.media_url)
+              && !(String(m.media_type) === 'video' && String(m.media_url).startsWith('data:video/') && !String(existingStableMessage.media_url).startsWith('data:video/'))) {
+              const baseFamId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+              const escFam = baseFamId.replace(/[_%]/g, (c) => `\\${c}`);
+              const existingSameMedia = db.prepare(`
+                SELECT id, fb_message_id, thread_id, content, sender_name, media_type, media_url
+                FROM messages
+                WHERE thread_id = ?
+                  AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+                  AND media_url = ?
+                LIMIT 1
+              `).get(m.thread_id, baseFamId, `${escFam}__bubble_%`, m.media_url);
+              if (existingSameMedia) {
+                stableMessageId = existingSameMedia.fb_message_id;
+                existingStableMessage = existingSameMedia;
+              } else {
+                for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
+                  const candidateId = `${baseFamId}__bubble_${bIdx}`;
+                  const taken = db.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateId);
+                  if (!taken) {
+                    stableMessageId = candidateId;
+                    existingStableMessage = null;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+          if (!existingStableMessage && !m.client_message_id
+            && (!m.media_type || m.media_type === 'text') && !m.media_url
+            && String(m.content || '').trim() !== '') {
             const driftFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
             const likeEscaped = driftFamilyId.replace(/[_%]/g, (c) => `\\${c}`);
             const driftGhostRow = db.prepare(`
@@ -4102,7 +4291,9 @@ wss.on('connection', (ws, req) => {
             const hasRicherMedia = Boolean(existingMedia && hasIncomingMedia && (
               !existingMedia.media_type || existingMedia.media_type === 'text' ||
               (!existingMedia.media_url && m.media_url) ||
-              (!existingMedia.local_media_path && m.local_media_path)
+              (!existingMedia.local_media_path && m.local_media_path) ||
+              (incomingMediaType === 'video' && String(m.media_url || '').startsWith('data:video/') && !String(existingMedia.media_url || '').startsWith('data:video/')) ||
+              existingMedia.content === '👍'
             ));
             if (hasRicherMedia) {
               const mediaUpdate = db.prepare(`
@@ -4111,12 +4302,13 @@ wss.on('connection', (ws, req) => {
                   media_url = COALESCE(NULLIF(?, ''), media_url),
                   local_media_path = COALESCE(NULLIF(?, ''), local_media_path),
                   content = CASE
+                    WHEN content = '👍' THEN COALESCE(NULLIF(?, ''), '')
                     WHEN COALESCE(content, '') = '' AND COALESCE(?, '') != '' THEN ?
                     ELSE content
                   END
                 WHERE fb_message_id = ?
               `).run(incomingMediaType, m.media_url || null, m.local_media_path || null,
-                m.content || null, m.content || null, stableMessageId);
+                m.content || null, m.content || null, m.content || null, stableMessageId);
               mediaWasUpdated = mediaUpdate.changes > 0;
             }
             // Row đã lưu trước khi có tính năng đồng bộ trả lời: backfill quote
@@ -4126,7 +4318,7 @@ wss.on('connection', (ws, req) => {
             if (incomingQuote) {
               try {
                 const quoteUpdate = db.prepare(
-                  'UPDATE messages SET reply_to_text = COALESCE(NULLIF(TRIM(COALESCE(reply_to_text, \'\')), \'\'), ?) WHERE fb_message_id = ?'
+                  'UPDATE messages SET reply_to_text = ? WHERE fb_message_id = ? AND (reply_to_text IS NULL OR TRIM(reply_to_text) = \'\')'
                 ).run(incomingQuote, stableMessageId);
                 replyWasUpdated = quoteUpdate.changes > 0;
                 if (replyWasUpdated) {
@@ -4157,7 +4349,7 @@ wss.on('connection', (ws, req) => {
             if (reconcile.reason === 'not_found') {
               break; // Duplicate vì client_message_id hoặc lý do khác
             }
-            if (!reconcile.updated && !mediaWasUpdated) {
+            if (!reconcile.updated && !mediaWasUpdated && !replyWasUpdated) {
               console.log(`[WS] Bỏ qua tin nhắn đã tồn tại (fb_message_id: ${m.fb_message_id})`);
               break;
             }
@@ -4817,6 +5009,7 @@ wss.on('connection', (ws, req) => {
                   cleanLastMessage: cleanLastMsg,
                   isActivitySummary,
                   hasRecentMatchingOutbound,
+                  rowFresh,
                   rowFreshNew
                 });
                 const pageSourceId = (threadPageId || t.source_type === 'page_messenger') ? ('src_page_' + (threadPageId || '')) : null;
@@ -4935,11 +5128,12 @@ wss.on('connection', (ws, req) => {
                     thread_id: canonicalThreadId,
                     external_thread_id: t.external_thread_id || threadId,
                     thread_url: t.thread_url || previousThread?.thread_url || null,
-                          contact_name: name || previousThread?.contact_name || null,
+                    contact_name: name || previousThread?.contact_name || null,
                     page_id: threadPageId || (boundPageSource?.pageId ?? null),
                     preview_content: cleanLastMsg,
                     preview_is_outgoing: t.preview_is_outgoing === true,
                     preview_is_like: t.is_like === true,
+                    row_time_text: t.row_time_text || null,
                     row_fresh: rowFresh,
                     row_fresh_new: rowFreshNew,
                     unread_flipped: unreadFlippedToIncoming,
@@ -4961,18 +5155,19 @@ wss.on('connection', (ws, req) => {
                 const mediaHintLastAt = mediaHintLastSeen.get(mediaHintKey) || 0;
                 if (mediaHintLastSeen.size > 600) mediaHintLastSeen.clear();
                 if (!incomingPreviewChanged
-                  && (!rawSidebarPreview || (isSystemOrMetadataText(rawSidebarPreview) && !systemNotice))
+                  && (!rawSidebarPreview || isActivitySummary || (isSystemOrMetadataText(rawSidebarPreview) && !systemNotice))
                   && t.preview_is_outgoing !== true
-                  && (Number(t.is_unread) === 1 || t.is_like === true)
-                  && (unreadFlippedToIncoming || rowFresh)
-                  && Date.now() - mediaHintLastAt > 90 * 1000) {
+                  && (Number(t.is_unread) === 1 || t.is_like === true || isActivitySummary)
+                  && (unreadFlippedToIncoming || rowFresh || isActivitySummary)
+                  && Date.now() - mediaHintLastAt > 10 * 1000) {
                   const recentRealIncoming = db.prepare(`
                     SELECT 1 FROM messages
                     WHERE thread_id = ? AND is_outgoing = 0
+                      AND media_type IN ('image', 'video')
                       AND fb_message_id NOT LIKE 'sidebar_preview_%'
                       AND timestamp_ms >= ?
                     LIMIT 1
-                  `).get(existingInternalThreadId, Date.now() - 90 * 1000);
+                  `).get(existingInternalThreadId, Date.now() - 12 * 1000);
                   if (!recentRealIncoming) {
                     mediaHintLastSeen.set(mediaHintKey, Date.now());
                     changedUnreadThreads.push({
@@ -5031,24 +5226,40 @@ wss.on('connection', (ws, req) => {
             // The repository later promotes this sidebar_preview_* row to
             // Facebook's native id when history sync confirms the same text.
             for (const changed of changedUnreadThreads) {
-              let previewContent = cleanMessageText(changed.preview_content);
-              // Preview của NHÓM dán tên người gửi vào trước nội dung
-              // ("Bảo Long: Xmzmmz"). Đối chiếu theo phần SAU tiền tố: nếu
-              // tin thật cùng nội dung đã có trong thread thì preview này
-              // KHÔNG phải tin mới - bỏ qua hoàn toàn (reproduce 2026-10-15
-              // nhóm Cfggh: "Hai: aloo" + "Bảo Long: Xmzmmz" chen cạnh tin
-              // sạch vì khớp exact thất bại rồi INSERT provisional).
               const canonicalThreadId = resolveInternalThreadId(db, changed.account_id, changed.thread_id, changed.page_id || null) || changed.thread_id;
+              let previewContent = cleanMessageText(changed.preview_content);
+
+              if (!previewContent && changed.media_only_hint) {
+                const mediaGuardRow = db.prepare('SELECT unread_manual FROM threads WHERE id = ?').get(String(canonicalThreadId));
+                const allowMediaBump = shouldBumpUnreadFromSidebar({
+                  manual: mediaGuardRow?.unread_manual,
+                  unreadFlipped: changed.unread_flipped,
+                  isSystemNotice: changed.system_notice
+                });
+                if (allowMediaBump) {
+                  const bumpedAtIso = new Date().toISOString();
+                  db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: bumpedAtIso });
+                  syncDebug('MEDIA_HINT', { thread: String(canonicalThreadId).substring(0, 24), status: sync_status || null });
+                } else {
+                  syncDebug('UNREAD_GUARD_SKIP', { stage: 'MEDIA_HINT', thread: String(canonicalThreadId).substring(0, 24), manual: mediaGuardRow?.unread_manual });
+                }
+                InboxSyncScheduler.enqueueThreadSync({
+                  ...changed,
+                  thread_id: canonicalThreadId,
+                  reason: 'sidebar_incoming',
+                  allow_navigation: true,
+                  priority: 'high',
+                  sync_mode: 'incremental'
+                });
+                continue;
+              }
+
               let previewContentNoGroupPrefix = null;
               let previewSenderName = null;
               const groupPrefixMatch = previewContent.match(/^([^:\n]{1,80}):\s+(.+)$/s);
               if (groupPrefixMatch) {
                 previewContentNoGroupPrefix = groupPrefixMatch[2].trim();
-                // Nhóm thật (>=2 sender incoming khác nhau): tách prefix vào
-                // sender_name để bubble nhóm render tên thành viên như tin
-                // thật thay vì content dán "Hai: kđkdk" (2026-10-15). Guard
-                // tên người + suffix không lồng prefix nữa để text 1-1 dạng
-                // "Lưu ý: xyz" không bị tách mất nội dung.
                 const prefixName = groupPrefixMatch[1].trim();
                 const looksLikePersonName = prefixName.length >= 2 && prefixName.length <= 40
                   && /^[\p{L}\p{M}][\p{L}\p{M}\s.'\-]*$/u.test(prefixName)
@@ -5072,136 +5283,111 @@ wss.on('connection', (ws, req) => {
               const SIDEBAR_CHROME_RE = /^(?:trả\s*lời\s*\??|đang gõ(?: tin nhắn)?|đã xem(?: tin nhắn)?|đã nhìn(?: tin nhắn)?|xem tin nhắn|tin nhắn mới|gửi tin nhắn|hủy bỏ|đang gọi\W*|reply\s*\??|typing(?:\s*(?:…|\.{3}))*\s*|seen(?:\s+messages?)?|new\s+messages?|send\s+(?:a\s+)?message|cancel|calling\W*|call\s+back|active\s+now|view\s+message)$/i;
               const previewNameKey = String(changed.contact_name || '').toLowerCase().replace(/\s+/g, ' ').trim();
               const previewContentKey = previewContent.toLowerCase().replace(/\s+/g, ' ').trim();
-              // Thông báo hoạt động (bỏ lỡ cuộc gọi, thêm/rời nhóm...) và preview
-              // outgoing không bao giờ là tin khách — không tạo bong bóng provisional
-              // (chúng là nguồn badge "1" ảo vì đường này gắn unread_manual=1).
               if (!previewContent || SIDEBAR_CHROME_RE.test(previewContent)
                 || (previewNameKey && previewContentKey === previewNameKey)
                 || isSidebarActivityNotification(previewContent)
                 || changed.preview_is_outgoing === true) continue;
-              if (!/^[\s\u00b7\u2022.\-|•·]+$/.test(previewContent) && (changed.row_fresh || changed.unread_flipped)) {
+
+              const recentRealMessages = db.prepare(`
+                SELECT content, timestamp_ms FROM messages
+                WHERE thread_id = ? AND fb_message_id NOT LIKE 'sidebar_preview_%'
+                ORDER BY COALESCE(timestamp_ms, 0) DESC
+                LIMIT 100
+              `).all(canonicalThreadId);
+              const normalizedPreview = normalizePreviewText(previewContent);
+              const normalizedDupe = normalizedPreview
+                ? ((changed.unread_flipped || changed.row_fresh_new)
+                  ? Boolean(
+                      recentRealMessages[0]
+                      && normalizePreviewText(recentRealMessages[0].content) === normalizedPreview
+                      && (Date.now() - Number(recentRealMessages[0].timestamp_ms || 0)) < 15000
+                    )
+                  : recentRealMessages.some((m) => normalizePreviewText(m.content) === normalizedPreview))
+                : false;
+
+              const rowIsNotStale = !isStaleRowTimeText(changed.row_time_text);
+              if (!/^[\s\u00b7\u2022.\-|•·]+$/.test(previewContent) && (changed.row_fresh || changed.unread_flipped || (!normalizedDupe && rowIsNotStale))) {
                 const previewTimestamp = Date.now();
                 const previewHash = crypto.createHash('sha1')
                   .update(String(changed.account_id) + '|' + String(canonicalThreadId) + '|' + previewContent)
                   .digest('hex').slice(0, 16);
-                // Stable per thread+content: repeated sidebar scans cannot
-                // manufacture duplicate provisional bubbles from old previews.
                 const previewId = 'sidebar_preview_' + previewHash;
-                // Sidebar re-reports OLD bubbles as fresh customer activity
-                // when the preview text drifts slightly between scans (đổi
-                // khoảng trắng, tiền tố "Bạn: ", biến thể emoji - sau mỗi lần
-                // CRM gửi tin preview cũ của khách hay "thay đổi" kiểu này,
-                // reproduced 2026-09-17/2026-09-30). So khớp CHUẨN HÓA thay
-                // vì so ký tự chính xác: nội dung đã tồn tại trong thread
-                // (bất kỳ chiều, không phải provisional) không bao giờ là tin
-                // mới. 100 tin gần nhất đủ che mọi text lặp ngắn ("ok", "dạ").
-                const recentRealMessages = db.prepare(`
-                  SELECT content FROM messages
-                  WHERE thread_id = ? AND fb_message_id NOT LIKE 'sidebar_preview_%'
-                  ORDER BY COALESCE(timestamp_ms, 0) DESC
-                  LIMIT 100
-                `).all(canonicalThreadId);
-                const normalizedPreview = normalizePreviewText(previewContent);
-                const normalizedDupe = normalizedPreview
-                  ? recentRealMessages.some((m) => normalizePreviewText(m.content) === normalizedPreview)
-                  : false;
                 if (!normalizedDupe) {
-                const previewPersistence = ConversationRepository.saveMessagesTransaction(canonicalThreadId, [{
-                  fb_message_id: previewId,
-                  content: previewContent,
-                  member_name: previewSenderName || undefined,
-                  media_type: 'text',
-                  timestamp_ms: previewTimestamp,
-                  timestamp_source: 'realtime_fallback',
-                  created_at: new Date(previewTimestamp).toISOString(),
-                  is_outgoing: false,
-                  sender_role: 'customer',
-                  direction_status: 'confirmed',
-                  source: 'sidebar_preview'
-                }], db);
-                if (previewPersistence.insertedIds.includes(previewId)) {
-                  // CHỈ tin mới thật sự mới được gắn cờ chưa đọc + đẩy lên đầu.
-                  // Operator vừa đọc (unread_manual = -1) thì cần bằng chứng
-                  // mạnh: nội dung mới thật (đã chuẩn hóa ở trên) hoặc chấm
-                  // xanh FB lật trên thread thường — chặn chấm hồi sinh do
-                  // preview trôi định dạng (bug 2026-10-08: đọc xong nhảy lại).
-                  const flipGuardManual = db.prepare('SELECT unread_manual FROM threads WHERE id = ?').get(String(canonicalThreadId));
-                  const allowFlip = shouldFlipUnreadFromPreview({
-                    manual: flipGuardManual?.unread_manual,
-                    previewContent,
-                    recentRealContents: recentRealMessages.map((m) => m.content),
-                    unreadFlipped: changed.unread_flipped,
-                    isSystemNotice: changed.system_notice
-                  });
-                  if (allowFlip) {
-                    db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-                    io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: new Date().toISOString() });
-                  } else {
-                    syncDebug('UNREAD_GUARD_SKIP', { stage: 'PREVIEW_FLIP', thread: String(canonicalThreadId).substring(0, 24), content: sanitizeLog(previewContent, 40), manual: flipGuardManual?.unread_manual });
-                  }
-                  const previewRow = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(previewId);
-                  if (previewRow) {
-                    io.emit('NEW_MESSAGE', { ...previewRow, account_id: changed.account_id, provisional: true });
-                    io.emit('THREAD_MESSAGES_UPDATED', { thread_id: canonicalThreadId, account_id: changed.account_id });
-                    syncDebug('PREVIEW_BUBBLE', {
-                      thread: String(canonicalThreadId).substring(0, 24),
-                      content: sanitizeLog(previewContent, 60),
-                      status: sync_status || null,
-                      latency_ms: msg.data?.observed_at ? Date.now() - Number(msg.data.observed_at) : null
+                  const previewPersistence = ConversationRepository.saveMessagesTransaction(canonicalThreadId, [{
+                    fb_message_id: previewId,
+                    content: previewContent,
+                    member_name: previewSenderName || undefined,
+                    media_type: 'text',
+                    timestamp_ms: previewTimestamp,
+                    timestamp_source: 'realtime_fallback',
+                    created_at: new Date(previewTimestamp).toISOString(),
+                    is_outgoing: false,
+                    sender_role: 'customer',
+                    direction_status: 'confirmed',
+                    source: 'sidebar_preview'
+                  }], db);
+                  if (previewPersistence.insertedIds.includes(previewId)) {
+                    const flipGuardManual = db.prepare('SELECT unread_manual FROM threads WHERE id = ?').get(String(canonicalThreadId));
+                    const allowFlip = shouldFlipUnreadFromPreview({
+                      manual: flipGuardManual?.unread_manual,
+                      previewContent,
+                      recentRealContents: recentRealMessages.map((m) => m.content),
+                      unreadFlipped: changed.unread_flipped,
+                      isSystemNotice: changed.system_notice
                     });
-                    const { threadId: capturedThreadId, createdCaptures } = PhoneCaptureService.processIncomingMessage({
-                      threadId: canonicalThreadId,
-                      accountId: changed.account_id,
-                      messageId: previewId,
-                      content: previewContent,
-                      messageTimestampMs: previewTimestamp
-                    }, { database: db });
-                    if (createdCaptures.length > 0) {
-                      const phoneView = PhoneCaptureService.getContactPhoneView(capturedThreadId, db);
-                      io.emit('PHONE_CAPTURED', {
-                        thread_id: capturedThreadId,
-                        captures: createdCaptures,
-                        phone: phoneView.phone,
-                        phone_source: phoneView.phone_source,
-                        phone_captured_at: phoneView.phone_captured_at,
-                        phone_capture: phoneView.phone_capture,
-                        phone_candidates: phoneView.phone_candidates
+                    if (allowFlip) {
+                      db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
+                      io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: new Date().toISOString() });
+                    } else {
+                      syncDebug('UNREAD_GUARD_SKIP', { stage: 'PREVIEW_FLIP', thread: String(canonicalThreadId).substring(0, 24), content: sanitizeLog(previewContent, 40), manual: flipGuardManual?.unread_manual });
+                    }
+                    const previewRow = db.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(previewId);
+                    if (previewRow) {
+                      io.emit('NEW_MESSAGE', { ...previewRow, account_id: changed.account_id, provisional: true });
+                      io.emit('THREAD_MESSAGES_UPDATED', { thread_id: canonicalThreadId, account_id: changed.account_id });
+                      syncDebug('PREVIEW_BUBBLE', {
+                        thread: String(canonicalThreadId).substring(0, 24),
+                        content: sanitizeLog(previewContent, 60),
+                        status: sync_status || null,
+                        latency_ms: msg.data?.observed_at ? Date.now() - Number(msg.data.observed_at) : null
+                      });
+                      const { threadId: capturedThreadId, createdCaptures } = PhoneCaptureService.processIncomingMessage({
+                        threadId: canonicalThreadId,
+                        accountId: changed.account_id,
+                        messageId: previewId,
+                        content: previewContent,
+                        messageTimestampMs: previewTimestamp
+                      }, { database: db });
+                      if (createdCaptures.length > 0) {
+                        const phoneView = PhoneCaptureService.getContactPhoneView(capturedThreadId, db);
+                        io.emit('PHONE_CAPTURED', {
+                          thread_id: capturedThreadId,
+                          captures: createdCaptures,
+                          phone: phoneView.phone,
+                          phone_source: phoneView.phone_source,
+                          phone_captured_at: phoneView.phone_captured_at,
+                          phone_capture: phoneView.phone_capture,
+                          phone_candidates: phoneView.phone_candidates
+                        });
+                      }
+                      const campaignResponse = CampaignResponseStatsService.recordIncomingResponse({
+                        messageId: previewRow.id,
+                        threadId: canonicalThreadId,
+                        accountId: changed.account_id,
+                        observedAtMs: previewTimestamp
+                      }, db);
+                      if (campaignResponse) io.emit('CAMPAIGN_RESPONSE_UPDATED', {
+                        ...campaignResponse,
+                        thread_id: canonicalThreadId,
+                        provisional: true,
+                        phone_captured: createdCaptures.length > 0
                       });
                     }
-                    const campaignResponse = CampaignResponseStatsService.recordIncomingResponse({
-                      messageId: previewRow.id,
-                      threadId: canonicalThreadId,
-                      accountId: changed.account_id,
-                      observedAtMs: previewTimestamp
-                    }, db);
-                    if (campaignResponse) io.emit('CAMPAIGN_RESPONSE_UPDATED', {
-                      ...campaignResponse,
-                      thread_id: canonicalThreadId,
-                      provisional: true,
-                      phone_captured: createdCaptures.length > 0
-                    });
                   }
-                }
                 } else if (changed.row_fresh_new || changed.unread_flipped) {
-                  // Tin lặp nội dung cũ ("ok", "dạ") không được tạo bong bóng
-                  // provisional, nhưng khi tin THẬT vừa đến thì thread vẫn
-                  // phải nhảy + badge ngay (reproduce 2026-10-02: khách nhắn
-                  // "ok" lần 2, CRM im lặng 1p47s).
-                  // Chỉ bump khi thread còn unread trong DB, preview khác
-                  // last_message đã lưu, HOẶC chấm chưa đọc vừa xuất hiện
-                  // (unread_flipped — giờ tính theo chấm xanh FB thật từ
-                  // hint, xem hintUnreadTracker). 2026-10-03: với bộ dò chấm
-                  // xanh mới, khách nhắn lại đúng câu cũ ("ok", "dạ") trên
-                  // thread đã đọc phải bump được - flip chỉ nổ đúng 1 lần
-                  // khi chấm chuyển 0->1 trên Facebook nên không tái diễn
-                  // "đọc rồi hiện lại" (45b).
                   const readState = db.prepare('SELECT is_unread, last_message, unread_manual FROM threads WHERE id = ?').get(String(canonicalThreadId));
                   const isUnreadNow = Number(readState?.is_unread) === 1;
                   const lastMsgMatches = cleanMessageText(readState?.last_message) === previewContent;
-                  // Operator vừa đọc (manual = -1): nhánh bump heuristic này
-                  // không đủ bằng chứng tin mới (lastMsgMatches sai khớp dai
-                  // dẳng khi last_message đổi thành outgoing) — chỉ bump khi
-                  // chấm xanh FB thật sự lật trên thread thường (bug 2026-10-08).
                   const allowBump = shouldBumpUnreadFromSidebar({
                     manual: readState?.unread_manual,
                     unreadFlipped: changed.unread_flipped,
@@ -5217,43 +5403,17 @@ wss.on('connection', (ws, req) => {
                   }
                 }
 
-                if (!previewContent && changed.media_only_hint) {
-                // Media-only: không có bubble để render, nhưng tin thật đã đến
-                // - bump hội thoại lên đầu cột trái + gắn chưa đọc ngay. Thread
-                // operator vừa đọc thì chờ chấm xanh thật/đường khác đánh dấu
-                // (history sync có guard manual riêng) — hint trơ dễ bump giả.
-                const mediaGuardRow = db.prepare('SELECT unread_manual FROM threads WHERE id = ?').get(String(canonicalThreadId));
-                const allowMediaBump = shouldBumpUnreadFromSidebar({
-                  manual: mediaGuardRow?.unread_manual,
-                  unreadFlipped: changed.unread_flipped,
-                  isSystemNotice: changed.system_notice
-                });
-                if (allowMediaBump) {
-                  const bumpedAtIso = new Date().toISOString();
-                  db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: bumpedAtIso });
-                  syncDebug('MEDIA_HINT', { thread: String(canonicalThreadId).substring(0, 24), status: sync_status || null });
-                } else {
-                  syncDebug('UNREAD_GUARD_SKIP', { stage: 'MEDIA_HINT', thread: String(canonicalThreadId).substring(0, 24), manual: mediaGuardRow?.unread_manual });
+                if (rowIsNotStale) {
+                  InboxSyncScheduler.enqueueThreadSync({
+                    ...changed,
+                    thread_id: canonicalThreadId,
+                    reason: 'sidebar_incoming',
+                    allow_navigation: true,
+                    priority: 'high',
+                    sync_mode: 'incremental'
+                  });
                 }
               }
-
-              if (changed.page_id) {
-                // 2026-10-03: chỉ job Page còn được điều hướng từ hint (lane
-                // Page dùng tab Business Suite riêng). Job cá nhân bỏ hẳn - tab
-                // history cá nhân chỉ di chuyển theo operator (click/kéo);
-                // preview + bump đã chạy ở trên, nội dung đầy đủ sync khi click
-                // (crm_navigation) hoặc khi hội thoại đang mở ở tab chat.
-                InboxSyncScheduler.enqueueThreadSync({
-                  ...changed,
-                  thread_id: canonicalThreadId,
-                  reason: 'sidebar_incoming',
-                allow_navigation: true,
-                priority: 'high',
-                sync_mode: 'incremental'
-                });
-              }
-            }
             }
 
             for (const t of threads) {
@@ -5363,7 +5523,7 @@ wss.on('connection', (ws, req) => {
             // clicked for a 30s window. Retrying while that window is still open
             // is pointless, so these use a backoff that lands after it expires.
             const LOCK_WINDOW_REASONS = new Set(['navigation_locked_by_user_selection', 'page_locked_by_user_action']);
-            const LOCK_WINDOW_BACKOFF_MS = [35000, 45000, 60000];
+            const LOCK_WINDOW_BACKOFF_MS = [6000, 12000, 20000];
             // 2026-09-29: thread Page CHUA TUNG CO DU LIEU (msgs=0) that bai voi
             // thread_route_mismatch / extension_history_timeout khi xac minh
             // danh tinh hoi thoai lanh (chua tung mo) - mark vinh vien lam hoi
@@ -10205,15 +10365,102 @@ function startServer() {
          ) < (? - 3600000))
     `).run(Date.now());
 
+    // (4l) Dọn sạch các bong bóng rác do thẻ preview link (drive.google.com, Vid ads.mp4),
+    // nhãn tóm tắt đính kèm ("đã gửi 1 ảnh"), nhãn "Tôi · Đã chỉnh sửa" và các row __bubble_N nhân bản
+    try {
+      db.prepare(`
+        DELETE FROM messages
+        WHERE (media_type IS NULL OR media_type = 'text')
+          AND media_url IS NULL
+          AND attachment_id IS NULL
+          AND (
+            TRIM(COALESCE(content, '')) = ''
+            OR LOWER(TRIM(content)) IN ('drive.google.com', 'docs.google.com', 'google docs', 'google drive', 'youtube.com', 'youtu.be', 'facebook.com', 'tiktok.com', 'đã chỉnh sửa', 'edited')
+            OR TRIM(content) LIKE '%· Đã chỉnh sửa%'
+            OR TRIM(content) LIKE '%• Đã chỉnh sửa%'
+          )
+      `).run();
+      const allTextRows = db.prepare(`
+        SELECT id, thread_id, fb_message_id, content, is_outgoing, reply_to_text, timestamp_ms
+        FROM messages
+        WHERE (media_type IS NULL OR media_type = 'text') AND media_url IS NULL AND attachment_id IS NULL
+      `).all();
+      for (const r of allTextRows) {
+        const txt = String(r.content || '').trim();
+        if (!txt || isSystemOrMetadataText(txt) || isSidebarActivitySummary(txt)) {
+          db.prepare('DELETE FROM messages WHERE id = ?').run(r.id);
+          continue;
+        }
+        const fbId = String(r.fb_message_id || '');
+        if (/^mid\.\$.+__bubble_\d+$/.test(fbId)) {
+          const baseId = fbId.replace(/__bubble_\d+$/, '');
+          if (/\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(txt)) {
+            const hasUrlSibling = db.prepare(`
+              SELECT 1 FROM messages
+              WHERE thread_id = ? AND id != ?
+                AND (fb_message_id = ? OR fb_message_id LIKE ? || '__bubble_%')
+                AND (content LIKE '%http%' OR content LIKE '%drive.google.com%' OR content LIKE '%docs.google.com%')
+              LIMIT 1
+            `).get(r.thread_id, r.id, baseId, baseId);
+            if (hasUrlSibling) {
+              db.prepare('DELETE FROM messages WHERE id = ?').run(r.id);
+              continue;
+            }
+          }
+          // Nếu __bubble_N nhân bản y hệt một tin nhắn có thật khác trong cùng thread (hoặc bị gán nhầm vào mid.$ cũ cách > 1 giờ)
+          const baseSnowflakeTs = ConversationRepository.extractSnowflakeTimestampMs(baseId);
+          const duplicateElsewhere = db.prepare(`
+            SELECT id, fb_message_id, timestamp_ms FROM messages
+            WHERE thread_id = ? AND id != ? AND is_outgoing = ?
+              AND TRIM(COALESCE(content, '')) = ?
+            ORDER BY CASE WHEN fb_message_id NOT LIKE '%__bubble_%' THEN 0 ELSE 1 END ASC, id ASC
+            LIMIT 1
+          `).get(r.thread_id, r.id, r.is_outgoing, txt);
+          if (duplicateElsewhere) {
+            const otherBaseId = String(duplicateElsewhere.fb_message_id || '').replace(/__bubble_\d+$/, '');
+            const otherTs = ConversationRepository.extractSnowflakeTimestampMs(otherBaseId) || Number(duplicateElsewhere.timestamp_ms || 0);
+            if (otherBaseId === baseId
+              || !/__bubble_\d+$/.test(String(duplicateElsewhere.fb_message_id || ''))
+              || (baseSnowflakeTs > 0 && otherTs > 0 && Math.abs(otherTs - baseSnowflakeTs) > 3600000)
+              || duplicateElsewhere.id < r.id) {
+              db.prepare('DELETE FROM messages WHERE id = ?').run(r.id);
+              continue;
+            }
+          }
+        } else if (/^mid\.\$/.test(fbId) && /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(txt)) {
+          // Trường hợp base row giữ tên file ("Vid ads 28.mp4") còn __bubble_N giữ nội dung link đầy đủ -> gộp vào base
+          const fullUrlBubble = db.prepare(`
+            SELECT id, content FROM messages
+            WHERE thread_id = ? AND fb_message_id LIKE ? || '__bubble_%'
+              AND (content LIKE '%http%' OR content LIKE '%drive.google.com%' OR content LIKE '%docs.google.com%')
+            ORDER BY LENGTH(content) DESC LIMIT 1
+          `).get(r.thread_id, fbId);
+          if (fullUrlBubble) {
+            db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(fullUrlBubble.content, r.id);
+            db.prepare('DELETE FROM messages WHERE id = ?').run(fullUrlBubble.id);
+          }
+        }
+      }
+    } catch (cleanErr) {
+      console.warn('[DB Self-Heal 4l] Cleanup warning:', cleanErr.message);
+    }
+
     const activeThreads = db.prepare('SELECT DISTINCT thread_id FROM messages').all();
     for (const { thread_id } of activeThreads) {
       if (thread_id) {
-        // Backfill Snowflake timestamp trước rồi dọn các cặp nhân đôi OTID / __bubble_N cùng nội dung trong 15s
+        // Backfill Snowflake timestamp trước rồi gộp các cặp nhân đôi tạm -> chính thức (ảnh + text)
         ConversationRepository.normalizeMessageSequence(thread_id, db);
+        try {
+          OutboundDomCorrelationService.collapseStoredTemporaryIdUpgrades(db, thread_id);
+          OutboundDomCorrelationService.collapseStoredMediaCompanions(db, thread_id);
+        } catch (_) {}
         const dupOutgoing = db.prepare(`
           SELECT m.id
           FROM messages m
           WHERE m.thread_id = ?
+            AND m.attachment_id IS NULL
+            AND m.latest_attempt_id IS NULL
+            AND NOT EXISTS (SELECT 1 FROM outbound_attempts oa WHERE oa.message_id = m.id)
             AND (
               m.fb_message_id LIKE '%__bubble_%'
               OR (m.is_outgoing = 1 AND m.fb_message_id GLOB '[0-9]*' AND m.fb_message_id NOT LIKE '%@msgr.%')
@@ -10238,8 +10485,8 @@ function startServer() {
           for (const d of dupOutgoing) {
             db.prepare('DELETE FROM messages WHERE id = ?').run(d.id);
           }
-          ConversationRepository.normalizeMessageSequence(thread_id, db);
         }
+        ConversationRepository.normalizeMessageSequence(thread_id, db);
         const latestMsg = db.prepare(`
           SELECT content, timestamp_ms, created_at FROM messages
           WHERE thread_id = ? AND COALESCE(content, '') != ''

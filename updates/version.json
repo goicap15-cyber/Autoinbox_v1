@@ -1,8 +1,8 @@
 {
-  "version": "1.0.21",
-  "releasedAt": "2026-11-07T04:31:31.989Z",
-  "notes": "Sửa lỗi hội thoại ở hộp thư chính bị đẩy nhầm sang Tin nhắn chờ khi mở tab Tin nhắn chờ",
+  "version": "1.0.26",
+  "releasedAt": "2026-11-08T09:51:47.515Z",
+  "notes": "Fix triệt để nhân bản tin nhắn cũ (link card drive.google.com, quote reply, nhãn Đã chỉnh sửa), giải mã chuẩn timestamp gốc từ mid.$ để sắp xếp lịch sử chính xác 100%, cơ chế chống đồng bộ lặp tin đã lưu và lọc sạch bong bóng 'đã gửi 1 ảnh' (v1.0.26)",
   "requiresRestart": true,
-  "sizeBytes": 3085241,
-  "sha256": "ac6f1537d2a5316bb2e68000bb69feedf489d1dbccaa04be6f0dcae8b9ff6bdc"
+  "sizeBytes": 3086919,
+  "sha256": "ba74a87283ad53b2f1c6d387fd406d4d5096f858a8e4b30c018fdfc79753be1b"
 }

@@ -1355,7 +1355,7 @@ function processMessagingEvent(event, source, io, database) {
 // ── Poller cầu nối hosting (webhook.php) ──
 let pollTimer = null;
 let polling = false;
-function startBridgePolling(io, database = getDb(), intervalMs = 5000) {
+function startBridgePolling(io, database = getDb(), intervalMs = 2000) {
   if (pollTimer) return;
   pollTimer = setInterval(async () => {
     if (polling) return;
@@ -1551,12 +1551,12 @@ async function watchPageConversations(source, io, database) {
   }
 }
 
-function startPageConversationWatcher(io, database = getDb(), intervalMs = 10000) {
+function startPageConversationWatcher(io, database = getDb(), intervalMs = 3500) {
   if (pageWatcherTimer) return;
   pageWatcherTimer = setInterval(async () => {
     if (pageWatcherBusy) {
       const stuckMs = Date.now() - pageWatcherCycleStartedAt;
-      if (stuckMs < 60000) return; // chu kỳ trước còn chạy — bỏ tick, KHÔNG chạy song song
+      if (stuckMs < 45000) return; // chu kỳ trước còn chạy — bỏ tick, KHÔNG chạy song song
       console.warn('[PageApi] Chu kỳ watcher kẹt ' + stuckMs + 'ms — mở khóa cưỡng bức.');
       pageWatcherBusy = false;
     }
@@ -1567,11 +1567,7 @@ function startPageConversationWatcher(io, database = getDb(), intervalMs = 10000
         SELECT id, external_id, display_name, owner_account_id FROM inbox_sources
         WHERE source_type = 'page_messenger' AND status = 'ACTIVE' AND access_token_encrypted IS NOT NULL
       `).all();
-      // Quét SONG SONG 5 page/lượt thay vì lần lượt: 18 page tuần tự mất
-      // ~12-25s/vòng -> tin khách về chậm tới nửa phút; song song còn ~4-6s
-      // (reproduce 2026-10-07 17:07: tin khách về sau ~12s chờ). Mỗi page vẫn
-      // try/catch riêng - một page lỗi không ảnh hưởng page khác.
-      const WATCHER_CONCURRENCY = 5;
+      const WATCHER_CONCURRENCY = 8;
       let pageCursor = 0;
       const watcherWorker = async () => {
         while (pageCursor < sources.length) {
@@ -1581,7 +1577,7 @@ function startPageConversationWatcher(io, database = getDb(), intervalMs = 10000
           } catch (err) {
             watcherLog('CHU KỲ LỖI page ' + s.external_id + ': ' + String(err && (err.stack || err.message || err)).slice(0, 400));
           }
-          await new Promise((r2) => setTimeout(r2, 120));
+          await new Promise((r2) => setTimeout(r2, 50));
         }
       };
       const workers = [];

@@ -1,6 +1,7 @@
 const MessageQueueRepository = require('../repositories/MessageQueueRepository');
 const OutboundAttachmentRepository = require('../repositories/OutboundAttachmentRepository');
 const OutboundAttemptRepository = require('../repositories/OutboundAttemptRepository');
+const ConversationRepository = require('../repositories/ConversationRepository');
 
 const DEFAULT_CONFIRMATION_WINDOW_MS = 2 * 60 * 1000;
 
@@ -24,7 +25,8 @@ class OutboundConfirmationService {
       isOutgoing !== true
     ) return { matched: false, reason: 'INVALID_OBSERVATION' };
 
-    const observedTime = Number(observedAt) || Date.now();
+    const sfTs = ConversationRepository.extractSnowflakeTimestampMs(fbMessageId);
+    const observedTime = sfTs > 0 ? sfTs : (Number(observedAt) || Date.now());
     const rows = database.prepare(
       "SELECT a.*, m.thread_id, m.client_message_id, m.content, m.media_type AS message_media_type, " +
       'm.delivery_status, oa.media_type AS attachment_media_type ' +
@@ -39,14 +41,32 @@ class OutboundConfirmationService {
       if (!Number.isFinite(dispatchTime) || Math.abs(observedTime - dispatchTime) > windowMs) {
         return false;
       }
-      if (row.attachment_id && mediaType !== 'text') {
-        const expected = row.attachment_media_type;
-        if (expected !== mediaType) return false;
+      if (sfTs > 0 && sfTs < dispatchTime - 15000) {
+        return false;
       }
-      if (!row.attachment_id && mediaType !== 'text') {
-        const expected = row.message_media_type;
-        if (expected !== mediaType) return false;
+      const expectedMediaType = String(
+        row.attachment_id
+          ? (row.attachment_media_type || row.message_media_type || 'image')
+          : (row.message_media_type || 'text')
+      ).toLowerCase();
+      const observedMediaType = String(mediaType || 'text').toLowerCase();
+      const expectsMedia = Boolean(row.attachment_id) || (expectedMediaType !== '' && expectedMediaType !== 'text');
+      const observedIsMedia = observedMediaType !== '' && observedMediaType !== 'text';
+      if (expectsMedia !== observedIsMedia) return false;
+      if (expectsMedia && expectedMediaType !== observedMediaType) return false;
+
+      if (/__bubble_\d+$/.test(String(fbMessageId))) {
+        const baseFamilyId = String(fbMessageId).replace(/__bubble_\d+$/, '');
+        const existingBase = database.prepare(
+          'SELECT timestamp_ms, created_at, media_type FROM messages WHERE thread_id = ? AND fb_message_id = ? AND id <> ? LIMIT 1'
+        ).get(threadId, baseFamilyId, row.message_id);
+        if (existingBase) {
+          const baseTs = Number(existingBase.timestamp_ms) || Date.parse(existingBase.created_at || '') || 0;
+          if (baseTs > 0 && baseTs < dispatchTime - 15000) return false;
+          if (expectsMedia && (!existingBase.media_type || existingBase.media_type === 'text')) return false;
+        }
       }
+
       const expectedText = String(row.content || '').trim();
       const observedText = String(content || '').trim();
       if (expectedText && observedText && expectedText !== observedText) return false;
@@ -86,7 +106,7 @@ class OutboundConfirmationService {
     const candidate = candidates[0];
     const transaction = database.transaction(() => {
       const conflictingMessage = database.prepare(
-        'SELECT id, thread_id, is_outgoing, media_type, media_url FROM messages WHERE fb_message_id = ? AND id <> ?'
+        'SELECT id, thread_id, is_outgoing, media_type, media_url, content FROM messages WHERE fb_message_id = ? AND id <> ?'
       ).get(fbMessageId, candidate.message_id);
       if (conflictingMessage) {
         const candidateMediaType = candidate.attachment_id
@@ -104,10 +124,6 @@ class OutboundConfirmationService {
             )
           );
         if (isSameMediaEcho) {
-          // History/realtime may persist Facebook's official media bubble or text caption just
-          // before this observer sees the pending CRM attempt. It is the same
-          // send, not an ID conflict: retain the CRM row (stable UI position,
-          // attachment preview and client id) and remove only the official echo.
           database.prepare('DELETE FROM messages WHERE id = ?').run(conflictingMessage.id);
         } else {
           OutboundAttemptRepository.transition(
