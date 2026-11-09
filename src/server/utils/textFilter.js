@@ -57,6 +57,9 @@ const SYSTEM_PATTERNS = [
   // nhả nguyên nhãn "Enter, Message sent 15:15 by Khang" thành một row riêng,
   // tin thật luôn đến bằng row của chính nó (reproduce 15:15).
   /^Enter,\s*Message sent \d{1,2}:\d{2}\s+by\s+.+$/i,
+  // Biến thể nhãn trợ năng không có "by <tên>" ("Enter, Message sent Tuesday
+  // 3:09", "Enter, Message sent 15:15") - không bao giờ là tin người dùng.
+  /^Enter,\s*Message sent\b/i,
   /^Thiếu lịch sử chat/i,
   /^Thiếu tin nhắn\.?$/i,
   /^Không khôi phục được tin nhắn\.?$/i,
@@ -89,6 +92,11 @@ const SYSTEM_PATTERNS = [
   // Status & Presence (exact standalone matches only)
   /^(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen)$/i,
   /^(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen)\s+\d+\s+(?:giây|phút|giờ|ngày|tuần|tháng|năm)\s+(?:trước|ago)$/i,
+  // Nhãn trạng thái gửi UI EN viết tắt ("Sent 1m ago", "Seen 2h ago",
+  // "Delivered just now") - DOM dán dưới bong bóng tin mình gửi, observer
+  // nhặt thành lá __bubble_N riêng khiến thread nhảy lên đầu như có tin mới
+  // (reproduce 2026-11-09: tin "check check xem nào" kèm lá "Sent 1m ago").
+  /^(?:Sent|Delivered|Seen)\s+(?:just\s+now|\d+\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\s+ago)$/i,
   /^(?:Đang hoạt động.*|Hoạt động(?:\s+\d+.*)?|Đã hoạt động.*|Active now|Active recently|Active \d+.*|Online|Offline)$/i,
   /^(?:Typing[.…]*|Đang nhập[.…]*|Đang gửi[.…]*|Sending[.…]*)$/i,
   /^(?:Đang tải|Loading)[.…]*$/i,
@@ -101,6 +109,12 @@ const SYSTEM_PATTERNS = [
   /^(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM|ch|sa|chiều|sáng|tối))?$/i,
   /^(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?\d{1,2}\s*(?:ch|sa|am|pm|chiều|sáng|tối)$/i,
   /^(?:T[2-7]|CN)$/i,
+  // Pill giờ UI EN có thứ trong tuần ("Tue 3:08 PM", "Tuesday 3:09 PM") -
+  // cùng họ pill T[2-7]/CN bản VN ngay trên, render giữa nhóm tin trong
+  // thread E2EE (reproduce 2026-11-09: lá "Tue 3:08 PM" thành bong bóng rác).
+  // Bắt buộc có phút + AM/PM nên trả lời hẹn lịch kiểu "Tue 3pm"/"Sun 7:30"
+  // không bị nuốt.
+  /^(?:Mon(?:day)?|Tues?(?:day)?|Wed(?:nesday)?|Thurs?(?:day)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)$/i,
   // Short date/time separator headers (e.g. "53 9 Tháng 9, 2026", "9 Tháng 9", "Thứ Năm, 9 Tháng 9")
   /^(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?(?:\d{1,2}(?::\d{2})?(?:\s*(?:ch|sa|am|pm))?\s+)?\d{1,2}\s+(?:Tháng|thg)\s+\d{1,2}(?:,?\s*\d{4})?$/i,
 
@@ -366,6 +380,56 @@ function isSidebarActivityNotification(text) {
     || /^(?:trả\s*lời\s*\??|đang gõ(?: tin nhắn)?|đã xem(?: tin nhắn)?|đã nhìn(?: tin nhắn)?|xem tin nhắn|tin nhắn mới|gửi tin nhắn|hủy bỏ|đang gọi\W*)$/iu.test(value);
 }
 
+// ---- Chrome thẻ cuộc gọi (F2, 2026-11-09) ----
+// Card cuộc gọi render tiêu đề ("Missed audio call 2:22 PM" / "Audio call")
+// + nút "Call back" (VN "Gọi lại") + chip thời lượng ("9 secs"). Observer
+// DOM nhặt các nhãn này thành bubble text riêng. KHÔNG đưa vào
+// SYSTEM_PATTERNS vì "Gọi lại"/"Call back" trần có thể là tin thật của khách
+// - lá chrome chỉ bị bỏ qua khi KÈM bằng chứng call row (cùng family mid
+// hoặc call row lân cận ±10 phút; xem ConversationRepository.saveMessages-
+// Transaction và guard WS trong server.js).
+const CALL_BUTTON_EN_RE = /^(?:call\s*back)\s*[.!?…]*$/i;
+const CALL_BUTTON_VN_RE = /^(?:gọi\s*lại)\s*[.!?…]*$/i;
+// Chip thời lượng lá: đơn vị tối thiểu 2 ký tự ('9 secs', '2 mins', '1m 30s')
+// - loại đơn vị 1 chữ ('2h', '5m') vì khách thật có thể gõ trả lời hẹn giờ.
+const CALL_DURATION_LEAF_RE = /^(?:\d{1,5}(?::\d{2}){1,2}\s*(?:am|pm)?|\d{1,5}\s*(?:giây|phút|giờ|sec|secs|seconds?|min|mins|minutes?|hr|hrs|hours?)(?:\s*\d{1,5}\s*(?:giây|sec|secs|seconds?|phút|min|mins|minutes?))?|\d{1,5}\s*(?:m|min|mins|minutes?|phút|h|hr|hrs|hours?|giờ)\s+\d{1,5}\s*(?:s|sec|secs|seconds?|giây))$/i;
+// Bản nới (đơn vị 1 chữ, '2h') - CHỈ dùng cho content row media_type='call'
+// (không bao giờ là tin người dùng gõ).
+const CALL_DURATION_ONLY_RE = /^(?:\d{1,5}(?::\d{2}){1,2}\s*(?:am|pm)?|\d{1,5}\s*(?:giây|phút|giờ|s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?)(?:\s*\d{1,5}\s*(?:giây|s|sec|secs|seconds?|phút|m|min|mins|minutes?))?)$/i;
+const CALL_CARD_TITLE_RE = /^(?:missed\s+)?(?:audio|video)\s+call(?:\s+\d{1,2}(?::\d{2}){1,2}\s*(?:am|pm)?)?$/i;
+const CALL_CARD_TITLE_VN_RE = /^(?:bỏ\s*lỡ\s*)?cuộc\s*gọi(?:\s+(?:thoại|video|nhỡ|bị\s*lỡ)){1,2}$/i;
+
+// Chrome đủ mạnh để chặn chỉ với bằng chứng lân cận (không gồm "Gọi lại" -
+// khách thật có thể gõ đúng 2 từ này sau cuộc gọi nhỡ).
+function isStrongCallCardChromeText(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return false;
+  return CALL_BUTTON_EN_RE.test(trimmed)
+    || CALL_DURATION_LEAF_RE.test(trimmed)
+    || CALL_CARD_TITLE_RE.test(trimmed)
+    || CALL_CARD_TITLE_VN_RE.test(trimmed);
+}
+
+function isCallCardChromeText(text) {
+  return isStrongCallCardChromeText(text) || CALL_BUTTON_VN_RE.test(String(text || '').trim());
+}
+
+// Nội dung row media_type='call' là nhãn card FB, không bao giờ là tin người
+// dùng gõ - chuẩn hóa nhãn rác ('Call back', '9 secs', '2:22 PM') thành nhãn
+// CRM đọc được. Content đã đúng tiếng Việt (có 'nhỡ'/'bỏ lỡ') giữ nguyên.
+function normalizeCallRowContent(content) {
+  const raw = String(content ?? '');
+  const trimmed = raw.trim();
+  if (!trimmed) return content;
+  if (/(?:bỏ\s*lỡ|nhỡ)/i.test(trimmed)) return trimmed;
+  if (CALL_BUTTON_EN_RE.test(trimmed) || CALL_BUTTON_VN_RE.test(trimmed)) return 'Cuộc gọi nhỡ';
+  if (/^missed\s+(?:audio|video)\s+call/i.test(trimmed)) return 'Cuộc gọi nhỡ';
+  if (CALL_DURATION_ONLY_RE.test(trimmed)) return 'Cuộc gọi';
+  if (/^(?:audio|video)\s+call/i.test(trimmed)) return /^video/i.test(trimmed) ? 'Cuộc gọi video' : 'Cuộc gọi';
+  if (/^call\s+ended/i.test(trimmed)) return 'Cuộc gọi';
+  return trimmed;
+}
+
 const INVALID_CONTACT_NAME_PATTERNS = [
   /^(?:Tất cả tin nhắn|Tất cả|All messages|All)$/i,
   /^Khách hàng(?:\s*\([^)]*\))?$/i,
@@ -465,6 +529,9 @@ module.exports = {
   cleanMessageText,
   isSidebarActivitySummary,
   isSidebarActivityNotification,
+  isCallCardChromeText,
+  isStrongCallCardChromeText,
+  normalizeCallRowContent,
   isInvalidContactName,
   cleanContactName,
   stripBizSentByAttribution,

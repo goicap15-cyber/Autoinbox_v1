@@ -144,6 +144,8 @@ CREATE TABLE IF NOT EXISTS messages (
     timestamp_ms INTEGER DEFAULT 0,
     timestamp_source TEXT DEFAULT 'unknown',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    -- 2026-10-15 migration v20261015001: nội dung tin gốc của tin TRẢ LỜI.
+    reply_to_text TEXT,
     FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
 );
 
@@ -560,3 +562,11 @@ CREATE TABLE IF NOT EXISTS quick_templates (
 );
 CREATE INDEX IF NOT EXISTS idx_quick_templates_sort ON quick_templates(sort_order, id);
 
+
+CREATE TABLE IF NOT EXISTS group_members (
+    thread_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    avatar_url TEXT,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (thread_id, name)
+);

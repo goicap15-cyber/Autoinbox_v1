@@ -10026,6 +10026,59 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         // verified main container is the only safe complete scan boundary.
         const messageLog = mainContainer.querySelector('[role="log"]') || mainContainer;
         const historyDirectionContainer = findHistoryScroller(mainContainer) || messageLog || mainContainer;
+        // Tên riêng dạng "Ninh", "Hà Anh", "Tôi": 1-4 từ viết hoa, không số/
+        // ký tự đặc biệt. Chỉ dùng để bỏ lá text = header tên người gửi khi
+        // nhãn chưa hydrate — KHÔNG dùng để lọc nội dung đã có nhãn xác thực.
+        function isHistoryNameLikeText(text) {
+          const t = String(text || '').trim();
+          if (t.length < 2 || t.length > 30) return false;
+          if (/\d/.test(t)) return false;
+          if (!/^[^\p{P}\p{S}\d]*$/u.test(t.replace(/[\s.]/gu, ''))) return false;
+          const words = t.split(/\s+/);
+          if (words.length > 4) return false;
+          return words.every((w) => /^[\p{Lu}][\p{Ll}\p{M}]*\.?$/u.test(w.replace(/\.$/, '')));
+        }
+        // Tab ẩn vừa kích hoạt: FB mount bong bóng TRƯỚC khi hydrate nhãn giờ
+        // ("Tin nhắn do X gửi lúc HH:MM"). Harvest đúng khoảnh khắc đó cho cả
+        // loạt tin ts=0 (reproduce 2026-11-08: 13 tin realtime_fallback/dom_order
+        // làm MAX(timestamp_ms) kẹt ở tin cũ, thread chìm trong sort). Chờ tối
+        // đa ~4.5s cho bằng chứng giờ đầu tiên trước khi thu row; hết chờ vẫn
+        // thu như cũ (ts=0 + Fix 4 phía server vẫn an toàn). Probe chốt cứng
+        // "lúc|at|gửi HH:MM" để không dính nhãn duration video ("0:15").
+        let hydrationWaitRounds = 0;
+        const historyHydrationRoot = () => (mainContainer?.isConnected ? mainContainer : document.querySelector('div[role="main"]'));
+        const historyHasTimeEvidence = () => {
+          const root = historyHydrationRoot();
+          if (!root) return true;
+          if (root.querySelector('time[datetime], abbr[data-utime], [data-utime]')) return true;
+          for (const el of root.querySelectorAll('[aria-label]')) {
+            if (/(?:l\u00fac|at|g\u1eedi)\s+\d{1,2}:\d{2}\b/i.test(el.getAttribute('aria-label') || '')) return true;
+          }
+          return false;
+        };
+        // Nhãn article ("Tin nhắn do X gửi lúc" / "Lúc ..., X: ...") mới mang
+        // TÊN người gửi. Render dang dở có thể có giờ nhưng CHƯA có nhãn tên:
+        // harvest lúc đó biến header tên thành tin "Ninh"/"Tôi" riêng biệt
+        // (reproduce 2026-11-06→08 nhóm ORDER MEDIA). Chờ thêm nhãn tên.
+        const historyHasSenderLabelEvidence = () => {
+          const root = historyHydrationRoot();
+          if (!root) return true;
+          const articles = root.querySelectorAll('[data-message-id]');
+          if (!articles.length) return false;
+          for (const article of Array.from(articles).slice(0, 60)) {
+            const label = article.getAttribute('aria-label')
+              || article.querySelector('[aria-label]')?.getAttribute('aria-label') || '';
+            if (/^(?:L\u00fac\s|Tin nh\u1eafn do |Message sent|You sent|B\u1ea1n \u0111\u00e3 g\u1eedi)/i.test(label.trim())
+              || /g\u1eedi l\u00fac|sent by|sent \d{1,2}:\d{2}/i.test(label)) return true;
+          }
+          return false;
+        };
+        if (!historyHasTimeEvidence() || !historyHasSenderLabelEvidence()) {
+          for (hydrationWaitRounds = 1; hydrationWaitRounds <= 15; hydrationWaitRounds += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            if (historyHasTimeEvidence() && historyHasSenderLabelEvidence()) break;
+          }
+        }
         const allRows = collectMessageRows(messageLog).flatMap((row) => {
           const nativeUnits = Array.from(row.querySelectorAll('[data-message-id]'))
             .filter((unit) => {
@@ -10139,7 +10192,29 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           });
           if (!rowEmojiContent && hasOnlyClockFragments && row.querySelector('svg')) rowEmojiContent = '👍';
           if (rowEmojiContent && (leafBubbles.length === 0 || hasOnlyClockFragments) && !mediaUrl && !isVideoMessage) leafBubbles = [row];
-          if (leafBubbles.length === 0 && !mediaUrl && !isVideoMessage) return;
+          // H2 (2026-11-09): KHÔNG return sớm khi leafBubbles rỗng — row
+          // bubble phức tạp có thể không có lá dir=auto nào; fallback
+          // aria-label cuối row còn cứu được text báo cáo.
+
+          // H5 (2026-11-09): history sync chưa từng extract quote reply (chỉ
+          // CẮT khối quote khỏi content) -> tin rep lần đầu bắt bằng quét lại
+          // còn 1 row nhưng mất "Trả lời tin nhắn của X" (reproduce: "chuển
+          // luôn nhe s" thread ORDER MEDIA - lá realtime có quote bị guard
+          // skip, base history không quote). Mirror content.js: khối quote nằm
+          // trong element [aria-label="Đi đến tin nhắn đã trả lời"] trong
+          // article. KHÔNG dùng cleanText: filter coi "Tin nhắn gốc:..." là
+          // metadata và trả rỗng.
+          const rowQuoteScopeEl = row.closest('[data-message-id]') || row;
+          let rowReplyQuoteText = '';
+          for (const quoteEl of (rowQuoteScopeEl?.querySelectorAll?.('[aria-label]') || [])) {
+            const quoteAria = String(quoteEl.getAttribute('aria-label') || '');
+            if (/tin nhắn (đã trả lời|gốc)|replied-to message|original message/i.test(quoteAria)) {
+              rowReplyQuoteText = String(quoteEl.textContent || '').replace(/\s+/g, ' ').trim()
+                .replace(/^(?:Tin nhắn gốc|Original message|Replied[- ]to message)\s*:\s*/i, '')
+                .trim().slice(0, 500);
+              break;
+            }
+          }
 
           const timestampElement = row.querySelector('time[datetime], abbr[data-utime], [data-utime]');
           const unixSeconds = Number(timestampElement?.getAttribute('data-utime') || 0);
@@ -10168,6 +10243,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             tsMs = lastFallbackTime || 0;
           }
 
+          let rowMediaMessage = null;
           if (mediaUrl || isVideoMessage) {
             // Alignment from the REAL media element wins: aria-labels can be
             // inherited from a surrounding accessibility wrapper and describe a
@@ -10236,6 +10312,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               content: '',
               media_type: mediaType,
               media_url: mediaUrl,
+              reply_quote_text: rowReplyQuoteText || null,
               is_outgoing: mediaOutgoing ? 1 : 0,
               direction_evidence: mediaDirectionEvidence,
               sender_role: mediaOutgoing ? 'operator' : 'customer',
@@ -10248,10 +10325,12 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               _timestamp_has_explicit_date: timestampHasExplicitDate,
               created_at: new Date(tsMs ? tsMs + dom_order : Date.now()).toISOString()
             });
+            rowMediaMessage = messages[messages.length - 1];
             dom_order++;
           }
 
           let bubble_idx = 0;
+          let rowPushedText = false;
           for (const leafBubble of leafBubbles) {
             if (seenBubblesInPass.has(leafBubble)) continue;
             seenBubblesInPass.add(leafBubble);
@@ -10433,7 +10512,15 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // is the name fragment rendered above real bubbles, not a message.
             if (!isOutgoing && labelSenderName
               && cleaned.replace(/\s+/g, ' ').trim().toLowerCase() === labelSenderName.replace(/\s+/g, ' ').trim().toLowerCase()) { bubble_idx++; continue; }
+            // Render dang dở: nhãn chưa resolve tên (labelSenderName rỗng) mà
+            // article chỉ có đúng MỘT lá text dạng tên riêng, không media —
+            // đó là header tên người gửi chưa hydrate, không phải tin. Bỏ lá
+            // này; lần quét sau khi hydrate đủ sẽ bắt tin thật theo mid.
+            if (!isOutgoing && !labelSenderName && !mediaUrl && !isVideoMessage
+              && leafBubbles.length === 1 && leafBubbles[0] === leafBubble && leafBubble !== row
+              && isHistoryNameLikeText(cleaned)) { bubble_idx++; continue; }
 
+            rowPushedText = true;
             const bubbleNativeEl = leafBubble.closest('[data-message-id], [data-id], [id^="mid."]');
             const nativeId = bubbleNativeEl?.getAttribute('data-message-id') || bubbleNativeEl?.getAttribute('data-id') || bubbleNativeEl?.getAttribute('id')
               || nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id')
@@ -10464,6 +10551,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                 member_name: (!isOutgoing && labelSenderName) ? labelSenderName : null,
                 member_avatar: (!isOutgoing && labelSenderName) ? extractHistoryMemberAvatar(row, labelSenderName) : null,
                 content: cleaned,
+                reply_quote_text: rowReplyQuoteText || null,
                 is_outgoing: isOutgoing ? 1 : 0,
                 direction_evidence: historyDirectionEvidence,
                 sender_role: isOutgoing ? 'operator' : 'customer',
@@ -10479,6 +10567,55 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             }
             bubble_idx++;
             dom_order++;
+          }
+
+          // H2 (2026-11-09): không lá text nào được emit cho row (bubble phức
+          // tạp trượt hết các lá dir=auto) — aria-label article vẫn mang
+          // preview ĐỦ text ("Lúc 12:14 PM, Hà Anh: Báo cáo 12h Media...").
+          // Gắn vào row media cùng article nếu media chưa có caption, ngược
+          // lại push row text riêng để tin báo cáo không biến mất khỏi DB
+          // (reproduce: 2 tin báo cáo 12:14 nhóm ORDER MEDIA chỉ còn row tên).
+          const rowArticleEl = row.closest('[data-message-id]') || row;
+          const rowArticleLabel = rowArticleEl?.getAttribute?.('aria-label') || '';
+          const rowArticleSender = rowArticleLabel.match(/^Lúc\s+.*,\s*([^:]+?):\s+(.+)$/);
+          if (rowArticleSender && !/^(?:Bạn|You)$/i.test(rowArticleSender[1].trim())) {
+            const ariaContent = String(rowArticleSender[2] || '').replace(/\s+/g, ' ').trim();
+            const ariaName = rowArticleSender[1].replace(/\s+/g, ' ').trim();
+            if (ariaContent && ariaContent.length <= 1000
+              && ariaContent.toLowerCase() !== ariaName.toLowerCase()
+              && !isSystemText(ariaContent)) {
+              if (rowMediaMessage && !String(rowMediaMessage.content || '').trim()) {
+                rowMediaMessage.content = ariaContent;
+              } else if (!rowPushedText) {
+                const fallbackNative = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id')
+                  || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id') || row.getAttribute('data-id') || null;
+                const fallbackId = fallbackNative || `dom_${targetThreadId}_aria_${stringHash(ariaContent)}_${idx}`;
+                if (!messages.some(m => m.fb_message_id === fallbackId)) {
+                  messages.push({
+                    fb_message_id: fallbackId,
+                    thread_id: targetThreadId,
+                    sender_id: null,
+                    sender_name: ariaName,
+                    member_name: ariaName,
+                    member_avatar: extractHistoryMemberAvatar(row, ariaName),
+                    content: ariaContent,
+                    reply_quote_text: rowReplyQuoteText || null,
+                    is_outgoing: 0,
+                    direction_evidence: 'label_name',
+                    sender_role: 'customer',
+                    source: 'dom_history_sync',
+                    timestamp_ms: tsMs ? tsMs + dom_order : 0,
+                    timestamp_source: tsSource,
+                    dom_order,
+                    sequence_order: dom_order,
+                    _clock_minutes: clockMinutes,
+                    _timestamp_has_explicit_date: timestampHasExplicitDate,
+                    created_at: new Date(tsMs ? tsMs + dom_order : Date.now()).toISOString()
+                  });
+                  dom_order++;
+                }
+              }
+            }
           }
         });
 
@@ -10544,7 +10681,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         }
 
         const filteredMessages = messages.filter(m => !boundaryIds.has(m.fb_message_id));
-        return { messages: filteredMessages, skipped_count: messages.length - filteredMessages.length, boundary_reached: boundaryReached, stop_reason: stopReason, resume_marker_reached: resumeMarkerReached };
+        return { messages: filteredMessages, skipped_count: messages.length - filteredMessages.length, boundary_reached: boundaryReached, stop_reason: stopReason, resume_marker_reached: resumeMarkerReached, hydration_wait_rounds: hydrationWaitRounds };
       },
       args: [navigationThreadId, mode, cursor, contact_name, Number(scroll_delta) || 0, trustedHistoryViewportChanged]
     });
@@ -10584,7 +10721,8 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           return String(a.fb_message_id || '').localeCompare(String(b.fb_message_id || ''));
         })
       : [];
-    console.log(`[FB Engine] ✅ Synced ${messagesArray.length} new history messages for thread ${thread_id}; skipped=${parserSkipped}`);
+    const hydrationWaitRounds = !Array.isArray(parsedResult) ? Number(parsedResult?.hydration_wait_rounds || 0) : 0;
+    console.log(`[FB Engine] ✅ Synced ${messagesArray.length} new history messages for thread ${thread_id}; skipped=${parserSkipped}${hydrationWaitRounds > 0 ? `; hydration_wait_rounds=${hydrationWaitRounds}` : ''}`);
 
     // Update cursor using timestamp extrema, not DOM array order.
     let newCursor = { ...(cursor || {}) };

@@ -1223,8 +1223,9 @@
       });
     }
 
-    if (finalBubbles.length === 0 && !isPhotoMessage && !isVideoMessage && !rowEmojiContent) return [];
-
+    // H2 (2026-11-09): KHÔNG return sớm khi finalBubbles rỗng — row bubble
+    // phức tạp (nhiều dòng + unfurl link + file đính kèm) có thể không nhặt
+    // được lá dir=auto nào; fallback aria-label phía dưới còn cứu được text.
     let sender_name = '';
     let labelSenderName = '';
     let is_outgoing = false;
@@ -1491,6 +1492,18 @@
         caption = cleaned;
         break;
       }
+      // H2: caption loop trượt hết các lá (bubble phức tạp) — aria-label
+      // article vẫn mang preview đủ text ("Lúc 12:14 PM, Hà Anh: Báo cáo...").
+      if (!caption && ownSenderMatch) {
+        const ariaCaption = String(ownSenderMatch[2] || '').replace(/\s+/g, ' ').trim();
+        const ariaCaptionNorm = ariaCaption.toLowerCase();
+        const labelNorm = labelSenderName ? labelSenderName.replace(/\s+/g, ' ').trim().toLowerCase() : '';
+        if (ariaCaption && ariaCaption.length <= 1000
+          && ariaCaptionNorm !== labelNorm
+          && !(filter?.isSystemOrMetadataText && filter.isSystemOrMetadataText(ariaCaption))) {
+          caption = ariaCaption;
+        }
+      }
       if (isVideoMessage && !mediaUrl && videoBlobSource && !is_outgoing) {
         scheduleVideoBlobHydration({
           blobUrl: videoBlobSource,
@@ -1595,6 +1608,43 @@
         reply_quote_text: replyQuoteText || null
       });
       bubble_idx++;
+    }
+
+    // H2 (2026-11-09): bubble phức tạp (nhiều dòng + unfurl link + file đính
+    // kèm) có thể trượt qua toàn bộ lá dir=auto — article chỉ còn nhặt được
+    // nhãn tên (hoặc không lá nào) rồi tin biến mất khỏi DB (reproduce:
+    // 2 tin báo cáo 12:14 09/11 nhóm ORDER MEDIA, chỉ còn row tên "Hà Anh"/
+    // "Văn" mang mid thật). aria-label của article luôn mang preview ĐỦ text
+    // ("Lúc 12:14 PM, Hà Anh: Báo cáo 12h Media...") — dùng làm nội dung dự
+    // phòng khi KHÔNG có lá text nào được emit cho row này.
+    const ariaContent = ownSenderMatch ? String(ownSenderMatch[2] || '').replace(/\s+/g, ' ').trim() : '';
+    if (ariaContent && ariaContent.length <= 1000) {
+      const nameNorm = labelSenderName ? labelSenderName.replace(/\s+/g, ' ').trim().toLowerCase() : '';
+      const ariaNorm = ariaContent.toLowerCase();
+      const isNonTextRow = (row) => {
+        const norm = String(row?.content || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        return !norm || (nameNorm && norm === nameNorm);
+      };
+      const hasTextRow = results.some((row) => !isNonTextRow(row));
+      if (!hasTextRow && ariaNorm !== nameNorm
+        && !(filter?.isSystemOrMetadataText && filter.isSystemOrMetadataText(ariaContent))) {
+        const fallbackResults = results.filter((row) => !isNonTextRow(row));
+        fallbackResults.push({
+          sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
+          member_name: memberName,
+          member_avatar: memberAvatarUrl || null,
+          content: ariaContent,
+          is_outgoing,
+          direction_evidence,
+          native_id: nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null,
+          effective_label: effectiveLabel,
+          is_valid: true,
+          bubble_idx: 0,
+          reply_quote_text: replyQuoteText || null
+        });
+        fallbackResults.forEach((parsed) => { parsed.dom_anchor = messageRow; });
+        return fallbackResults;
+      }
     }
 
     // Preserve the exact physical row for stable fallback IDs. This property is

@@ -60,8 +60,19 @@ function isThreadUnread(thread) {
   return Number(thread?.is_unread) === 1 && (isThreadActiveToday(thread) || Number(thread?.unread_manual) === 1);
 }
 
-// Thứ tự: ghim -> chưa đọc -> hoạt động gần nhất. Mở hội thoại (seen) gỡ
-// cờ chưa đọc thì nó tự tụt về nhóm đã đọc, vị trí theo tin nhắn gần nhất.
+// Hội thoại CHƯA có tin nhắn nào (sync tạo row thread trước khi tin về, hoặc
+// sync hụt) chỉ còn last_activity làm mốc — mốc này bị sync/seen/mở hội thoại
+// bump mà không cần tin mới, khiến hội thoại rỗng nhảy lên đầu list (9/11:
+// 745/6088 thread 0 tin, 8 thread share đúng 1 mốc bump hàng loạt). Nhóm 0 tin
+// bị đẩy xuống đáy list; bump chỉ xáo trộn trong nhóm đáy, không nhảy lên được.
+function hasThreadMessages(thread) {
+  return Number(thread?.last_msg_ts) > 0;
+}
+
+// Thứ tự: ghim -> có tin nhắn -> chưa đọc -> hoạt động gần nhất. Hội thoại
+// chưa có tin nào nằm đáy list (không xét chưa đọc — cờ is_unread của nhóm
+// này chỉ là ảnh chấm xanh FB). Mở hội thoại (seen) gỡ cờ chưa đọc thì nó tự
+// tụt về nhóm đã đọc, vị trí theo tin nhắn gần nhất.
 export function sortThreadsByActivity(threads = []) {
   return threads
     .map((thread, index) => ({ thread, index }))
@@ -74,8 +85,13 @@ export function sortThreadsByActivity(threads = []) {
         if (pinnedDelta !== 0) return pinnedDelta;
         return left.index - right.index;
       }
-      const unreadDelta = (isThreadUnread(right.thread) ? 1 : 0) - (isThreadUnread(left.thread) ? 1 : 0);
-      if (unreadDelta !== 0) return unreadDelta;
+      const leftHasMsg = hasThreadMessages(left.thread);
+      const rightHasMsg = hasThreadMessages(right.thread);
+      if (leftHasMsg !== rightHasMsg) return leftHasMsg ? -1 : 1;
+      if (leftHasMsg && rightHasMsg) {
+        const unreadDelta = (isThreadUnread(right.thread) ? 1 : 0) - (isThreadUnread(left.thread) ? 1 : 0);
+        if (unreadDelta !== 0) return unreadDelta;
+      }
       const delta = threadActivityTime(right.thread) - threadActivityTime(left.thread);
       return delta || left.index - right.index;
     })

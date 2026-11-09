@@ -109,13 +109,16 @@ class AssignmentManager {
 
     if (where.length) query += ' WHERE ' + where.join(' AND ');
     // Ghim trước (nhóm ghim CỐ ĐỊNH theo thời điểm ghim — pinned_at DESC, không
-    // trôi khi tin mới đến; bỏ ghim mới tụt xuống nhóm thường), chưa đọc tiếp,
-    // rồi theo TIN NHẮN THẬT mới nhất (lm.max_ts).
+    // trôi khi tin mới đến; bỏ ghim mới tụt xuống nhóm thường), hội thoại CÓ TIN
+    // trước hội thoại chưa có tin nào (nhóm 0 tin chỉ có last_activity dễ bị
+    // bump — phải nằm đáy list), chưa đọc tiếp, rồi theo TIN NHẮN THẬT mới nhất
+    // (lm.max_ts).
     // last_activity chỉ là fallback khi thread chưa có tin - nó bị sync/seen/
     // mở hội thoại bump mà không có tin mới khiến sidebar nhảy loạn (đo
-    // 2026-10-11: 12 thread bị bump trong 11 giây, gap tới 496 giờ).
+    // 2026-10-11: 12 thread bị bump trong 11 giây, gap tới 496 giờ; 2026-11-09:
+    // 745/6088 thread 0 tin, 8 thread share 1 mốc bump hàng loạt).
     const sortStartOfTodayMs = new Date().setHours(0, 0, 0, 0);
-    query += ` ORDER BY CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 ELSE 1 END ASC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN COALESCE(t.pinned_at, '9999') ELSE '' END DESC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 WHEN COALESCE(t.is_unread, 0) = 1 AND (COALESCE(t.unread_manual, 0) = 1 OR COALESCE(NULLIF(lm.max_ts, 0), CAST(strftime('%s', t.last_activity) AS INTEGER) * 1000) >= ${sortStartOfTodayMs}) THEN 0 ELSE 1 END ASC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 ELSE COALESCE(NULLIF(lm.max_ts, 0), CAST(strftime('%s', t.last_activity) AS INTEGER) * 1000) END DESC, t.id DESC`;
+    query += ` ORDER BY CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 ELSE 1 END ASC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN COALESCE(t.pinned_at, '9999') ELSE '' END DESC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 WHEN COALESCE(lm.max_ts, 0) > 0 THEN 0 ELSE 1 END ASC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 WHEN COALESCE(t.is_unread, 0) = 1 AND (COALESCE(t.unread_manual, 0) = 1 OR COALESCE(NULLIF(lm.max_ts, 0), CAST(strftime('%s', t.last_activity) AS INTEGER) * 1000) >= ${sortStartOfTodayMs}) THEN 0 ELSE 1 END ASC, CASE WHEN COALESCE(t.pinned, 0) = 1 THEN 0 ELSE COALESCE(NULLIF(lm.max_ts, 0), CAST(strftime('%s', t.last_activity) AS INTEGER) * 1000) END DESC, t.id DESC`;
     const rows = this.db.prepare(query).all(...params);
     ConversationRepository.attachRealActivity(rows, this.db);
 

@@ -22,6 +22,7 @@ import PaymentModal from './components/PaymentModal.jsx';
 import LicenseManagerModal from './components/LicenseManagerModal.jsx';
 import LicenseLockScreen from './components/LicenseLockScreen.jsx';
 import LicenseExpiryBanner, { computeLicenseDaysLeft, formatLicenseExpiryDate } from './components/LicenseExpiryBanner.jsx';
+import SupportTelegramButton from './components/SupportTelegramButton.jsx';
 import AuthScreen from './components/AuthScreen.jsx';
 import EmployeeManagementModal from './components/EmployeeManagementModal.jsx';
 import AppUpdateModal from './components/AppUpdateModal.jsx';
@@ -1255,6 +1256,9 @@ export default function App() {
             thread_key: newMsg.thread_key || (summary.account_id ? `${summary.account_id}:${summary.id}` : String(summary.id)),
             last_message: newMsg.content ?? summary.last_message,
             last_activity: newMsg.created_at || summary.last_activity || new Date().toISOString(),
+            // Tin vừa đến chứng tỏ hội thoại CÓ tin — thiếu last_msg_ts sẽ bị
+            // tầng "chưa có tin nhắn" của sort sập nhầm xuống đáy list.
+            last_msg_ts: extractSnowflakeTimestampMs(newMsg.fb_message_id) || Number(newMsg.timestamp_ms) || Date.parse(newMsg.created_at || '') || Date.now(),
             is_unread: !newMsg.is_outgoing
           }, ...prev]);
         }
@@ -2306,6 +2310,7 @@ export default function App() {
           onDismiss={() => setLicenseBannerDismissed(true)}
         />
       )}
+      <SupportTelegramButton />
       {/* Column 1: Sidebar Navigation - 48px */}
       <AppSidebar
         activeView={activeView}

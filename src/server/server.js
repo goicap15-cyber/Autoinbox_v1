@@ -73,7 +73,7 @@ LinkPreviewService.onImageNeeded = (urlHash, url) => {
     }
   }
 };
-const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isSidebarActivityNotification, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
+const { isSystemOrMetadataText, isSystemConversationNotice, cleanMessageText, isSidebarActivitySummary, isSidebarActivityNotification, isCallCardChromeText, isStrongCallCardChromeText, normalizeCallRowContent, isInvalidContactName, cleanContactName } = require('./utils/textFilter');
 const { resolveActiveOnWindow } = require('./utils/activeOnWindow');
 const { normalizePreviewText, shouldFlipUnreadFromPreview, shouldBumpUnreadFromSidebar, HintUnreadTracker } = require('./utils/unreadGuard');
 const { sidebarShouldSkipSweep, isStaleThreadLastActivity } = require('./utils/sidebarCompare');
@@ -3290,6 +3290,31 @@ wss.on('connection', (ws, req) => {
           }
           const createdAt = (m.created_at && !isNaN(Date.parse(m.created_at))) ? m.created_at : new Date().toISOString();
 
+          // H1 (2026-11-09): hội thoại NHÓM — nhãn tên thành viên phía trên
+          // bong bóng bị parser DOM nhặt thành tin riêng (content trùng tên,
+          // member_name rỗng). Chặn trước mọi guard phía dưới để row rác không
+          // tham gia pending-correlation lẫn INSERT. Tin thật của thành viên
+          // luôn mang member_name nên không dính gate.
+          const gateMemberNames = ConversationRepository.getGroupMemberNameSet(m.thread_id, db);
+          if (gateMemberNames
+            && ConversationRepository.isGroupSenderNameLabelRow({
+              content: m.content,
+              memberName: m.member_name,
+              isOutgoing,
+              mediaType: m.media_type,
+              mediaUrl: m.media_url,
+              clientMessageId: m.client_message_id,
+              sentByAgent: m.sent_by_agent,
+              memberNames: gateMemberNames
+            })) {
+            syncDebug('WS_SKIP_GROUP_NAME_LABEL', {
+              thread: m.thread_id,
+              content: sanitizeLog(m.content, 40),
+              outgoing: isOutgoing ? 1 : 0
+            });
+            break;
+          }
+
           const safeSenderId = m.sender_id || (isOutgoing ? String(targetAccountId) : 'CONTACT');
           // Messenger exposes a caption/base id and an `id_media` companion
           // for one logical image. Fold the media record into the base row.
@@ -3639,6 +3664,46 @@ wss.on('connection', (ws, req) => {
               }
             }
           }
+          // F2 (2026-11-09): lá chrome thẻ cuộc gọi ("Call back", chip thời
+          // lượng, "Missed audio call ...") do observer DOM nhặt nhầm thành
+          // bubble text. Chỉ bỏ qua khi CÓ bằng chứng call row - cùng family
+          // mid (base đã lưu) HOẶC call row lân cận ±10 phút trong thread.
+          // 'Gọi lại' trần không có family thì sống (khách thật có thể gõ).
+          if (!m.media_url && (!m.media_type || m.media_type === 'text')
+            && isCallCardChromeText(String(m.content || ''))) {
+            const callLeafFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+            const callLeafBase = callLeafFamilyId.length >= 12
+              ? db.prepare(`
+                  SELECT id, content, is_outgoing FROM messages
+                  WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
+                    AND media_type = 'call'
+                  ORDER BY id DESC LIMIT 1
+                `).get(m.thread_id, callLeafFamilyId, callLeafFamilyId)
+              : null;
+            const callLeafNearby = !callLeafBase && Number(tsMs) > 0
+              ? db.prepare(`
+                  SELECT id, content, is_outgoing FROM messages
+                  WHERE thread_id = ? AND media_type = 'call' AND timestamp_ms > 0
+                    AND ABS(timestamp_ms - ?) <= 600000
+                  LIMIT 1
+                `).get(m.thread_id, Number(tsMs))
+              : null;
+            if (callLeafBase || (callLeafNearby && isStrongCallCardChromeText(String(m.content || '')))) {
+              if (callLeafBase) {
+                const mappedCallContent = normalizeCallRowContent(callLeafBase.content);
+                if (mappedCallContent && mappedCallContent !== String(callLeafBase.content || '')) {
+                  db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(mappedCallContent, callLeafBase.id);
+                }
+              }
+              syncDebug('WS_SKIP_CALL_CARD_LEAF', {
+                thread: m.thread_id,
+                fb_message_id: String(stableMessageId).substring(0, 70),
+                content: sanitizeLog(m.content, 40),
+                evidence: callLeafBase ? 'family' : 'nearby_call'
+              });
+              break;
+            }
+          }
           // Phantom family __bubble_N: id tổng hợp mid.X__bubble_N nhưng row
           // base mid.X cùng thread tồn tại với nội dung giống nhau. Like-group
           // thật ở cùng article nên cùng người gửi (không bao giờ lật hướng),
@@ -3713,6 +3778,32 @@ wss.on('connection', (ws, req) => {
                 ts_delta_ms: Math.abs(Number(tsMs || 0) - Number(bubbleBaseRow.timestamp_ms || 0))
               });
               break;
+            }
+          }
+          // H3 (2026-11-09): lá text __bubble_N mà base họ mid CHƯA tồn tại
+          // trong DB -> bỏ qua, đợi history sync đem row base mid thật về
+          // (bộ đồng bộ luôn mang mid thật + giờ chuẩn). Lá mồ côi realtime
+          // trước đây được insert với ts=0 rồi khi base đổ vào thành tin
+          // nhân đôi mà collapse không dọn được (cùng chiều - reproduce
+          // 2026-11-09: "chuển luôn nhe s" x2 thread "222. ORDER MEDIA").
+          // Chỉ áp cho họ mid.$ của dom_observer: id anchor peer@msgr.N__bubble_N
+          // của tin pending gửi đi là tin thật riêng, không có base.
+          if (m.source !== 'page_dom_observer'
+            && /__bubble_\d+$/.test(String(stableMessageId))) {
+            const orphanFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+            if (/^mid\.\$/.test(orphanFamilyId)
+              && (!m.media_type || m.media_type === 'text') && !m.media_url
+              && !m.client_message_id
+              && !/^(?=[\s\S]*\p{Extended_Pictographic})[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(String(m.content || ''))) {
+              const orphanBase = ConversationRepository.findBubbleFamilyBaseRow(m.thread_id, orphanFamilyId, db);
+              if (!orphanBase) {
+                syncDebug('WS_SKIP_ORPHAN_BUBBLE_LEAF', {
+                  thread: m.thread_id,
+                  fb_message_id: String(stableMessageId).substring(0, 70),
+                  content: sanitizeLog(m.content, 40)
+                });
+                break;
+              }
             }
           }
           // Otid thuần số + out=0: otid do client MÌNH sinh khi gửi (top 41
@@ -3819,13 +3910,17 @@ wss.on('connection', (ws, req) => {
               realtimeSequence = targetSequence;
             }
           }
+          // F2: row call content là nhãn card FB - chuẩn hóa trước khi lưu.
+          const realtimeInsertContent = (m.media_type || '') === 'call'
+            ? normalizeCallRowContent(m.content)
+            : m.content;
           let insertMsgResult = db.prepare(`
             INSERT OR IGNORE INTO messages
               (thread_id, fb_message_id, sender_id, sender_name, content, media_type, media_url, local_media_path, is_outgoing, direction_status, sequence_order, timestamp_ms, timestamp_source, created_at, reply_to_text)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(m.thread_id, stableMessageId, safeSenderId,
             !isOutgoing ? (String(m.member_name || '').trim() || null) : null,
-            m.content,
+            realtimeInsertContent,
             m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt,
             m.reply_quote_text ? String(m.reply_quote_text).slice(0, 500) : null);
 
@@ -3845,7 +3940,7 @@ wss.on('connection', (ws, req) => {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               `).run(m.thread_id, mirrorMessageId, safeSenderId,
                 !isOutgoing ? (String(m.member_name || '').trim() || null) : null,
-                m.content,
+                realtimeInsertContent,
                 m.media_type || 'text', m.media_url, m.local_media_path, isOutgoing, directionStatus, realtimeSequence, tsMs, tsSource, createdAt,
                 m.reply_quote_text ? String(m.reply_quote_text).slice(0, 500) : null);
               stableMessageId = mirrorMessageId;
@@ -3896,6 +3991,23 @@ wss.on('connection', (ws, req) => {
           }
 
           let wasNewMessage = insertMsgResult.changes > 0;
+          // Fix A (2026-11-09): tin thật chiều vào vừa chèn -> preview sidebar
+          // cùng nội dung (chuẩn hóa) là bản chiếu mồ côi sinh khi hint đến
+          // trước tin thật, dọn ngay để không hiện x2 (reproduce: "Jjjjjj").
+          if (wasNewMessage && !isOutgoing) {
+            try {
+              const absorbedPreviews = ConversationRepository.absorbMatchedSidebarPreviews(m.thread_id, [m.content], db);
+              if (absorbedPreviews > 0) {
+                syncDebug('WS_ABSORBED_SIDEBAR_PREVIEW', {
+                  thread: m.thread_id,
+                  fb_message_id: String(stableMessageId).substring(0, 70),
+                  absorbed: absorbedPreviews
+                });
+              }
+            } catch (absorbError) {
+              console.warn('[WS] Sidebar preview absorb failed:', absorbError.message);
+            }
+          }
           // Tin reply mới: nối tới tin gốc (id + tên) để UI hiện tên người
           // được trả lời và click quote lướt tới tin gốc.
           if (wasNewMessage && m.reply_quote_text) {
@@ -4953,7 +5065,11 @@ wss.on('connection', (ws, req) => {
               // đây để không sinh bong bóng ma; tin thật vẫn về qua history/
               // realtime sync với mid thật (reproduce 2026-10-15: bubble
               // "Trả lời?" ở 3 thread + bubble tên chính nó ở Đoàn Toản).
-              const SIDEBAR_CHROME_RE = /^(?:trả\s*lời\s*\??|đang gõ(?: tin nhắn)?|đã xem(?: tin nhắn)?|đã nhìn(?: tin nhắn)?|xem tin nhắn|tin nhắn mới|gửi tin nhắn|hủy bỏ|đang gọi\W*)$/i;
+              // UI Business Suite/Messenger trên tài khoản tiếng Anh cùng họ
+              // nhãn chrome ("Reply?", "Typing...", "Seen"...) — không thêm thì
+              // lọt qua gate và thành bubble ma không có tin thật phía sau
+              // (reproduce 2026-11-04: bubble "Reply?" thread 1411372724455599).
+              const SIDEBAR_CHROME_RE = /^(?:trả\s*lời\s*\??|đang gõ(?: tin nhắn)?|đã xem(?: tin nhắn)?|đã nhìn(?: tin nhắn)?|xem tin nhắn|tin nhắn mới|gửi tin nhắn|hủy bỏ|đang gọi\W*|reply\s*\??|typing(?:\s*(?:…|\.{3}))*\s*|seen(?:\s+messages?)?|new\s+messages?|send\s+(?:a\s+)?message|cancel|calling\W*|call\s+back|active\s+now|view\s+message)$/i;
               const previewNameKey = String(changed.contact_name || '').toLowerCase().replace(/\s+/g, ' ').trim();
               const previewContentKey = previewContent.toLowerCase().replace(/\s+/g, ' ').trim();
               // Thông báo hoạt động (bỏ lỡ cuộc gọi, thêm/rời nhóm...) và preview
@@ -5465,6 +5581,19 @@ wss.on('connection', (ws, req) => {
               }))
             });
             const persistence = ConversationRepository.saveMessagesTransaction(thread_id, sequencedMessages);
+            // H5 (2026-11-09): quote reply của batch giờ được persist vào
+            // reply_to_text - map ngay reply_to_id/sender_name để UI hiện
+            // "Trả lời tin nhắn của X" + bấm-lướt mà không đợi sweep startup.
+            for (const quotedMsg of sequencedMessages) {
+              const quotedText = String(quotedMsg.reply_quote_text || '').trim();
+              if (!quotedText) continue;
+              const quotedMid = String(quotedMsg.fb_message_id || quotedMsg.messageId || quotedMsg.client_message_id || '')
+                .replace(/__bubble_\d+$/, '');
+              if (!quotedMid) continue;
+              const quotedRow = db.prepare('SELECT id, timestamp_ms FROM messages WHERE thread_id = ? AND fb_message_id = ? LIMIT 1')
+                .get(thread_id, quotedMid);
+              if (quotedRow) storeReplyTargetForRow(Number(quotedRow.id), thread_id, quotedText, Number(quotedRow.timestamp_ms || 0));
+            }
             // History may arrive after realtime already confirmed the local
             // attachment row. Collapse the late Facebook base/_media echo in
             // the same sync window so the UI never renders two copies until
@@ -5567,15 +5696,20 @@ wss.on('connection', (ws, req) => {
               console.log(`[WS] History sync status thread=${thread_id}: ${resolvedSyncStatus} (stop_reason=${checkpoint.stop_reason || 'n/a'})`);
             }
 
+            // Chỉ touch thread bằng tin có GIỜ THẬT: tin ts=0 (DOM chưa hydrate
+            // nhãn giờ) có created_at = giờ quét, không được đè last_activity
+            // giờ thật (cùng họ Fix 4; reproduce 2026-11-08: last_activity nhảy
+            // 16:24 trong khi tin mới nhất thật chỉ 12:18). alignThreadActivity
+            // thay touchThreadFromHistory để vừa tiến theo tin thật vừa kéo lùi
+            // last_activity đã bị dán giờ-quét (chênh > 5 phút).
             const latest = validMessages.reduce((currentLatest, candidate) => {
+              const candidateTime = Number(candidate.timestamp_ms) || 0;
+              if (candidateTime <= 0) return currentLatest;
               if (!currentLatest) return candidate;
-              const candidateTime = Number(candidate.timestamp_ms) || new Date(candidate.created_at || 0).getTime();
-              const latestTime = Number(currentLatest.timestamp_ms) || new Date(currentLatest.created_at || 0).getTime();
-              return candidateTime >= latestTime ? candidate : currentLatest;
+              return candidateTime >= (Number(currentLatest.timestamp_ms) || 0) ? candidate : currentLatest;
             }, null);
             if (latest) {
-              const latestTimestamp = Number(latest.timestamp_ms) || new Date(latest.created_at || 0).getTime();
-              ConversationRepository.touchThreadFromHistory(thread_id, latest.content, latestTimestamp);
+              ConversationRepository.alignThreadActivity(thread_id, latest.content, Number(latest.timestamp_ms));
             }
 
             if (deltaIds.length === 0) {

@@ -23,3 +23,24 @@ test('sidebar orders mixed SQLite and ISO activity timestamps by real time', () 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('threads without any message row sink below threads with real messages', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crm-thread-order-'));
+  const db = getTestDatabase(path.join(dir, 'database.db'));
+  try {
+    db.prepare('INSERT INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('account-order', 'Order account', '/tmp/order');
+    db.prepare('INSERT INTO threads (id, account_id, contact_name, last_activity) VALUES (?, ?, ?, ?)')
+      .run('has-msg-old', 'account-order', 'Has old msg', '2026-09-10 08:00:00');
+    db.prepare('INSERT INTO messages (thread_id, fb_message_id, sender_id, content, timestamp_ms) VALUES (?, ?, ?, ?, ?)')
+      .run('has-msg-old', 'mid-order-1', 'ps-1', 'xin chao', Date.parse('2026-09-10T08:00:00Z'));
+    // Thread 0 tin bị bump last_activity tới "bây giờ" (sync/seen/mở hội thoại)
+    db.prepare('INSERT INTO threads (id, account_id, contact_name, last_activity) VALUES (?, ?, ?, ?)')
+      .run('no-msg-bumped', 'account-order', 'Empty bumped', new Date().toISOString());
+
+    const rows = new AssignmentManager(db).getThreadsByFilter('admin', 'ADMIN');
+    assert.deepEqual(rows.map((row) => row.id), ['has-msg-old', 'no-msg-bumped']);
+  } finally {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
