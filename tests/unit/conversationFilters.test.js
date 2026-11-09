@@ -135,12 +135,22 @@ describe('conversationFilters.js pure utility', () => {
     test('spec 044: filters by specific personal account ID', () => {
       const threadAccountA = { id: 't4', source_type: 'personal_messenger', account_id: 'acc-a', status_id: 1 };
       const threadAccountB = { id: 't5', source_type: 'personal_messenger', account_id: 'acc-b', status_id: 1 };
+      const threadPageOwnedByA = { id: 't6', source_type: 'page_messenger', source_id: 'src_page_100', account_id: 'acc-a', status_id: 1 };
+      const threadPage2OwnedByA = { id: 't7', source_type: 'page_messenger', source_id: 'src_page_200', account_id: 'acc-a', status_id: 1 };
       const filterAccountA = { sourceKeys: ['account:acc-a'], statusIds: [] };
 
       assert.equal(matchesConversationFilters(threadAccountA, filterAccountA), true);
       assert.equal(matchesConversationFilters(threadAccountB, filterAccountA), false);
-      // A page thread never matches an account: key even if IDs happened to collide.
+      // A page thread never matches an account: key even when thread.account_id is the owner personal account.
       assert.equal(matchesConversationFilters(threadPageA, { sourceKeys: ['account:acc-1'], statusIds: [] }), false);
+      assert.equal(matchesConversationFilters(threadPageOwnedByA, filterAccountA), false);
+
+      // Selecting 1 personal account + 1 Fanpage matches ONLY that personal account's personal threads and that 1 Fanpage's threads
+      const filterOnePersonalOnePage = { sourceKeys: ['account:acc-a', 'source:src_page_100'], statusIds: [] };
+      assert.equal(matchesConversationFilters(threadAccountA, filterOnePersonalOnePage), true);
+      assert.equal(matchesConversationFilters(threadAccountB, filterOnePersonalOnePage), false);
+      assert.equal(matchesConversationFilters(threadPageOwnedByA, filterOnePersonalOnePage), true);
+      assert.equal(matchesConversationFilters(threadPage2OwnedByA, filterOnePersonalOnePage), false);
     });
 
     test('OR matching within source group', () => {

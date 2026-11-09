@@ -239,8 +239,8 @@ test('merges an official media companion into the existing temporary attachment 
   db.prepare('INSERT OR IGNORE INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-temp-media', 'Test', '/tmp/test');
   db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
     .run('thread-temp-media', 'thread-temp-media', 'acct-temp-media', 'Khach hang');
-  db.prepare(`INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, media_url, is_outgoing, delivery_status, timestamp_ms)
-    VALUES ('thread-temp-media', '7503000', 'client-img', 'acct-temp-media', '57', 'image', '/api/local', 1, 'sent', 3420000)`).run();
+  db.prepare(`INSERT INTO messages (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, media_url, is_outgoing, delivery_status, timestamp_ms, created_at)
+    VALUES ('thread-temp-media', '7503000', 'client-img', 'acct-temp-media', '57', 'image', '/api/local', 1, 'sent', 3420000, '1970-01-01 00:57:00')`).run();
   db.prepare(`INSERT INTO messages (thread_id, fb_message_id, sender_id, content, media_type, is_outgoing, delivery_status, timestamp_ms)
     VALUES ('thread-temp-media', 'mid.$IMG', 'acct-temp-media', '57', 'text', 1, 'sent', 100002)`).run();
 
@@ -262,8 +262,8 @@ test('merges a late _media echo into a CRM row already upgraded to another mid i
   db.prepare('INSERT OR IGNORE INTO threads (id, external_thread_id, account_id, contact_name) VALUES (?, ?, ?, ?)')
     .run('thread-live-media', 'thread-live-media', 'acct-live-media', 'Khach hang');
   db.prepare(`INSERT INTO messages
-    (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, is_outgoing, delivery_status, timestamp_ms)
-    VALUES ('thread-live-media', 'mid.$CRMROW', 'queue_live', 'acct-live-media', 'caption', 'image', 1, 'sent', 100000)`).run();
+    (thread_id, fb_message_id, client_message_id, sender_id, content, media_type, is_outgoing, delivery_status, timestamp_ms, created_at)
+    VALUES ('thread-live-media', 'mid.$CRMROW', 'queue_live', 'acct-live-media', 'caption', 'image', 1, 'sent', 100000, '1970-01-01 00:01:40')`).run();
   db.prepare(`INSERT INTO messages
     (thread_id, fb_message_id, sender_id, content, media_type, media_url, is_outgoing, delivery_status, timestamp_ms)
     VALUES ('thread-live-media', 'mid.$FACEBOOK_media', 'acct-live-media', '', 'image', 'https://facebook/image.jpg', 1, 'sent', 100001)`).run();

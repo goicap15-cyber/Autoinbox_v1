@@ -108,6 +108,9 @@ function isBareVietnamMobileText(text) {
     // 'Bạn đã gửi một file đính kèm.') - không bao giờ là tin nhắn thật.
     /^Bạn đã gửi (?:một )?(?:file|tệp|tập tin|ảnh|video) đính kèm\.?$/i,
     /^You sent (?:an )?attachment\.?$/i,
+    /^(?:(?:Bạn|Tôi|You|[^\n]{1,80})\s+)?(?:đã gửi|sent|shared)\s+(?:(?:một|\d+|an?|one)\s+)?(?:ảnh|bức ảnh|photo|photos|image|images|video|videos|tệp|file|files|tập tin|nhãn dán|sticker|GIF|tin nhắn thoại|file âm thanh|voice message|audio)(?:\s+đính kèm)?\.?$/iu,
+    /^(?:[^\n]{1,60}[\s\u00a0]*[·•][\s\u00a0]*)?(?:Đã chỉnh sửa|Edited)\.?$/iu,
+    /^(?:drive\.google\.com|docs\.google\.com|Google Docs|Google Drive|youtube\.com|youtu\.be|facebook\.com|fb\.watch|tiktok\.com|vt\.tiktok\.com|instagram\.com|zalo\.me|shopee\.vn|lazada\.vn|tiki\.vn|maps\.app\.goo\.gl|goo\.gl|bit\.ly)$/i,
 
     /^Bạn đã phản hồi ghi chú của (?:họ|họ\.|họ\.?)$/i,
     /^Bạn đã trả lời tin của .+\.$/i,
@@ -140,6 +143,10 @@ function isBareVietnamMobileText(text) {
     // Banner quảng cáo ghim đỉnh hội thoại lead + chip bật AI (harvest orphan
     // dễ nhặt nhầm - 2026-09-28)
     /^Đoạn chat này chứa tin trả lời quảng cáo/i,
+    /^Bạn đang phản hồi bình luận của người dùng về bài viết trên\b/i,
+    /^You are replying to a user(?:'s)? comment on a post on\b/i,
+    /^[^\n]{1,80}\s+đã trả lời một quảng cáo\.?$/i,
+    /^[^\n]{1,80}\s+replied to an ad\.?$/i,
     /^Bật tính năng phản hồi bằng AI$/i,
     /^Xem quảng cáo$/i,
   /^Người gửi:?$/i,
@@ -165,6 +172,12 @@ function isBareVietnamMobileText(text) {
     // Short day-of-week / relative-day separator, same family (spec 047).
     /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i,
 
+    // Pill ngày EN giữa nhóm tin ("Oct 16, 2026, 10:49 AM") + mảnh pill bị
+    // DOM cắt ("58 AM by Khang") nhặt thành tin rác (reproduce 2026-11-03).
+    // Đồng bộ src/server/utils/textFilter.js và closure background.js.
+    /^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}(?:,?\s+\d{1,2}:\d{2}\s*(?:AM|PM)?)?$/i,
+    /^\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s+by\s+[A-ZÀ-ỸĐ][\p{L}\p{M}\s.]{0,40}$/u,
+
     // Meta Business Suite navigation / menu actions
     /^(?:Meta Business Suite|Liên kết|Chỉnh sửa|Trợ giúp|Tùy chọn khác|Cài đặt|Settings|Help|Edit)$/i,
     /^(?:Thông báo|Notifications)$/i,
@@ -181,6 +194,20 @@ function isBareVietnamMobileText(text) {
 
   const SEPARATOR_ONLY_REGEX = /^[\s\u00b7\u2022.\-|•·]+$/;
 
+  // Mảnh nhãn giờ-gửi FB dính vào bong bóng ("9:58 AM by Khang", "58 PM by
+  // You" - reproduce 2026-11-03): label EN "Message sent October 16, 2026,
+  // 9:58 AM by Khang" bị cắt mất đầu thành bubble rác. Tên người gửi phải
+  // viết hoa đầu từ để không nuốt tin thật kiểu "gặp 3 PM by zoom". \s đã
+  // bao gồm U+202F narrow space mà FB dùng giữa phút và AM/PM.
+  const FB_SENDER_LABEL_FRAGMENT_PATTERNS = [
+    /(?:^|\s)\d{0,2}:\d{2}\s?(?:AM|PM|SA|CH|SÁNG|CHIỀU|TỐI)?\s+by\s+(?:[A-ZÀ-Ỹ][^\s]*\s?){1,5}$/i,
+    /^\d{1,2}\s?(?:AM|PM|SA|CH)\s+by\s+(?:[A-ZÀ-Ỹ][^\s]*\s?){1,5}$/i,
+    // Nhãn trợ năng nguyên vẹn làm cả bubble: "Message sent October 16,
+    // 2026, 9:58 AM by Khang" (có/không ngày), "Tin nhắn do X gửi lúc 9:58".
+    /^message sent\b[^\n]*\b\d{1,2}:\d{2}\b[^\n]*\bby\s+[A-ZÀ-Ỹ][^\n]*$/i,
+    /^tin nhắn do [^\n]+? gửi lúc\s*\d{1,2}:\d{2}/i
+  ];
+
   function isSystemOrMetadataText(text) {
     if (isBareVietnamMobileText(text)) return false; // SĐT VN: không phải junk
     if (/^d{9,}$/.test(String(text || '').trim())) return true; // chuỗi số rác dài (đã loại SĐT VN)
@@ -190,6 +217,9 @@ function isBareVietnamMobileText(text) {
     if (SEPARATOR_ONLY_REGEX.test(trimmed)) return true;
     if (/(?:Chưa\s*có\s*tin\s*nhắn|ChÃ|tin\s*nh[áÃaàáảãạâầấẩẫậăằắẳẵặ]*[n]|No\s*messages?)/i.test(trimmed)) return true;
     if (RELATIVE_TIME_METADATA_RE.test(trimmed)) return true;
+    for (const pat of FB_SENDER_LABEL_FRAGMENT_PATTERNS) {
+      if (pat.test(trimmed)) return true;
+    }
 
     for (const pat of SYSTEM_PATTERNS) {
       if (pat.test(trimmed)) return true;

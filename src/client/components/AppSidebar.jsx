@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MessageSquare, Search, Zap, Megaphone, Cpu, UserCheck, Users, ShieldAlert, ChevronLeft, ChevronRight, Sun, Moon, Phone, Key, CreditCard, LogOut } from 'lucide-react';
+import { MessageSquare, Search, Zap, Megaphone, Cpu, UserCheck, Users, ShieldAlert, ChevronLeft, ChevronRight, Sun, Moon, Phone, Key, CreditCard, LogOut, DownloadCloud } from 'lucide-react';
 import { SIDEBAR_CLOSE_DELAY_MS, shouldKeepSidebarExpanded } from '../utils/appSidebarPresentation.js';
 
 const ICON_SIZE = 18;
@@ -10,7 +10,7 @@ function supportsPointerHover() {
   return typeof window === 'undefined' || !window.matchMedia || window.matchMedia('(hover: hover)').matches;
 }
 
-export default function AppSidebar({ activeView, onSelectView, onOpenModal, theme, onToggleTheme, hasCheckpoint = false, collapsed = false, onToggleCollapse, sessionUser, onLogout }) {
+export default function AppSidebar({ activeView, onSelectView, onOpenModal, theme, onToggleTheme, hasCheckpoint = false, collapsed = false, onToggleCollapse, sessionUser, onLogout, updateStatus }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const sidebarRef = useRef(null);
   const closeTimerRef = useRef(null);
@@ -109,7 +109,8 @@ export default function AppSidebar({ activeView, onSelectView, onOpenModal, them
         <div className="app-sidebar-brand">
           <div className="app-sidebar-logo">FB</div>
           <div className="app-sidebar-label app-sidebar-brand-copy" aria-hidden={!isExpanded}>
-            <strong>MISSPRICE CRM</strong>
+            <strong>AdsupCRM</strong>
+            <span>Phiên bản {updateStatus?.currentVersion || __APP_VERSION__}</span>
             <span>Facebook workspace</span>
           </div>
         </div>
@@ -149,6 +150,26 @@ export default function AppSidebar({ activeView, onSelectView, onOpenModal, them
         </nav>
 
         <div className="app-sidebar-bottom">
+          <button
+            type="button"
+            onClick={() => onOpenModal?.('appUpdate')}
+            title={isExpanded ? undefined : (updateStatus?.updateAvailable ? `🔴 Có bản cập nhật mới v${updateStatus.latestVersion}` : `Cập nhật ứng dụng (v${updateStatus?.currentVersion || '1.0.0'})`)}
+            aria-label="Cập nhật ứng dụng"
+            style={{ minWidth: BTN_SIZE, minHeight: BTN_SIZE }}
+            className={'app-sidebar-control relative ' + (updateStatus?.updateAvailable ? '!text-blue-400 !bg-blue-500/10 ring-1 ring-blue-500/30' : '')}
+          >
+            <DownloadCloud size={ICON_SIZE} strokeWidth={ICON_STROKE} className={'shrink-0 ' + (updateStatus?.updateAvailable ? 'text-blue-400' : '')} />
+            <span className="app-sidebar-label flex items-center gap-1.5" aria-hidden={!isExpanded}>
+              {updateStatus?.updateAvailable ? `Cập nhật v${updateStatus.latestVersion}` : `Cập nhật (v${updateStatus?.currentVersion || '1.0.0'})`}
+              {updateStatus?.updateAvailable && (
+                <span className="inline-flex items-center rounded-full bg-blue-500/20 border border-blue-500/40 px-1.5 py-0.2 text-[10px] font-bold text-blue-300">
+                  MỚI
+                </span>
+              )}
+            </span>
+            {updateStatus?.updateAvailable && <span className="app-sidebar-checkpoint-dot" aria-label="Có bản cập nhật mới" />}
+          </button>
+
           <button
             type="button"
             onClick={onToggleTheme}

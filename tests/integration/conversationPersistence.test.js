@@ -102,3 +102,29 @@ test('recent same-article bubble-family observation is kept', () => withDatabase
   const rows = db.prepare('SELECT fb_message_id FROM messages ORDER BY id').all();
   assert.deepEqual(rows, [{ fb_message_id: 'peer@msgr.222' }, { fb_message_id: 'peer@msgr.222__bubble_1' }]);
 }));
+
+// mid.$X__bubble_N là id FB-native: FB gắn suffix khi render LẠI đúng tin
+// mid.$X. Row gốc đã tồn tại thì observation không được thành row thứ hai;
+// text thật từ bản render sau hợp nhất vào row gốc (reproduce 2026-10-05→07:
+// 16 tin nhóm bị tách đôi - row gốc dán nhầm tên người gửi, text thật nằm
+// dưới id __bubble_N). Khác hẳn id anchor peer@msgr.N__bubble_N ở test trên.
+test('fb-native mid.$ bubble re-render merges into its existing base row', () => withDatabase((db) => {
+  db.prepare('INSERT INTO accounts (id, name, profile_dir) VALUES (?, ?, ?)').run('acct-1', 'A', '/tmp/a');
+  ConversationRepository.upsertThread({ id: 'thread-1', account_id: 'acct-1', contact_name: 'Alice' }, db);
+  const ts = 1791250860000;
+  ConversationRepository.saveMessagesTransaction('thread-1', [
+    { fb_message_id: 'mid.$gAATFVsrbFr6nO46iHGhCkm20x_0V', sender_id: 'CONTACT', content: 'Mạnh Thiện', timestamp_ms: ts, is_outgoing: false, timestamp_source: 'facebook_label', source: 'facebook_label' }
+  ], db);
+  ConversationRepository.saveMessagesTransaction('thread-1', [
+    { fb_message_id: 'mid.$gAATFVsrbFr6nO46iHGhCkm20x_0V__bubble_1', sender_id: 'CONTACT', content: 'ok e', timestamp_ms: ts, is_outgoing: false, timestamp_source: 'facebook_label', source: 'facebook_label' },
+    { fb_message_id: 'mid.$gAATFVsrbFr6nO46iHGhCkm20x_0V__bubble_2', sender_id: 'CONTACT', content: 'ok e', timestamp_ms: ts, is_outgoing: false, timestamp_source: 'facebook_label', source: 'facebook_label' }
+  ], db);
+  const rows = db.prepare('SELECT fb_message_id, content FROM messages ORDER BY id').all();
+  // merge v1.0.22-26 (upstream v1.0.23 multi-bubble preserve): base giữ nội
+  // dung thật của nó; lá cùng article nhưng KHÁC text được giữ thành row riêng
+  // thay vì ghi đè mất một trong hai bubble.
+  assert.deepEqual(rows, [
+    { fb_message_id: 'mid.$gAATFVsrbFr6nO46iHGhCkm20x_0V', content: 'Mạnh Thiện' },
+    { fb_message_id: 'mid.$gAATFVsrbFr6nO46iHGhCkm20x_0V__bubble_1', content: 'ok e' }
+  ]);
+}));

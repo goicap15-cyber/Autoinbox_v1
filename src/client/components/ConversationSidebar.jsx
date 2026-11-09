@@ -12,13 +12,15 @@ import {
   normalizeFilters
 } from '../utils/conversationFilters.js';
 import { sortDueReminders } from '../utils/reminderPresentation.js';
+import { isThreadActiveToday, sortThreadsByActivity } from '../utils/threadActivity.js';
 
 const THREAD_RENDER_BATCH_SIZE = 80;
 
 const ConversationThreadList = React.memo(function ConversationThreadList({
   threads, resetKey, activeThreadId, onSelectThread, accounts, inboxSources,
   campaignSelectionMode, selectedCampaignThreadIds, onToggleCampaignThread,
-  onToggleUnread, onTogglePin
+  onToggleUnread, onTogglePin, reminderBellMuted, onToggleReminderBell,
+  onCompleteReminder, onCancelReminder
 }) {
   const [renderedThreadCount, setRenderedThreadCount] = useState(THREAD_RENDER_BATCH_SIZE);
   const threadListRef = useRef(null);
@@ -55,6 +57,10 @@ const ConversationThreadList = React.memo(function ConversationThreadList({
           onToggle={onToggleCampaignThread}
           onToggleUnread={onToggleUnread}
           onTogglePin={onTogglePin}
+          reminderBellMuted={reminderBellMuted}
+          onToggleReminderBell={onToggleReminderBell}
+          onCompleteReminder={onCompleteReminder}
+          onCancelReminder={onCancelReminder}
         />
       ))}
     </div>
@@ -62,7 +68,8 @@ const ConversationThreadList = React.memo(function ConversationThreadList({
 });
 
 export default function ConversationSidebar({
-  threads = [], activeThreadId, onSelectThread,
+  threads = [], activeThreadId, onSelectThread, reminderBellMuted, onToggleReminderBell,
+  onCompleteReminder, onCancelReminder,
   activeTab, onTabChange, searchQuery, onSearchChange, isConnected, onOpenSearch,
   sidebarSyncActive = false, sidebarSyncSecondsRemaining = 0, onToggleSidebarSync,
   waitingCount = 0,
@@ -74,7 +81,7 @@ export default function ConversationSidebar({
   onToggleCampaignThread,
   onStartCampaignSelection, onCancelCampaignSelection, onCreateCampaign, onOpenCommentLeads,
   onBulkHistorySync, onContinueFacebookSync, onCancelFacebookSync, bulkHistoryProgress,
-  dateFilter = '', dateFilterIds = null, onDateFilterChange, onToggleUnread, onTogglePin
+  dateRange = null, dateFilterIds = null, onDateRangeChange, onToggleUnread, onTogglePin
 }) {
   const [appliedFilters, setAppliedFilters] = useState(() => normalizeFilters(createDefaultFilters()));
   const [isFilterPopoverOpen, setIsFilterPopoverOpen] = useState(false);
@@ -89,13 +96,14 @@ export default function ConversationSidebar({
 
   const filteredThreads = useMemo(() => {
     const visibleThreads = threads.filter((thread) => {
-    if (dateFilter && dateFilterIds && !dateFilterIds.has(String(thread.id))) return false;
+    const hasDateRange = Boolean(dateRange && (dateRange.from || dateRange.to));
+    if (hasDateRange && dateFilterIds && !dateFilterIds.has(String(thread.id))) return false;
     if (!matchesConversationFilters(thread, appliedFilters)) return false;
     const isMessageRequest = ['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(String(thread.inbox_folder || 'INBOX'));
     if (activeTab === 'WAITING' && !isMessageRequest) return false;
     if (activeTab !== 'WAITING' && isMessageRequest) return false;
     if (activeTab === 'ASSIGNED' && thread.status !== 'ASSIGNED') return false;
-    if (activeTab === 'UNPROCESSED' && thread.status !== 'UNPROCESSED') return false;
+    if (activeTab === 'UNPROCESSED' && (thread.status !== 'UNPROCESSED' || !isThreadActiveToday(thread))) return false;
     if (activeTab === 'COMPLETED' && thread.status !== 'COMPLETED') return false;
 
     const query = searchQuery.trim().toLowerCase();
@@ -104,16 +112,16 @@ export default function ConversationSidebar({
     });
 
     // Keep view membership intact, then promote due conversations with stable order.
-    return sortDueReminders(visibleThreads);
-  }, [threads, dateFilter, dateFilterIds, appliedFilters, activeTab, searchQuery]);
+    return sortDueReminders(sortThreadsByActivity(visibleThreads));
+  }, [threads, dateRange, dateFilterIds, appliedFilters, activeTab, searchQuery]);
 
   const availableTagOptions = useMemo(() => getAvailableTagOptions(threads), [threads]);
   const threadListResetKey = useMemo(() => JSON.stringify([
     activeTab,
     searchQuery,
-    dateFilter,
+    dateRange,
     appliedFilters
-  ]), [activeTab, searchQuery, dateFilter, appliedFilters]);
+  ]), [activeTab, searchQuery, dateRange, appliedFilters]);
 
   useEffect(() => {
     const handleKeyDown = (event) => {
@@ -138,10 +146,10 @@ export default function ConversationSidebar({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 min-w-0">
             <div className="w-8 h-8 bg-[var(--color-accent)] rounded-full flex items-center justify-center shadow-sm shrink-0">
-              <span className="text-[var(--color-text-on-accent)] text-xs font-bold">M</span>
+              <span className="text-[var(--color-text-on-accent)] text-xs font-bold">A</span>
             </div>
             <div className="min-w-0">
-              <h1 className="text-sm font-bold text-[var(--color-text-primary)] truncate">MISSPRICE CRM</h1>
+              <h1 className="text-sm font-bold text-[var(--color-text-primary)] truncate">AdsupCRM</h1>
               <div className="flex items-center gap-1.5 mt-0.5">
                 <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-[var(--color-success)]' : 'bg-[var(--color-danger)]'}`} />
                 <span className="text-xs text-[var(--color-text-muted)]">Facebook ({accounts.length || 0})</span>
@@ -237,7 +245,7 @@ export default function ConversationSidebar({
           <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] pointer-events-none" strokeWidth={1.75} />
         </div>
 
-        <ConversationFilters activeTab={activeTab} onTabChange={onTabChange} waitingCount={waitingCount} dateFilter={dateFilter} onDateFilterChange={onDateFilterChange} />
+        <ConversationFilters activeTab={activeTab} onTabChange={onTabChange} waitingCount={waitingCount} dateRange={dateRange} onDateRangeChange={onDateRangeChange} />
         {bulkHistoryProgress && (
           <div className="flex items-center justify-between rounded-lg bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-muted)]">
             <span>
@@ -264,6 +272,10 @@ export default function ConversationSidebar({
         onToggleCampaignThread={onToggleCampaignThread}
         onToggleUnread={onToggleUnread}
         onTogglePin={onTogglePin}
+        reminderBellMuted={reminderBellMuted}
+        onToggleReminderBell={onToggleReminderBell}
+        onCompleteReminder={onCompleteReminder}
+        onCancelReminder={onCancelReminder}
       />
       {campaignSelectionMode && (
         <div className="flex shrink-0 items-center gap-2 border-t border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3">

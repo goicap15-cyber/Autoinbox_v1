@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { getReminderDueState, reminderBellKey } from './utils/reminderPresentation.js';
+import { playReminderSound } from './utils/notificationSound.js';
 import AppSidebar from './components/AppSidebar.jsx';
 import ConversationSidebar from './components/ConversationSidebar.jsx';
 import ChatHeader from './components/ChatHeader.jsx';
@@ -19,8 +21,11 @@ import IncomingCallModal from './components/IncomingCallModal.jsx';
 import PaymentModal from './components/PaymentModal.jsx';
 import LicenseManagerModal from './components/LicenseManagerModal.jsx';
 import LicenseLockScreen from './components/LicenseLockScreen.jsx';
+import LicenseExpiryBanner, { computeLicenseDaysLeft, formatLicenseExpiryDate } from './components/LicenseExpiryBanner.jsx';
+import SupportTelegramButton from './components/SupportTelegramButton.jsx';
 import AuthScreen from './components/AuthScreen.jsx';
 import EmployeeManagementModal from './components/EmployeeManagementModal.jsx';
+import AppUpdateModal from './components/AppUpdateModal.jsx';
 import { useSocket } from './hooks/useSocket.js';
 import { MessageSquare } from 'lucide-react';
 import { sortThreadsByActivity } from './utils/threadActivity.js';
@@ -41,22 +46,44 @@ function getVerifiedContactName(contact) {
   return isPlaceholderContactName(name) ? '' : name;
 }
 
+const extractBareSnowflakeId = (fbMessageId) => {
+  const raw = String(fbMessageId || '').trim();
+  if (!raw || raw.includes('__bubble_') || raw.endsWith('_media')) return null;
+  const cleaned = raw.replace(/::[^:]+$/, '');
+  const m = cleaned.match(/^(?:\d+@msgr\.)?(\d{15,21})$/);
+  return m ? m[1] : null;
+};
+
+const extractSnowflakeBigInt = (fbMessageId) => {
+  const raw = String(fbMessageId || '').replace(/__bubble_\d+$/, '').trim();
+  const m = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
+  if (!m) return null;
+  try {
+    const sf = BigInt(m[1]);
+    const ts = Number(sf >> 22n);
+    if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return sf;
+  } catch (_) {}
+  return null;
+};
+
+const extractSnowflakeTimestampMs = (fbMessageId) => {
+  const sf = extractSnowflakeBigInt(fbMessageId);
+  return sf !== null ? Number(sf >> 22n) : 0;
+};
+
 const messageTime = (message) => {
   // Local outgoing placeholders keep this anchor for their whole lifetime.
   // Delivery confirmation may arrive later, but it must not move the bubble.
   const anchor = Number(message?.order_anchor_ms);
   if (Number.isFinite(anchor) && anchor > 0) return anchor;
+  const sfTs = extractSnowflakeTimestampMs(message?.fb_message_id);
+  if (sfTs > 0) return sfTs;
   const numeric = Number(message?.timestamp_ms);
   if (Number.isFinite(numeric) && numeric > 0) return numeric;
   const parsed = Date.parse(message?.created_at || '');
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
-// Facebook labels only carry minute precision while CRM sends stamp exact
-// seconds, so comparing raw milliseconds re-sorts a just-sent operator text
-// below customer replies that Messenger shows BEFORE it (label 10:59:00 vs
-// client_submit 10:59:14). Minutes are the finest trustworthy granularity;
-// sequence_order (server-assigned arrival order) settles the same minute.
 const messageMinuteMs = (message) => {
   const t = messageTime(message);
   return t > 0 ? Math.floor(t / 60000) : 0;
@@ -65,8 +92,16 @@ const messageMinuteMs = (message) => {
 const sortMessagesChronologically = (items = []) => items
   .map((message, originalIndex) => ({ message, originalIndex }))
   .sort((left, right) => {
-    // Thời gian là tiêu chí chính (ngày trước, trong ngày theo giờ, tối thiểu
-    // theo phút). sequence_order xếp các tin cùng phút theo đúng thứ tự đến.
+    const sfA = extractSnowflakeBigInt(left.message?.fb_message_id);
+    const sfB = extractSnowflakeBigInt(right.message?.fb_message_id);
+    if (sfA !== null && sfB !== null && sfA !== sfB) {
+      return sfA < sfB ? -1 : 1;
+    }
+    const tsA = messageTime(left.message);
+    const tsB = messageTime(right.message);
+    if ((sfA !== null || sfB !== null) && tsA > 0 && tsB > 0 && tsA !== tsB) {
+      return tsA - tsB;
+    }
     const minuteA = messageMinuteMs(left.message);
     const minuteB = messageMinuteMs(right.message);
     if (minuteA > 0 && minuteB > 0 && minuteA !== minuteB) return minuteA - minuteB;
@@ -80,12 +115,16 @@ const sortMessagesChronologically = (items = []) => items
   })
   .map(({ message }) => message);
 
-const messageIdentities = (message) => [
-  message?.client_message_id ? `client:${message.client_message_id}` : null,
-  message?.attachment_id ? `attachment:${message.attachment_id}` : null,
-  message?.fb_message_id ? `fb:${message.fb_message_id}` : null,
-  message?.id != null ? `id:${message.id}` : null
-].filter(Boolean);
+const messageIdentities = (message) => {
+  const bareSf = extractBareSnowflakeId(message?.fb_message_id);
+  return [
+    message?.client_message_id ? `client:${message.client_message_id}` : null,
+    message?.attachment_id ? `attachment:${message.attachment_id}` : null,
+    message?.fb_message_id ? `fb:${message.fb_message_id}` : null,
+    bareSf ? `sf:${bareSf}` : null,
+    message?.id != null ? `id:${message.id}` : null
+  ].filter(Boolean);
+};
 
 const messageSnapshotSignature = (items = []) => items.map((message) => JSON.stringify([
   messageIdentities(message),
@@ -158,14 +197,15 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
     let matchedIndex = messageIdentities(message)
       .map((key) => indexByIdentity.get(key))
       .find((index) => index !== undefined);
-    if (matchedIndex === undefined && message?.is_outgoing && String(message?.fb_message_id || '').startsWith('mid.')) {
+    const msgFbId = String(message?.fb_message_id || '');
+    if (matchedIndex === undefined && message?.is_outgoing && (msgFbId.startsWith('mid.') || msgFbId.includes('@msgr.'))) {
       const incomingText = String(message.content || '').trim();
       const incomingAt = Number(message.timestamp_ms) || Date.parse(message.created_at || '') || 0;
       const optimisticIdx = result.findIndex((candidate) => {
         if (!candidate?.is_outgoing) return false;
         const candFbId = String(candidate?.fb_message_id || '');
         const candClientId = String(candidate?.client_message_id || '');
-        const isTemporary = candClientId || candFbId.startsWith('pending_') || !candFbId.startsWith('mid.');
+        const isTemporary = candClientId || candFbId.startsWith('pending_') || (!candFbId.startsWith('mid.') && !candFbId.includes('@msgr.'));
         if (!isTemporary) return false;
         if (String(candidate.content || '').trim() !== incomingText) return false;
         const candidateAt = Number(candidate.timestamp_ms) || Date.parse(candidate.created_at || '') || 0;
@@ -223,6 +263,10 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
     result[matchedIndex] = {
       ...previous,
       ...message,
+      client_message_id: message.client_message_id || previous.client_message_id,
+      attachment_id: message.attachment_id || previous.attachment_id,
+      local_media_path: message.local_media_path || previous.local_media_path,
+      media_url: previous.attachment_id ? (previous.media_url || message.media_url) : (message.media_url || previous.media_url),
       status: incomingIsTerminalSuccess
         ? incomingStatus
         : (message.status || message.delivery_status || previous.status),
@@ -233,11 +277,11 @@ const mergeMessagesWithoutReordering = (existing = [], incoming = []) => {
       ui_render_key: previous.ui_render_key || message.ui_render_key,
       ui_position_locked: previous.ui_position_locked || message.ui_position_locked,
       order_anchor_ms: previous.order_anchor_ms,
-      sequence_order: previous.sequence_order ?? message.sequence_order
+      sequence_order: message.sequence_order ?? previous.sequence_order
     };
     messageIdentities(result[matchedIndex]).forEach((key) => indexByIdentity.set(key, matchedIndex));
   });
-  return result;
+  return sortMessagesChronologically(result);
 };
 
 // Snapshot DB trả về đúng thứ tự chuẩn hóa, nhưng merge append-only có thể
@@ -275,7 +319,7 @@ const isSyntheticId = (messageOrId) => {
   const id = typeof messageOrId === 'string'
     ? messageOrId
     : String(messageOrId?.fb_message_id || messageOrId?.id || '');
-  return !id || /^(?:dom_|history_|sidebar_preview_|pending_|network_|websocket_|mercury_|xhr_)/i.test(id) || !id.startsWith('mid.');
+  return !id || /^(?:dom_|history_|sidebar_preview_|pending_|network_|websocket_|mercury_|xhr_)/i.test(id) || (!id.startsWith('mid.') && !id.startsWith('m_'));
 };
 
 // A CRM text send can briefly arrive twice: once as the local/client row and
@@ -320,7 +364,53 @@ const reconcileOutgoingTextEchoes = (items = []) => {
   });
 
   withoutIncomingEchoes.forEach((message) => {
-    if (!message?.is_outgoing || !isPlainText(message) || !normalizedText(message)) {
+    if (!isOutgoing(message)) {
+      result.push(message);
+      return;
+    }
+    if (!isPlainText(message)) {
+      const messageAt = messageTime(message);
+      const mediaType = String(message?.media_type || 'image').toLowerCase();
+      const mediaMatchIndex = result.findIndex((candidate) => {
+        if (!isOutgoing(candidate) || isPlainText(candidate)) return false;
+        const candMediaType = String(candidate?.media_type || 'image').toLowerCase();
+        if (candMediaType !== mediaType) return false;
+        const asymmetricClientEcho = Boolean(candidate.client_message_id || candidate.attachment_id)
+          !== Boolean(message.client_message_id || message.attachment_id);
+        if (!asymmetricClientEcho) return false;
+        const candidateAt = messageTime(candidate);
+        return !candidateAt || !messageAt || Math.abs(candidateAt - messageAt) <= 45000;
+      });
+      if (mediaMatchIndex < 0) {
+        result.push(message);
+        return;
+      }
+      const previous = result[mediaMatchIndex];
+      const crmRow = (previous.client_message_id || previous.attachment_id) ? previous : message;
+      const domRow = crmRow === previous ? message : previous;
+      const domFbId = String(domRow.fb_message_id || '');
+      const crmFbId = String(crmRow.fb_message_id || '');
+      const preferredFbId = (domFbId && !domFbId.startsWith('pending_') && !domFbId.includes('__bubble_'))
+        ? domFbId
+        : (crmFbId || domFbId);
+      result[mediaMatchIndex] = {
+        ...domRow,
+        ...crmRow,
+        id: crmRow.id ?? domRow.id,
+        client_message_id: crmRow.client_message_id || domRow.client_message_id,
+        attachment_id: crmRow.attachment_id || domRow.attachment_id,
+        media_url: crmRow.media_url || domRow.media_url,
+        local_media_path: crmRow.local_media_path || domRow.local_media_path,
+        fb_message_id: preferredFbId,
+        timestamp_ms: extractSnowflakeTimestampMs(preferredFbId) || crmRow.timestamp_ms || domRow.timestamp_ms,
+        ui_render_key: previous.ui_render_key || message.ui_render_key,
+        ui_position_locked: previous.ui_position_locked || message.ui_position_locked,
+        order_anchor_ms: previous.order_anchor_ms || message.order_anchor_ms,
+        sequence_order: previous.sequence_order ?? message.sequence_order
+      };
+      return;
+    }
+    if (!normalizedText(message)) {
       result.push(message);
       return;
     }
@@ -435,9 +525,10 @@ export default function App() {
   const [activeModal, setActiveModal] = useState(null);
   const [richCapabilities, setRichCapabilities] = useState(null);
   const [bulkHistoryProgress, setBulkHistoryProgress] = useState(null);
-  // Bộ lọc chi tiết ngày: dateFilter='YYYY-MM-DD', dateFilterIds = tập thread id
-  // có tin nhắn trong ngày đó (từ /api/threads/active-on - nguồn messages).
-  const [dateFilter, setDateFilter] = useState('');
+  // Bộ lọc khoảng ngày: dateRange = {from, to} 'YYYY-MM-DD' (một trong hai
+  // có thể trống), dateFilterIds = tập thread id có tin nhắn trong khoảng đó
+  // (từ /api/threads/active-on - nguồn messages).
+  const [dateRange, setDateRange] = useState({ from: '', to: '' });
   const [dateFilterIds, setDateFilterIds] = useState(null);
   const [accountSyncing, setAccountSyncing] = useState(null);
   const [historySyncingThreadId, setHistorySyncingThreadId] = useState(null);
@@ -452,6 +543,7 @@ export default function App() {
   const [campaignRefreshVersion, setCampaignRefreshVersion] = useState(0);
   const [incomingCallInfo, setIncomingCallInfo] = useState(null);
   const [licenseStatus, setLicenseStatus] = useState(null);
+  const [licenseBannerDismissed, setLicenseBannerDismissed] = useState(false);
   const [sessionUser, setSessionUser] = useState(null);
   const sessionUserIdRef = useRef(null);
   const accountsRef = useRef([]);
@@ -526,6 +618,51 @@ export default function App() {
     if (sessionUser) checkLicenseStatus();
     else setLicenseStatus(null);
   }, [checkLicenseStatus, sessionUser]);
+
+  const [appUpdateStatus, setAppUpdateStatus] = useState(null);
+  const [updateBannerDismissedVersion, setUpdateBannerDismissedVersion] = useState(null);
+
+  useEffect(() => {
+    if (!sessionUser) return;
+    const runCheck = () => {
+      fetch('/api/app-update/check', { method: 'POST' })
+        .then((r) => r.json())
+        .then((d) => { if (d?.status) setAppUpdateStatus(d.status); })
+        .catch(() => {});
+    };
+    fetch('/api/app-update/status')
+      .then((r) => r.json())
+      .then((d) => { if (d?.status) setAppUpdateStatus(d.status); })
+      .catch(() => {});
+    const timer = setTimeout(runCheck, 3000);
+    // Tự động kiểm tra định kỳ mỗi 30 giây & khi cửa sổ được focus để không cần đóng app vẫn hiện bản mới ngay
+    const interval = setInterval(runCheck, 30 * 1000);
+    const onFocus = () => runCheck();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [sessionUser]);
+
+  useEffect(() => {
+    if (appUpdateStatus?.state === 'restarting') {
+      const reloadTimer = setTimeout(() => {
+        window.location.reload();
+      }, 900);
+      return () => clearTimeout(reloadTimer);
+    }
+  }, [appUpdateStatus?.state]);
+
+  useEffect(() => {
+    if (!socket) return;
+    const onUpdateStatus = (st) => {
+      if (st) setAppUpdateStatus(st);
+    };
+    socket.on?.('app_update_status', onUpdateStatus);
+    return () => socket.off?.('app_update_status', onUpdateStatus);
+  }, [socket]);
 
   const loadInboxSources = useCallback(async () => {
     try {
@@ -636,6 +773,61 @@ export default function App() {
 
   const loadThreadsRef = useRef(loadThreads);
   useEffect(() => { loadThreadsRef.current = loadThreads; }, [loadThreads]);
+
+  // Chuông lời nhắc: hội thoại chuyển sang "đến hạn" (kể cả phát hiện bằng
+  // timer khi danh sách không đổi) thì kêu chime 3 nốt riêng (2 cụm liên tiếp),
+  // lặp lại mỗi 1 phút đến khi khách bấm chuông đỏ trên row (menu: tắt chuông /
+  // hoàn thành / hủy nhắc). Nhắc đã quá hạn TRƯỚC khi mở app chỉ ghi nhận,
+  // không dội.
+  const reminderBellRungRef = useRef(new Set());
+  const reminderBellFirstPassRef = useRef(true);
+  const [reminderBellMuted, setReminderBellMuted] = useState(() => new Set());
+  const reminderBellMutedRef = useRef(reminderBellMuted);
+  useEffect(() => { reminderBellMutedRef.current = reminderBellMuted; }, [reminderBellMuted]);
+
+  const evaluateReminderBells = useCallback(() => {
+    if (!reminderBellFirstPassRef.current && threadsRef.current.length === 0) return;
+    const now = Date.now();
+    const dueKeys = [];
+    for (const thread of threadsRef.current) {
+      if (getReminderDueState(thread, now).isDue) dueKeys.push(reminderBellKey(thread));
+    }
+    if (reminderBellFirstPassRef.current) {
+      for (const key of dueKeys) reminderBellRungRef.current.add(key);
+      reminderBellFirstPassRef.current = false;
+      return;
+    }
+    let hasNewDue = false;
+    for (const key of dueKeys) {
+      if (reminderBellMutedRef.current.has(key) || reminderBellRungRef.current.has(key)) continue;
+      reminderBellRungRef.current.add(key);
+      hasNewDue = true;
+    }
+    if (hasNewDue) playReminderSound();
+  }, []);
+
+  useEffect(() => { evaluateReminderBells(); }, [threads, evaluateReminderBells]);
+  useEffect(() => {
+    const detectTimer = setInterval(evaluateReminderBells, 30000);
+    const repeatTimer = setInterval(() => {
+      const now = Date.now();
+      const hasUrgent = threadsRef.current.some((thread) =>
+        getReminderDueState(thread, now).isDue
+        && !reminderBellMutedRef.current.has(reminderBellKey(thread)));
+      if (hasUrgent) playReminderSound();
+    }, 60000);
+    return () => { clearInterval(detectTimer); clearInterval(repeatTimer); };
+  }, [evaluateReminderBells]);
+
+  const handleToggleReminderBell = useCallback((thread) => {
+    const key = reminderBellKey(thread);
+    setReminderBellMuted((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   // Page API tự đồng bộ (auto-backfill): server bắn THREAD_LIST_UPDATED khi có
   // tin mới được kéo về — refresh danh sách hội thoại, chat đang mở tự cập nhật
@@ -841,7 +1033,7 @@ export default function App() {
         .catch(() => {})
         .finally(() => { requestPending = false; });
     };
-    const timer = setInterval(reconcileFromDatabase, 15000);
+    const timer = setInterval(reconcileFromDatabase, 4000);
     return () => { stopped = true; clearInterval(timer); controller.abort(); };
   }, [activeThreadId]);
 
@@ -918,11 +1110,25 @@ export default function App() {
     if (!socket) return;
     socket.on('THREAD_LIST_UPDATED', (data) => {
       // Page API auto-backfill: có tin mới được kéo về → refresh danh sách
-      if (data?.account_id && accountsRef.current.length > 0) {
+      if (data?.account_id && !data?.page_id && !data?.thread_id && accountsRef.current.length > 0) {
         const matches = accountsRef.current.some((account) => String(account.id) === String(data.account_id));
         if (!matches) return;
       }
       refreshThreadListThrottled();
+      const openTid = String(activeThreadIdRef.current || '');
+      if (openTid && (!data?.thread_id || String(data.thread_id) === openTid || String(openTid).endsWith(':' + String(data.thread_id)))) {
+        fetch(`/api/threads/${encodeURIComponent(openTid)}/messages`)
+          .then((r) => r.json())
+          .then((msgs) => {
+            if (!Array.isArray(msgs)) return;
+            setMessages((prev) => {
+              const existing = prev[openTid] || [];
+              const merged = reconcileOutgoingTextEchoes(mergeSnapshotSelfHealing(existing, preserveOrderAnchors(msgs, existing)));
+              return messageSnapshotSignature(existing) === messageSnapshotSignature(merged) ? prev : { ...prev, [openTid]: merged };
+            });
+          })
+          .catch(() => {});
+      }
     });
     socket.on('THREAD_MEMBERS', (payload) => {
       const tid = String(payload?.thread_id || '');
@@ -939,7 +1145,7 @@ export default function App() {
         const total = t_ui - t_dom;
         console.log(`%c[TELEMETRY] ⚡ E2E Latency: ${total}ms (dom->sw: ${domToSw}ms, sw->srv: ${swToSrv}ms, srv->ui: ${srvToUi}ms)`, 'color: #10b981; font-weight: bold;');
       }
-      if (newMsg.account_id && accountsRef.current.length > 0) {
+      if (newMsg.account_id && newMsg.source_type !== 'page_messenger' && String(activeThreadIdRef.current || '') !== String(newMsg.thread_id || '') && accountsRef.current.length > 0) {
         const matchesAccount = accountsRef.current.some((account) =>
           String(account.id) === String(newMsg.account_id) ||
           String(account.account_id || '') === String(newMsg.account_id)
@@ -983,19 +1189,20 @@ export default function App() {
           // Text can be intentionally sent twice. Only a still-pending local
           // bubble may absorb its own DOM confirmation; a sent text is final.
           const localDelivery = String(message.delivery_status || message.status || '').toLowerCase();
-          const awaitingTextConfirmation = ['pending', 'sending', 'queued', 'awaiting_confirmation'].includes(localDelivery);
+          const localBareSf = extractBareSnowflakeId(localFbId);
+          const incomingBareSf = extractBareSnowflakeId(incomingFbId);
+          const sameBareSnowflake = Boolean(localBareSf && incomingBareSf && localBareSf === incomingBareSf);
+          const localHasProvisionalId = !localFbId
+            || localFbId.startsWith('pending_')
+            || (/^\d+$/.test(localFbId) && incomingFbId.includes('@msgr.'));
+          const awaitingTextConfirmation = ['pending', 'sending', 'queued', 'awaiting_confirmation'].includes(localDelivery)
+            || localHasProvisionalId
+            || sameBareSnowflake;
           return newIsMedia
             ? existingIsMedia && sameAttachment && sameMediaType
             : awaitingTextConfirmation && !existingIsMedia && String(message.content || '') === String(newMsg.content || '');
         });
         if (newMsg.client_message_id) {
-          // Feature 021: a Page send's local optimistic bubble is created
-          // with the CRM's own id, but the server necessarily broadcasts a
-          // different 'queue_'-derived id for it (background.js echoes that
-          // exact id back for DOM/network correlation, so the server can't
-          // just reuse the CRM's id there). original_client_message_id lets
-          // us find that local bubble by its original id and reconcile it to
-          // the server's id, instead of rendering a second, orphaned bubble.
           const existsIdx = currentMsgs.findIndex(m =>
             m.client_message_id === newMsg.client_message_id ||
             (newMsg.original_client_message_id && m.client_message_id === newMsg.original_client_message_id)
@@ -1005,14 +1212,17 @@ export default function App() {
             updated[existsIdx] = {
               ...currentMsgs[existsIdx],
               ...newMsg,
+              attachment_id: newMsg.attachment_id || currentMsgs[existsIdx].attachment_id,
               local_media_path: newMsg.local_media_path || currentMsgs[existsIdx].local_media_path,
-              media_url: newMsg.media_url || currentMsgs[existsIdx].media_url,
+              media_url: currentMsgs[existsIdx].attachment_id
+                ? (currentMsgs[existsIdx].media_url || newMsg.media_url)
+                : (newMsg.media_url || currentMsgs[existsIdx].media_url),
               media_type: newMsg.media_type || currentMsgs[existsIdx].media_type,
-              client_message_id: newMsg.client_message_id,
+              client_message_id: newMsg.client_message_id || currentMsgs[existsIdx].client_message_id,
               ui_render_key: currentMsgs[existsIdx]?.ui_render_key,
               ui_position_locked: currentMsgs[existsIdx]?.ui_position_locked,
               order_anchor_ms: currentMsgs[existsIdx]?.order_anchor_ms,
-              sequence_order: currentMsgs[existsIdx]?.sequence_order ?? newMsg.sequence_order,
+              sequence_order: newMsg.sequence_order ?? currentMsgs[existsIdx]?.sequence_order,
               status: newMsg.status || newMsg.delivery_status || 'sent'
             };
           } else if (optimisticIdx >= 0) {
@@ -1020,10 +1230,16 @@ export default function App() {
             updated[optimisticIdx] = {
               ...currentMsgs[optimisticIdx],
               ...newMsg,
+              attachment_id: newMsg.attachment_id || currentMsgs[optimisticIdx].attachment_id,
+              local_media_path: newMsg.local_media_path || currentMsgs[optimisticIdx].local_media_path,
+              media_url: currentMsgs[optimisticIdx].attachment_id
+                ? (currentMsgs[optimisticIdx].media_url || newMsg.media_url)
+                : (newMsg.media_url || currentMsgs[optimisticIdx].media_url),
+              client_message_id: newMsg.client_message_id || currentMsgs[optimisticIdx].client_message_id,
               ui_render_key: currentMsgs[optimisticIdx]?.ui_render_key,
               ui_position_locked: currentMsgs[optimisticIdx]?.ui_position_locked,
               order_anchor_ms: currentMsgs[optimisticIdx]?.order_anchor_ms,
-              sequence_order: currentMsgs[optimisticIdx]?.sequence_order ?? newMsg.sequence_order,
+              sequence_order: newMsg.sequence_order ?? currentMsgs[optimisticIdx]?.sequence_order,
               status: newMsg.status || newMsg.delivery_status || 'sent'
             };
           } else {
@@ -1031,8 +1247,10 @@ export default function App() {
               status: newMsg.status || newMsg.delivery_status || 'sent' }]);
           }
         } else {
+          const incomingBareSf = extractBareSnowflakeId(newMsg.fb_message_id);
           const existsIdx = currentMsgs.findIndex((message) => (
             (newMsg.fb_message_id && message.fb_message_id === newMsg.fb_message_id) ||
+            (incomingBareSf && extractBareSnowflakeId(message.fb_message_id) === incomingBareSf) ||
             (newMsg.id != null && message.id === newMsg.id) ||
             (!newMsg.is_outgoing && !message.is_outgoing &&
               (String(message.fb_message_id || '').startsWith('sidebar_preview_') || newMsg.provisional_incoming) &&
@@ -1044,10 +1262,16 @@ export default function App() {
             updated[mergeIdx] = {
               ...currentMsgs[mergeIdx],
               ...newMsg,
+              client_message_id: newMsg.client_message_id || currentMsgs[mergeIdx]?.client_message_id,
+              attachment_id: newMsg.attachment_id || currentMsgs[mergeIdx]?.attachment_id,
+              local_media_path: newMsg.local_media_path || currentMsgs[mergeIdx]?.local_media_path,
+              media_url: currentMsgs[mergeIdx]?.attachment_id
+                ? (currentMsgs[mergeIdx]?.media_url || newMsg.media_url)
+                : (newMsg.media_url || currentMsgs[mergeIdx]?.media_url),
               ui_render_key: currentMsgs[mergeIdx]?.ui_render_key,
               ui_position_locked: currentMsgs[mergeIdx]?.ui_position_locked,
               order_anchor_ms: currentMsgs[mergeIdx]?.order_anchor_ms,
-              sequence_order: currentMsgs[mergeIdx]?.sequence_order ?? newMsg.sequence_order,
+              sequence_order: newMsg.sequence_order ?? currentMsgs[mergeIdx]?.sequence_order,
               status: newMsg.status || newMsg.delivery_status || 'sent'
             };
           } else {
@@ -1085,7 +1309,24 @@ export default function App() {
         });
         if (idx >= 0) {
           const updated = [...prev];
-          updated[idx] = { ...updated[idx], ...(['source_id','source_type','source_name','source_status'].reduce((acc, key) => (newMsg[key] ? { ...acc, [key]: newMsg[key] } : acc), {})), thread_key: msgThreadKey || updated[idx].thread_key, last_message: newMsg.content, last_activity: newMsg.created_at || new Date().toISOString(), is_unread: true };
+          const isViewingThisThread = String(activeThreadIdRef.current) === tidStr;
+          const sfTs = extractSnowflakeTimestampMs(newMsg.fb_message_id);
+          const nextMsgTs = sfTs || Number(newMsg.timestamp_ms) || Date.parse(newMsg.created_at || '') || Date.now();
+          const prevMsgTs = Number(updated[idx].last_msg_ts) || 0;
+          const isNewestMsg = nextMsgTs >= prevMsgTs - 2000;
+          const isFreshIncoming = !newMsg.is_outgoing && nextMsgTs >= (Date.now() - 5 * 60 * 1000);
+          const nextUnread = isViewingThisThread ? 0 : (newMsg.is_outgoing ? 0 : (isFreshIncoming && isNewestMsg ? 1 : Number(updated[idx].is_unread || 0)));
+          updated[idx] = {
+            ...updated[idx],
+            ...(['source_id','source_type','source_name','source_status'].reduce((acc, key) => (newMsg[key] ? { ...acc, [key]: newMsg[key] } : acc), {})),
+            thread_key: msgThreadKey || updated[idx].thread_key,
+            last_message: isNewestMsg ? (newMsg.content || updated[idx].last_message) : updated[idx].last_message,
+            last_activity: isNewestMsg ? (new Date(nextMsgTs).toISOString()) : updated[idx].last_activity,
+            last_msg_ts: Math.max(prevMsgTs, nextMsgTs),
+            is_unread: nextUnread,
+            unread_manual: (newMsg.is_outgoing || isViewingThisThread) ? -1 : updated[idx].unread_manual,
+            unread_count: nextUnread ? 1 : 0
+          };
           return sortThreadsByActivity(updated);
         }
         const summary = newMsg.thread_summary;
@@ -1096,6 +1337,9 @@ export default function App() {
             thread_key: newMsg.thread_key || (summary.account_id ? `${summary.account_id}:${summary.id}` : String(summary.id)),
             last_message: newMsg.content ?? summary.last_message,
             last_activity: newMsg.created_at || summary.last_activity || new Date().toISOString(),
+            // Tin vừa đến chứng tỏ hội thoại CÓ tin — thiếu last_msg_ts sẽ bị
+            // tầng "chưa có tin nhắn" của sort sập nhầm xuống đáy list.
+            last_msg_ts: extractSnowflakeTimestampMs(newMsg.fb_message_id) || Number(newMsg.timestamp_ms) || Date.parse(newMsg.created_at || '') || Date.now(),
             is_unread: !newMsg.is_outgoing
           }, ...prev]);
         }
@@ -1423,11 +1667,12 @@ export default function App() {
     });
 
     socket.on('CONTACT_UPDATED', (contactUpdate = {}) => {
-      const { thread_id, avatar_url, name, nickname, phone, email, status_id, status_name, status_color, phone_source, phone_captured_at } = contactUpdate;
+      const { thread_id, avatar_url, name, nickname, phone, email, status_id, status_name, status_color, phone_source, phone_captured_at, profile_url } = contactUpdate;
       if (thread_id == null) return;
       const tidStr = String(thread_id);
       const contactPatch = {
         ...(avatar_url ? { avatar_url } : {}),
+        ...(profile_url ? { profile_url } : {}),
         ...(name ? { name } : {}),
         ...(nickname !== undefined ? { nickname } : {}),
         ...(phone ? { phone } : {}),
@@ -1439,6 +1684,7 @@ export default function App() {
       setThreads(prev => prev.map(t => String(t.id) === tidStr ? {
         ...t,
         ...(avatar_url ? { avatar_url } : {}),
+        ...(profile_url ? { profile_url } : {}),
         ...(name ? { contact_name: name } : {}),
         ...(nickname !== undefined ? { nickname } : {}),
         ...(status_id !== undefined ? { status_id, status_name: status_name || null, status_color: status_color || null } : {})
@@ -1544,7 +1790,7 @@ export default function App() {
       // đánh dấu đã đọc -> thread tụt về vị trí theo last_activity như Messenger.
       const nextActivity = typeof payload?.last_activity === 'string' ? payload.last_activity : null;
       setThreads((prev) => sortThreadsByActivity(prev.map((t) => (String(t.id) === tid
-        ? { ...t, is_unread: next ? 1 : 0, unread_manual: next ? 1 : -1, ...(nextActivity ? { last_activity: nextActivity } : {}) }
+        ? { ...t, is_unread: next ? 1 : 0, unread_manual: payload?.unread_manual !== undefined ? Number(payload.unread_manual) : (next ? 0 : -1), unread_count: next ? (Number(t.unread_count) || 1) : 0, ...(nextActivity ? { last_activity: nextActivity, last_msg_ts: Math.max(Number(t.last_msg_ts) || 0, Date.parse(nextActivity) || 0) } : {}) }
         : t))));
     });
     socket.on('THREAD_COMPLETED', () => loadThreadsRef.current());
@@ -1598,7 +1844,10 @@ export default function App() {
               contact_name: synced.contact_name || synced.name || updatedThreads[idx].contact_name,
               avatar_url: synced.avatar_url || updatedThreads[idx].avatar_url,
               phone: synced.phone || updatedThreads[idx].phone,
-              email: synced.email || updatedThreads[idx].email
+              email: synced.email || updatedThreads[idx].email,
+              ...(String(syncedIdStr) === String(activeThreadIdRef.current) || (Number(updatedThreads[idx].unread_manual) === -1 && !(Number(synced.last_msg_ts || 0) > Number(updatedThreads[idx].last_msg_ts || 0)))
+                ? { is_unread: 0, unread_manual: -1, unread_count: 0 }
+                : {})
             };
           } else {
             updatedThreads.push({
@@ -1965,7 +2214,11 @@ export default function App() {
   const activeMessages = activeThreadId ? (messages[String(activeThreadId)] || []) : [];
   const handleSelectThread = useCallback((threadId) => {
     const clickedThread = threads.find((thread) => String(thread.id) === String(threadId));
-    if (clickedThread && (Number(clickedThread.is_unread) === 1 || Number(clickedThread.unread_manual) === 1)) {
+    if (clickedThread) {
+      const tidStr = String(clickedThread.id || threadId);
+      setThreads((prev) => sortThreadsByActivity(prev.map((t) => (String(t.id) === tidStr
+        ? { ...t, is_unread: 0, unread_manual: -1, unread_count: 0 }
+        : t))));
       fetch('/api/threads/' + encodeURIComponent(String(threadId)) + '/unread', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2055,13 +2308,17 @@ export default function App() {
     });
   }, [activeThreadId, selectedThread, socket, isConnected]);
 
-  // Lấy danh sách hội thoại có tin nhắn trong ngày đang lọc
+  // Lấy danh sách hội thoại có tin nhắn trong khoảng ngày đang lọc
   useEffect(() => {
-    if (!dateFilter || !socket || !isConnected) { setDateFilterIds(null); return; }
+    const hasRange = Boolean(dateRange.from || dateRange.to);
+    if (!hasRange || !socket || !isConnected) { setDateFilterIds(null); return; }
     let cancelled = false;
+    const params = new URLSearchParams();
+    if (dateRange.from) params.set('from', dateRange.from);
+    if (dateRange.to) params.set('to', dateRange.to);
     const load = async () => {
       try {
-        const res = await fetch('/api/threads/active-on?date=' + encodeURIComponent(dateFilter));
+        const res = await fetch('/api/threads/active-on?' + params.toString());
         const data = await res.json();
         if (!cancelled && data?.success) setDateFilterIds(new Set((data.thread_ids || []).map(String)));
       } catch (_) {}
@@ -2069,10 +2326,10 @@ export default function App() {
     load();
     const timer = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [dateFilter, socket, isConnected, accounts]);
+  }, [dateRange, socket, isConnected, accounts]);
 
-  const handleDateFilterChange = useCallback((value) => {
-    setDateFilter(value || '');
+  const handleDateRangeChange = useCallback((range) => {
+    setDateRange({ from: range?.from || '', to: range?.to || '' });
     setDateFilterIds(null);
   }, []);
 
@@ -2095,6 +2352,24 @@ export default function App() {
     return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Äang kiểm tra phiên đăng nhập...</div>;
   }
 
+  // Preview banner hết hạn license (?_licensePreviewDays=3) — chỉ có hiệu lực trên Vite dev
+  // server (import.meta.env.DEV); build production không chứa nhánh này.
+  const licensePreviewDays = import.meta.env.DEV
+    ? Number.parseInt(new URLSearchParams(window.location.search).get('_licensePreviewDays') || '', 10)
+    : null;
+  if (Number.isFinite(licensePreviewDays)) {
+    return (
+      <div className="min-h-screen bg-slate-950">
+        <LicenseExpiryBanner
+          daysLeft={licensePreviewDays}
+          expiresAtLabel={formatLicenseExpiryDate(new Date(Date.now() + licensePreviewDays * 86400000).toISOString())}
+          onOpenPayment={() => {}}
+          onDismiss={() => {}}
+        />
+      </div>
+    );
+  }
+
   if (!sessionUser) {
     return <AuthScreen onAuthenticated={setSessionUser} />;
   }
@@ -2103,8 +2378,20 @@ export default function App() {
     return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center">Äang kiá»ƒm tra báº£n quyá»n...</div>;
   }
 
+  const licenseDaysLeft = licenseStatus?.isLicensed ? computeLicenseDaysLeft(licenseStatus.expiresAt) : null;
+  const licenseExpiryLabel = formatLicenseExpiryDate(licenseStatus?.expiresAt);
+
   return (
     <div className={gridClass}>
+      {!licenseBannerDismissed && licenseDaysLeft !== null && licenseExpiryLabel && (
+        <LicenseExpiryBanner
+          daysLeft={licenseDaysLeft}
+          expiresAtLabel={licenseExpiryLabel}
+          onOpenPayment={() => setActiveModal('payment')}
+          onDismiss={() => setLicenseBannerDismissed(true)}
+        />
+      )}
+      <SupportTelegramButton />
       {/* Column 1: Sidebar Navigation - 48px */}
       <AppSidebar
         activeView={activeView}
@@ -2117,16 +2404,19 @@ export default function App() {
         hasCheckpoint={hasCheckpoint} collapsed={leadPanelCollapsed}
         onToggleCollapse={() => setLeadPanelCollapsed(!leadPanelCollapsed)}
         sessionUser={sessionUser} onLogout={handleLogout}
+        updateStatus={appUpdateStatus}
       />
 
       {activeView === 'employees' && <EmployeeManagementModal />}
 
       {/* Column 2: Conversation List */}
       <ConversationSidebar
-        dateFilter={dateFilter}
+        dateRange={dateRange}
         dateFilterIds={dateFilterIds}
-        onDateFilterChange={handleDateFilterChange}
+        onDateRangeChange={handleDateRangeChange}
         threads={threads} activeThreadId={activeThreadId}
+        reminderBellMuted={reminderBellMuted} onToggleReminderBell={handleToggleReminderBell}
+        onCompleteReminder={handleCompleteReminder} onCancelReminder={handleCancelReminder}
         onSelectThread={handleSelectThread}
         activeTab={activeTab} onTabChange={handleConversationTabChange}
         waitingCount={waitingCount}
@@ -2178,7 +2468,7 @@ export default function App() {
               // request locked and the next clicked user cannot mirror scroll.
               key={String(activeThreadId)}
               messages={activeMessages}
-              jumpToDate={dateFilter || null}
+              jumpToRange={(dateRange.from || dateRange.to) ? dateRange : null}
               activeThread={selectedThread}
               // Keep automatic first-open sync as the primary path, and expose
               // the existing manual retry control when Facebook confirms an
@@ -2290,6 +2580,21 @@ export default function App() {
           isOpen={true}
           onClose={() => setActiveModal(null)}
           onOpenPayment={() => setActiveModal('payment')}
+        />
+      )}
+      {(activeModal === 'appUpdate' ||
+        ['downloading', 'applying', 'restarting'].includes(appUpdateStatus?.state) ||
+        (appUpdateStatus?.updateAvailable && updateBannerDismissedVersion !== appUpdateStatus?.latestVersion)) && (
+        <AppUpdateModal
+          isOpen={true}
+          onClose={() => {
+            if (activeModal === 'appUpdate') setActiveModal(null);
+            if (appUpdateStatus?.latestVersion) {
+              setUpdateBannerDismissedVersion(appUpdateStatus.latestVersion);
+            }
+          }}
+          updateStatus={appUpdateStatus}
+          onStatusChange={setAppUpdateStatus}
         />
       )}
 

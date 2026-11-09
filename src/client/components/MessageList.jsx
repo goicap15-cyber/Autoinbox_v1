@@ -6,7 +6,7 @@ import { getMessageDateKey, formatDateSeparatorLabel } from '../utils/messageTim
 
 const AVATAR_COLORS = ['#3b82f6', '#8b5cf6', '#10b981', '#ec4899', '#f97316', '#14b8a6', '#6366f1', '#ef4444'];
 
-export default function MessageList({ messages = [], activeThread, onSyncThread, onRetryMessage, onViewportScroll, historySyncing = false, jumpToDate = null }) {
+export default function MessageList({ messages = [], activeThread, onSyncThread, onRetryMessage, onViewportScroll, historySyncing = false, jumpToRange = null }) {
   const containerRef = useRef(null);
   const previousThreadIdRef = useRef(null);
   const previousHeightRef = useRef(0);
@@ -61,6 +61,15 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     () => allDisplayMessages.slice(Math.max(0, allDisplayMessages.length - visibleMessageCount)),
     [allDisplayMessages, visibleMessageCount]
   );
+  // Ngày-key của tin sớm nhất nằm trong khoảng lọc (danh sách cũ -> mới).
+  const jumpTargetKey = useMemo(() => {
+    const from = jumpToRange?.from || null;
+    const to = jumpToRange?.to || null;
+    if (!from && !to) return null;
+    const inRange = (key) => Boolean(key) && (!from || key >= from) && (!to || key <= to);
+    const target = allDisplayMessages.find((message) => inRange(getMessageDateKey(message)));
+    return target ? getMessageDateKey(target) : null;
+  }, [jumpToRange, allDisplayMessages]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -100,10 +109,10 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
   }, [allDisplayMessages]);
 
   useEffect(() => {
-    if (!jumpToDate) return;
-    const targetIndex = allDisplayMessages.findIndex((message) => getMessageDateKey(message) === jumpToDate);
+    if (!jumpTargetKey) return;
+    const targetIndex = allDisplayMessages.findIndex((message) => getMessageDateKey(message) === jumpTargetKey);
     if (targetIndex >= 0) setVisibleMessageCount(allDisplayMessages.length - targetIndex);
-  }, [jumpToDate, allDisplayMessages]);
+  }, [jumpTargetKey, allDisplayMessages]);
 
   useLayoutEffect(() => {
     const container = containerRef.current;
@@ -143,9 +152,9 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     }
 
     // Jump-to-date: nếu bộ lọc ngày đang bật mà ngày đó chưa nhảy thì cuộn tới
-    // tin đầu tiên của ngày (element phải đã mount trong DOM).
-    if (jumpToDate && !jumpStateRef.current.done) {
-      const el = container.querySelector(`[data-msg-date="${String(jumpToDate).replace(/"/g, '')}"]`);
+    // tin đầu tiên trong khoảng (element phải đã mount trong DOM).
+    if (jumpTargetKey && !jumpStateRef.current.done) {
+      const el = container.querySelector(`[data-msg-date="${String(jumpTargetKey).replace(/"/g, '')}"]`);
       if (el) {
         container.scrollTop = el.offsetTop - 8;
         lastScrollTopRef.current = container.scrollTop;
@@ -164,7 +173,7 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
     previousFirstMessageRef.current = nextFirst;
     const release = requestAnimationFrame(() => { suppressScrollRef.current = false; });
     return () => cancelAnimationFrame(release);
-  }, [messages, displayMessages, jumpToDate]);
+  }, [messages, displayMessages, jumpTargetKey]);
 
   // Keep the viewport pinned to the newest message when media/layout
   // finishes loading. Do not disturb an operator who is reading history.
@@ -192,7 +201,7 @@ export default function MessageList({ messages = [], activeThread, onSyncThread,
 
   useEffect(() => {
     jumpStateRef.current = { done: false, attempts: 0 };
-  }, [jumpToDate]);
+  }, [jumpTargetKey]);
 
   useEffect(() => {
     if (historySyncing) syncWasActiveRef.current = true;

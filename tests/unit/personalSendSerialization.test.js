@@ -60,7 +60,7 @@ test('a later hydrated observation enriches an existing incoming video row', () 
   const viewerSource = fs.readFileSync('src/client/components/MediaViewer.jsx', 'utf8');
   assert.match(contentSource, /domObservationSignature[\s\S]+?parsed\?\.media_url/);
   assert.doesNotMatch(contentSource, /performance\.getEntriesByType\('resource'\)/);
-  assert.match(contentSource, /Only row-scoped sources\/posters are safe here/);
+  assert.match(contentSource, /const rowVideos = messageRow\.querySelectorAll\?\.\('video'\)/);
   assert.match(serverSource, /let mediaWasUpdated = false/);
   assert.match(serverSource, /media_url = COALESCE\(NULLIF\(\?, ''\), media_url\)/);
   assert.match(serverSource, /!directionWasUpdated && !mediaWasUpdated/);
@@ -128,7 +128,9 @@ test('hydrated outgoing video confirms pending state without replaying anonymous
   const reconcileStart = source.indexOf('function reconcileLatestIncomingMessages()');
   const reconcileEnd = source.indexOf('// Initialize everything', reconcileStart);
   const reconcile = source.slice(reconcileStart, reconcileEnd);
-  assert.match(reconcile, /if \(!parsed\.native_id\) continue;/);
+  // merge v1.0.22-26: upstream cho phép hàng đuôi synthetic chưa kịp có mid
+  // đi tiếp (allowSyntheticIncomingTail) thay vì continue cứng.
+  assert.match(reconcile, /if \(!parsed\.native_id && !allowSyntheticIncomingTail\) continue;/);
   assert.match(reconcile, /const isMediaRow = Boolean/);
   assert.match(reconcile, /if \(parsed\.is_outgoing && !isCallRow && !isMediaRow && !hasDurableMidId\) continue;/);
   assert.match(reconcile, /const hasDurableMidId = \/\^mid\\\.\//);

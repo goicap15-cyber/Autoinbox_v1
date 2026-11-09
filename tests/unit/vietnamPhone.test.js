@@ -3,8 +3,10 @@ const { describe } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   RULE_VERSION,
+  INTL_RULE_VERSION,
   isPrefixActive,
   normalizeVietnamMobile,
+  findInternationalNumbers,
   findPhoneNumbers
 } = require('../../src/server/utils/vietnamPhone');
 
@@ -123,6 +125,56 @@ describe('vietnamPhone.js', () => {
     test('normalizes +84 and 84 forms to the domestic candidate', () => {
       const found = findPhoneNumbers('Liên hệ +84 345 678 901 hoặc 84 912 345 678');
       assert.deepEqual(found.map((f) => f.normalized), ['0345678901', '0912345678']);
+    });
+  });
+
+  describe('international numbers (2026-10-22, libphonenumber-js)', () => {
+    test('INTL_RULE_VERSION is a distinct, newer version', () => {
+      assert.equal(typeof INTL_RULE_VERSION, 'number');
+      assert.ok(INTL_RULE_VERSION > RULE_VERSION);
+    });
+
+    test('finds the real Japanese mobile a customer sent (DB evidence: +81 70 8551 8336 x3)', () => {
+      const found = findPhoneNumbers('+81 70 8551 8336');
+      assert.equal(found.length, 1);
+      assert.deepEqual(found[0], {
+        raw: '+81 70 8551 8336',
+        normalized: '+817085518336',
+        prefix: '+81',
+        country: 'JP'
+      });
+    });
+
+    test('rejects Japanese landlines (Tokyo 03) but accepts US numbers', () => {
+      assert.deepEqual(findInternationalNumbers('+81 3 1234 5678'), []);
+      const us = findInternationalNumbers('My number is +1 415 555 2671');
+      assert.equal(us.length, 1);
+      assert.equal(us[0].normalized, '+14155552671');
+      assert.equal(us[0].country, 'US');
+    });
+
+    test('skips Vietnamese +84 numbers - the domestic rule owns them', () => {
+      assert.deepEqual(findInternationalNumbers('+84 90 123 4567'), []);
+      assert.deepEqual(findInternationalNumbers('+84901234567'), []);
+    });
+
+    test('does not treat a bare country code as a number', () => {
+      assert.deepEqual(findPhoneNumbers('+81 là đầu số của Nhật nha'), []);
+    });
+
+    test('rejects garbage digit runs without throwing', () => {
+      assert.deepEqual(findPhoneNumbers('+123456789012345678901'), []);
+      assert.deepEqual(findPhoneNumbers('gọi +0000000000'), []);
+    });
+
+    test('mixed message yields one domestic and one international number', () => {
+      const found = findPhoneNumbers('Số VN 0901234567, số Nhật +81 70 8551 8336, Zalo nha');
+      assert.equal(found.length, 2);
+      assert.deepEqual(
+        found.map((f) => f.normalized).sort(),
+        ['0901234567', '+817085518336'].sort()
+      );
+      assert.ok(found.every((f) => (f.country ? f.normalized.startsWith('+') : /^0\d{9}$/.test(f.normalized))));
     });
   });
 });

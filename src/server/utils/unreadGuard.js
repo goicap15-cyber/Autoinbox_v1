@@ -49,13 +49,23 @@ class HintUnreadTracker {
     this.prev = new Map();
   }
 
-  flip(key, currentUnread) {
+  wasUnread(key) {
+    return this.prev.get(key) === true;
+  }
+
+  flip(key, currentUnread, hasRecentEvidence = true) {
     const now = Number(currentUnread) === 1;
     const has = this.prev.has(key);
     const prev = has ? this.prev.get(key) : null;
     if (this.prev.size > 5000) this.prev.clear();
     this.prev.set(key, now);
-    if (!has) return now; // hint đầu tiên: thread mới đã có chấm = flip
+    // Hint đầu tiên: chấm xanh đang bật CHỈ tính là flip khi thread có bằng
+    // chứng tin thật mới nhất thuộc hôm nay. Chấm xanh FB không tự tắt khi
+    // CRM trả lời bằng API (chỉ tắt khi người thật mở tin trong Messenger) —
+    // nếu coi "có chấm" là flip thì MỖI lần restart server mọi hội thoại cũ
+    // còn chấm xanh đều bị bump unread + đè last_activity hàng loạt
+    // (reproduce 2026-10-21: 33 hội thoại cũ bị đè cùng giây sau khi start).
+    if (!has) return now && hasRecentEvidence !== false;
     return !prev && now;
   }
 }

@@ -1,4 +1,4 @@
-// Provisional sidebar rows use the observation time, not the Facebook message
+﻿// Provisional sidebar rows use the observation time, not the Facebook message
 // time. Keep an hour of exact outbound context; a real incoming repeat is kept
 // once native history replaces the provisional sidebar id.
 // Facebook sidebar timestamps can be stale by many hours. A sidebar row is provisional, so an exact outgoing match wins.
@@ -176,13 +176,16 @@ export function collapseMessengerMediaCompanions(messages = []) {
 
     const companion = byFacebookId.get(`${facebookId}_media`);
     if (!facebookId || !companion) return [message];
-    const isOutgoing = (companion.is_outgoing === 1 || companion.is_outgoing === true || message.is_outgoing === 1 || message.is_outgoing === true) ? 1 : 0;
+    // message.is_outgoing la nguon chan ly - companion chi la metadata phu, khong override direction
+    const msgIsExplicit0 = message.is_outgoing === 0 || message.is_outgoing === false;
+    const msgIsExplicit1 = message.is_outgoing === 1 || message.is_outgoing === true;
+    const isOutgoing = msgIsExplicit0 ? 0 : msgIsExplicit1 ? 1 : ((companion.is_outgoing === 1 || companion.is_outgoing === true) ? 1 : 0);
     return [{
       ...message,
       is_outgoing: isOutgoing,
       sender_id: isOutgoing ? (companion.sender_id || message.sender_id || 'current_user') : message.sender_id,
       sender_role: isOutgoing ? 'operator' : message.sender_role,
-      sender_name: isOutgoing ? (companion.sender_name || 'Bạn') : message.sender_name,
+      sender_name: isOutgoing ? (companion.sender_name || 'B\u1ea1n') : message.sender_name,
       ui_render_key: message.ui_render_key || companion.ui_render_key,
       ui_position_locked: message.ui_position_locked || companion.ui_position_locked,
       order_anchor_ms: message.order_anchor_ms || companion.order_anchor_ms,

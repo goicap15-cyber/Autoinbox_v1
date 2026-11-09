@@ -25,8 +25,10 @@ function setupTestDb() {
       contact_name TEXT,
       last_message TEXT,
       is_unread INTEGER,
+      unread_manual INTEGER NOT NULL DEFAULT 0,
       inbox_folder TEXT
     );
+    CREATE TABLE messages (id INTEGER PRIMARY KEY, thread_id TEXT);
   `);
   return db;
 }

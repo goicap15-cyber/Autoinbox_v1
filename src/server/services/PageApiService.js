@@ -17,6 +17,29 @@ const ConversationRepository = require('../repositories/ConversationRepository')
 const PhoneCaptureService = require('./PhoneCaptureService');
 const { extractLeadInfo } = require('../utils/leadExtractor');
 const { saveAvatarFromBase64OrUrl } = require('../utils/avatarManager');
+const { isKnownPageSystemNotice } = require('../utils/pageSystemNotice');
+const { isSystemOrMetadataText } = require('../utils/textFilter');
+
+function alignPageThreadFromStoredMessages(threadId, database) {
+  const latestStored = database.prepare(`
+    SELECT content, media_type, timestamp_ms
+    FROM messages
+    WHERE thread_id = ?
+      AND (fb_message_id IS NULL OR fb_message_id NOT LIKE 'sidebar_preview_%')
+    ORDER BY COALESCE(timestamp_ms, 0) DESC, id DESC
+    LIMIT 1
+  `).get(threadId);
+  if (!latestStored) return false;
+  const previewText = (latestStored.content && String(latestStored.content).trim())
+    ? String(latestStored.content).trim().substring(0, 200)
+    : (latestStored.media_type && latestStored.media_type !== 'text' ? '[Đính kèm]' : null);
+  return ConversationRepository.alignThreadActivity(
+    threadId,
+    previewText,
+    Number(latestStored.timestamp_ms) || 0,
+    database
+  );
+}
 const GlobalPhoneAutomationService = require('./GlobalPhoneAutomationService');
 const CampaignPhoneCaptureService = require('./CampaignPhoneCaptureService');
 const CampaignResponseStatsService = require('./CampaignResponseStatsService');
@@ -184,8 +207,12 @@ function upsertPages(accountId, pages, database = getDb()) {
     ).get(String(p.pageId));
     if (existing) {
       const ownerChanged = accountId && existing.owner_account_id !== String(accountId);
+      // KHÔNG đụng status: trước đây UPDATE ép status='ACTIVE', làm page user
+      // vừa bấm "Ngắt" sống lại mỗi lần automation "Lấy token & Đăng ký" cào
+      // lại danh sách trang. Page chỉ ACTIVE lại qua savePages (token mới) hoặc
+      // "Kết nối Page" thủ công.
       database.prepare(
-        "UPDATE inbox_sources SET owner_account_id = ?, display_name = COALESCE(NULLIF(?, ''), display_name), status = 'ACTIVE', avatar_url = COALESCE(avatar_url, 'https://graph.facebook.com/' || external_id || '/picture?type=normal') WHERE id = ?"
+        "UPDATE inbox_sources SET owner_account_id = ?, display_name = COALESCE(NULLIF(?, ''), display_name), avatar_url = COALESCE(avatar_url, 'https://graph.facebook.com/' || external_id || '/picture?type=normal') WHERE id = ?"
       ).run(accountId || existing.owner_account_id, p.name || '', existing.id);
       // Đổi chủ source → kéo theo toàn bộ thread của source sang chủ mới
       if (ownerChanged) {
@@ -318,6 +345,89 @@ async function enrichPageContactProfile(threadId, sourceId, psid, io, database =
   } finally {
     inFlightCustomerProfiles.delete(key);
   }
+}
+
+// ── Hướng A: link profile trang cá nhân chỉ tồn tại trên UI Business Suite
+// (Graph Messenger Profile không bao giờ trả link) — server điều phối extension
+// đang mở Biz Suite cào right rail, nhận kết quả về validate + persist.
+// Chốt vận hành: thread đã có link trong DB thì bỏ qua; chưa có thì mỗi lần
+// mở lại cào lại (KHÔNG throttle), tối đa 2 lần/session do extension tự lo;
+// server chỉ chặn trùng đang chạy bằng slot in-flight 60s tự nhả (phòng
+// extension ngắt kết nối giữa chừng khiến kết quả không bao giờ về).
+const pageProfileScrapeInFlight = new Map();
+const PAGE_PROFILE_SCRAPE_INFLIGHT_MS = 60000;
+
+function derivePageConvId(thread) {
+  const ext = String(thread.external_thread_id || '').trim();
+  const mExt = ext.match(/^t_(\d+)$/);
+  if (mExt) return mExt[1];
+  const url = String(thread.thread_url || '');
+  const mInbox = url.match(/\/inbox\/(\d+)/);
+  if (mInbox) return mInbox[1];
+  const mParam = url.match(/[?&](?:selected_item_id|thread_id)=(\d+)/);
+  if (mParam) return mParam[1];
+  if (/^\d{6,}$/.test(ext)) return ext;
+  return null;
+}
+
+function beginPageProfileScrape(thread, database = getDb()) {
+  if (!thread || String(thread.source_type || '') !== 'page_messenger' || !thread.page_id) return null;
+  const existing = database.prepare('SELECT profile_url FROM contacts WHERE thread_id = ?').get(thread.id);
+  if (existing?.profile_url) return null;
+  const convId = derivePageConvId(thread);
+  if (!convId) return null;
+  const threadId = String(thread.id);
+  if (pageProfileScrapeInFlight.has(threadId)) return null;
+  pageProfileScrapeInFlight.set(threadId, setTimeout(() => pageProfileScrapeInFlight.delete(threadId), PAGE_PROFILE_SCRAPE_INFLIGHT_MS));
+  return {
+    thread_id: threadId,
+    page_id: String(thread.page_id),
+    conv_id: convId,
+    contact_name: thread.contact_name || null,
+    thread_url: thread.thread_url || null
+  };
+}
+
+function releasePageProfileScrape(threadId) {
+  const key = String(threadId || '');
+  const timer = pageProfileScrapeInFlight.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    pageProfileScrapeInFlight.delete(key);
+  }
+}
+
+function isPlausibleFacebookProfileUrl(rawUrl) {
+  const url = String(rawUrl || '').trim();
+  if (!/^https:\/\/(www\.)?facebook\.com\//i.test(url)) return false;
+  if (/login\.php|checkpoint|business\.facebook\.com|\/help\//i.test(url)) return false;
+  return true;
+}
+
+async function handlePageProfileScrapeResult(payload, io, database = getDb()) {
+  const threadId = String(payload?.thread_id || '');
+  if (!threadId) return { ok: false, reason: 'bad_request' };
+  releasePageProfileScrape(threadId);
+  const rawUrl = String(payload.profile_url || '').trim();
+  if (!rawUrl) {
+    watcherLog('🔗 profile scrape thread=' + threadId + ' chưa bắt được link (reason=' + (payload.reason || '-') + ', attempts=' + (payload.attempts || 0) + ')');
+    return { ok: false, reason: payload.reason || 'no_profile_link' };
+  }
+  if (!isPlausibleFacebookProfileUrl(rawUrl)) {
+    watcherLog('🔗 profile scrape thread=' + threadId + ' URL bất thường, bỏ qua: ' + rawUrl.slice(0, 120));
+    return { ok: false, reason: 'invalid_url' };
+  }
+  database.prepare(`
+    INSERT INTO contacts (thread_id, profile_url)
+    VALUES (?, ?)
+    ON CONFLICT(thread_id) DO UPDATE SET
+      profile_url = excluded.profile_url
+  `).run(threadId, rawUrl);
+  if (io) {
+    io.emit('CONTACT_UPDATED', { thread_id: threadId, profile_url: rawUrl });
+  }
+  watcherLog('🔗 profile scrape thread=' + threadId + ': lưu link ' + rawUrl);
+  return { ok: true };
 }
 
 // Gửi tin nhắn Page qua Send API. Trả { success, messageId } hoặc { error, errorCode }.
@@ -555,13 +665,19 @@ async function backfillConversations(sourceId, io, options = {}, database = getD
 
         for (const msg of (msgData.data || []).reverse()) {
           await enrichAttachmentUrls(msg, token, database);
-          const inserted = insertGraphMessage(thread.id, source, msg, database, { markUnread: true, io });
+          const inserted = insertGraphMessage(thread.id, source, msg, database, { markUnread: false, io });
           if (inserted != null) insertedNew++;
           else if (backfillMediaUrlOnExistingRow(msg, database)) insertedNew++;
         }
-        const lastMsg = (msgData.data || [])[0];
+        alignPageThreadFromStoredMessages(thread.id, database);
+        const lastMsg = null;
         if (lastMsg) {
-          ConversationRepository.touchThread(thread.id, (lastMsg.message || '[Đính kèm]').substring(0, 200), database);
+          ConversationRepository.alignThreadActivity(
+            thread.id,
+            (lastMsg.message || '[Đính kèm]').substring(0, 200),
+            lastMsg.created_time ? new Date(lastMsg.created_time).getTime() : 0,
+            database
+          );
         }
         convCount++;
       } catch (convErr) {
@@ -740,6 +856,10 @@ function captureLeadInfoFromGraph(threadId, source, messageId, text, tsMs, datab
   }
 }
 
+// Ranh giới "hôm nay" giờ máy (server và app chạy cùng máy). Tính lúc gọi —
+// tiến trình chạy dài qua nửa đêm vẫn đúng ngày.
+const startOfTodayMs = () => new Date().setHours(0, 0, 0, 0);
+
 // Chèn 1 tin nhắn dạng Graph API (webhook hoặc backfill) — chống trùng theo message id
 function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}) {
   const messageId = msg.id || msg.mid;
@@ -761,13 +881,32 @@ function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}
     else if (mime.startsWith('audio/')) { mediaType = 'voice'; mediaUrl = att.audio_url; }
     else { mediaType = 'file'; mediaUrl = att.file_url; }
   }
-  const ts = msg.created_time ? new Date(msg.created_time).getTime() : Date.now();
+  const rawTs = msg.created_time ? new Date(msg.created_time).getTime() : Date.now();
+  const ts = (Number.isFinite(rawTs) && rawTs > 0) ? Math.min(rawTs, Date.now() + 60000) : Date.now();
+  const trimmedText = text ? String(text).trim() : '';
+  if (!mediaUrl && (!trimmedText || isKnownPageSystemNotice(trimmedText) || isSystemOrMetadataText(trimmedText))) return null;
+  if (isOutgoing && text) {
+    const existingPending = database.prepare("SELECT id, fb_message_id, delivery_status FROM messages WHERE thread_id = ? AND is_outgoing = 1 AND content = ? AND ABS(COALESCE(timestamp_ms, 0) - ?) <= 300000 AND (fb_message_id LIKE 'pending_%' OR fb_message_id LIKE 'dom_%' OR delivery_status != 'sent') ORDER BY (delivery_status = 'pending') DESC, id DESC LIMIT 1").get(threadId, text, ts);
+    if (existingPending) {
+      const wasUnsent = existingPending.delivery_status !== 'sent';
+      database.prepare("UPDATE messages SET fb_message_id = ?, delivery_status = 'sent', delivery_error = NULL WHERE id = ?").run(messageId, existingPending.id);
+      return wasUnsent ? existingPending.id : null;
+    }
+  }
+
+  // Thông báo hệ thống của Meta (handover AI agent...): webhook echo đẩy về
+  // như tin Page gửi (outgoing) — không phải tin thật, không lưu (guard WS
+  // server.js:2491 chỉ phủ đường extension). Tin kèm media thì giữ nguyên.
+  if (!att && text && isKnownPageSystemNotice(text)) return null;
 
   // Đánh dấu chưa đọc CHỈ khi tin MỚI HƠN mọi tin hiện có của thread: wave
   // quét trễ chèn lại tin ĐÃ xem (ts backdate <= mốc cũ) không được đè cờ
   // "đã đọc" (unread_manual=-1) của operator — chấm chưa đọc hồi sinh sau
-  // khi đọc xong (reproduce 2026-10-07 17:37).
+  // khi đọc xong (reproduce 2026-10-07 17:37). Thêm gate "hôm nay": backfill
+  // tin cũ (trước hôm nay) không được bật chưa đọc — hội thoại 14/10 được
+  // kéo lại không hồi sinh badge (2026-10-21).
   const shouldMarkUnread = opts.markUnread && !isOutgoing
+    && ts >= startOfTodayMs()
     && ts > Number(database.prepare(
       'SELECT MAX(COALESCE(timestamp_ms, 0)) AS m FROM messages WHERE thread_id = ?'
     ).get(threadId)?.m || 0);
@@ -788,7 +927,11 @@ function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}
     nextSeq, ts, opts.timestampSource || 'webhook', new Date(ts).toISOString()
   );
 
-  database.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP WHERE id = ?').run(threadId);
+  // last_activity bám theo THỜI GIAN TIN THẬT (ts), không fake "now":
+  // bump CURRENT_TIMESTAMP trên tin backfill cũ biến hội thoại 14/10 thành
+  // "hoạt động hôm nay" + nhặt lại cờ chưa đọc (2026-10-21). align tự tiến
+  // khi tin mới hơn, tự kéo lùi khi lệch quá 5 phút.
+  ConversationRepository.alignThreadActivity(threadId, null, ts, database);
 
   // Tin khách đến có text: bắt sdt/email (parity Messenger cá nhân).
   if (!isOutgoing && text) {
@@ -800,6 +943,8 @@ function insertGraphMessage(threadId, source, msg, database = getDb(), opts = {}
   // KHÔNG đánh dấu - import page không làm unread hàng loạt.
   if (shouldMarkUnread) {
     database.prepare("UPDATE threads SET is_unread = 1, unread_manual = 1 WHERE id = ?").run(threadId);
+  } else if (isOutgoing && ts >= startOfTodayMs()) {
+    database.prepare("UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?").run(threadId);
   }
 
   // Webhook event có thể về TRỄ (poll 5s + latency Meta) — tin gửi trước đang
@@ -919,6 +1064,13 @@ function handleWebhookBody(body, io, database = getDb()) {
     if (!source) {
       console.warn(`[PageApi] Nhận webhook cho page chưa kết nối: ${pageId} — bỏ qua.`);
       result.errors++;
+      continue;
+    }
+    if (source.status && source.status !== 'ACTIVE') {
+      // Page bị user ngắt (DISCONNECTED) hoặc token chết (TOKEN_EXPIRED):
+      // Meta vẫn đẩy webhook vì app chưa gỡ khỏi page — phải chặn ingest,
+      // không để tin mới lọt vào nguồn đã ngắt (giống watcher/backfill).
+      console.log(`[PageApi] Webhook cho page ${pageId} đang ${source.status} — bỏ qua.`);
       continue;
     }
     for (const event of (entry.messaging || [])) {
@@ -1073,7 +1225,13 @@ function processMessagingEvent(event, source, io, database) {
   const contactPsid = isOutgoing ? String(event.recipient?.id || '') : senderPsid;
   if (!contactPsid) return null;
   const text = message.text || '';
-  const ts = Number(event.timestamp || Date.now());
+  const rawEventTs = Number(event.timestamp || Date.now());
+  const ts = (Number.isFinite(rawEventTs) && rawEventTs > 0) ? Math.min(rawEventTs, Date.now() + 60000) : Date.now();
+  const hasWebhookAtt = Array.isArray(message.attachments) && message.attachments.some((a) => a && a.payload && a.payload.url);
+  const trimmedWebhookText = String(text || '').trim();
+  if (!hasWebhookAtt && (!trimmedWebhookText || isKnownPageSystemNotice(trimmedWebhookText) || isSystemOrMetadataText(trimmedWebhookText))) {
+    return null;
+  }
 
   // B2: tra cache ấm trước — watcher/warm đã ghim thread cũ t_<conv> cho psid
   // này thì tin đổ thẳng vào thread cũ, không tạo twin psid nữa. Cache trượt
@@ -1083,6 +1241,10 @@ function processMessagingEvent(event, source, io, database) {
     ? ConversationRepository.getThread(pageThreadCache.get(cacheKey), database)
     : null;
   if (cachedThread && String(cachedThread.source_id || '') !== String(source.id)) cachedThread = null;
+  if (!cachedThread) {
+    const bySender = database.prepare("SELECT t.id, t.source_id, t.account_id, COALESCE(t.external_thread_id, t.id) AS external_thread_id FROM threads t JOIN messages m ON m.thread_id = t.id WHERE t.source_id = ? AND m.sender_id = ? ORDER BY m.id DESC LIMIT 1").get(source.id, contactPsid);
+    if (bySender) { cachedThread = bySender; rememberPageThread(source.id, contactPsid, bySender.id); }
+  }
 
   // Đa page / đa account: cùng một khách có thể nhắn NHIỀU page (thậm chí
   // qua account khác) — thread bare psid đã tồn tại ở nguồn KHÁC thì buộc
@@ -1109,8 +1271,8 @@ function processMessagingEvent(event, source, io, database) {
     source_id: source.id,
     external_thread_id: externalThreadId,
     contact_name: null,
-    last_message: (text || '[Đính kèm]').substring(0, 200),
-    is_unread: isOutgoing ? 0 : 1,
+    last_message: (trimmedWebhookText || (hasWebhookAtt ? '[Đính kèm]' : '')).substring(0, 200) || null,
+    is_unread: isOutgoing ? 0 : undefined,
   }, database);
   if (!thread) return null;
   rememberPageThread(source.id, contactPsid, thread.id);
@@ -1166,7 +1328,7 @@ function processMessagingEvent(event, source, io, database) {
       audio_url: a.payload?.url || null,
       file_url: a.payload?.url || null,
     })) } : undefined,
-  }, database, { senderId: senderPsid, io });
+  }, database, { senderId: senderPsid, markUnread: !isOutgoing, io });
 
   if (insertId == null) return null; // trùng mid — đã có
 
@@ -1183,6 +1345,8 @@ function processMessagingEvent(event, source, io, database) {
   console.log('[PageApi] 💬 Tin Page mới: mid=' + message.mid + ' thread=' + thread.id + ' page=' + pageId + (isEcho ? ' (echo)' : ''));
   if (io) {
     io.emit('NEW_MESSAGE', messageData);
+    const allThreadMsgs = database.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY COALESCE(sequence_order, id) ASC, id ASC').all(thread.id);
+    io.emit('THREAD_MESSAGES_UPDATED', { thread_id: thread.id, account_id: thread.account_id || source.owner_account_id || null, messages: allThreadMsgs, authoritative: true });
     io.emit('THREAD_LIST_UPDATED', { thread_id: thread.id, account_id: thread.account_id });
   }
   return messageData;
@@ -1191,7 +1355,7 @@ function processMessagingEvent(event, source, io, database) {
 // ── Poller cầu nối hosting (webhook.php) ──
 let pollTimer = null;
 let polling = false;
-function startBridgePolling(io, database = getDb(), intervalMs = 5000) {
+function startBridgePolling(io, database = getDb(), intervalMs = 2000) {
   if (pollTimer) return;
   pollTimer = setInterval(async () => {
     if (polling) return;
@@ -1240,7 +1404,7 @@ function ensurePageThread(source, contactPsid, contactName, database, { convId }
   if (linked) {
     const incomingName = String(contactName || '').trim();
     database.prepare(
-      'UPDATE threads SET contact_name = COALESCE(?, contact_name), is_unread = 0 WHERE id = ?'
+      'UPDATE threads SET contact_name = COALESCE(?, contact_name) WHERE id = ?'
     ).run(incomingName && incomingName !== 'Khách hàng' ? incomingName : null, linked.id);
     const linkedThread = ConversationRepository.getThread(linked.id, database);
     if (!linkedThread) return null;
@@ -1342,15 +1506,37 @@ async function watchPageConversations(source, io, database) {
       if (msgData.error) { failed++; watcherLog('kéo tin conv ' + conv.id + ' LỖI: ' + (msgData.error.message || '')); continue; }
       const thread = ensurePageThread(source, psid, participant?.name || null, database, { convId: conv.id });
       if (!thread) { failed++; watcherLog('conv ' + conv.id + ': ensurePageThread trả null (psid=' + psid + ')'); continue; }
-      for (const msg of (msgData.data || []).reverse()) {
+      let convInserted = 0; for (const msg of (msgData.data || []).reverse()) {
         await enrichAttachmentUrls(msg, token, database);
         const id = insertGraphMessage(thread.id, source, msg, database, { markUnread: true, io });
-        if (id != null) insertedNew++;
-        else if (backfillMediaUrlOnExistingRow(msg, database)) insertedNew++;
+        if (id != null) {
+          insertedNew++; convInserted++;
+          if (io) {
+            const savedRow = database.prepare('SELECT * FROM messages WHERE id = ?').get(id);
+            if (savedRow) io.emit('NEW_MESSAGE', { ...savedRow, thread_id: thread.id, account_id: thread.account_id || source.owner_account_id || null, source_id: source.id, source_type: 'page_messenger', source_name: source.display_name, page_id: String(source.external_id) });
+          }
+        } else if (backfillMediaUrlOnExistingRow(msg, database)) {
+          insertedNew++; convInserted++;
+          if (io && msg.id) {
+            const updatedRow = database.prepare('SELECT * FROM messages WHERE fb_message_id = ?').get(String(msg.id));
+            if (updatedRow) io.emit('NEW_MESSAGE', { ...updatedRow, thread_id: thread.id, account_id: thread.account_id || source.owner_account_id || null, source_id: source.id, source_type: 'page_messenger', source_name: source.display_name, page_id: String(source.external_id) });
+          }
+        }
       }
-      const lastMsg = (msgData.data || [])[0];
+      if (convInserted > 0 && io) {
+        const allThreadMsgs = database.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY COALESCE(sequence_order, id) ASC, id ASC').all(thread.id);
+        io.emit('THREAD_MESSAGES_UPDATED', { thread_id: thread.id, account_id: thread.account_id || source.owner_account_id || null, messages: allThreadMsgs, authoritative: true });
+        io.emit('THREAD_LIST_UPDATED', { thread_id: thread.id, account_id: thread.account_id || source.owner_account_id || null, new_messages: convInserted, page_id: source.external_id });
+      }
+      alignPageThreadFromStoredMessages(thread.id, database);
+      const lastMsg = null;
       if (lastMsg) {
-        ConversationRepository.touchThread(thread.id, (lastMsg.message || '[Đính kèm]').substring(0, 200), database);
+        ConversationRepository.alignThreadActivity(
+          thread.id,
+          (lastMsg.message || '[Đính kèm]').substring(0, 200),
+          lastMsg.created_time ? new Date(lastMsg.created_time).getTime() : 0,
+          database
+        );
       }
       state.set(conv.id, updated);
     } catch (err) {
@@ -1365,12 +1551,12 @@ async function watchPageConversations(source, io, database) {
   }
 }
 
-function startPageConversationWatcher(io, database = getDb(), intervalMs = 10000) {
+function startPageConversationWatcher(io, database = getDb(), intervalMs = 3500) {
   if (pageWatcherTimer) return;
   pageWatcherTimer = setInterval(async () => {
     if (pageWatcherBusy) {
       const stuckMs = Date.now() - pageWatcherCycleStartedAt;
-      if (stuckMs < 60000) return; // chu kỳ trước còn chạy — bỏ tick, KHÔNG chạy song song
+      if (stuckMs < 45000) return; // chu kỳ trước còn chạy — bỏ tick, KHÔNG chạy song song
       console.warn('[PageApi] Chu kỳ watcher kẹt ' + stuckMs + 'ms — mở khóa cưỡng bức.');
       pageWatcherBusy = false;
     }
@@ -1381,11 +1567,7 @@ function startPageConversationWatcher(io, database = getDb(), intervalMs = 10000
         SELECT id, external_id, display_name, owner_account_id FROM inbox_sources
         WHERE source_type = 'page_messenger' AND status = 'ACTIVE' AND access_token_encrypted IS NOT NULL
       `).all();
-      // Quét SONG SONG 5 page/lượt thay vì lần lượt: 18 page tuần tự mất
-      // ~12-25s/vòng -> tin khách về chậm tới nửa phút; song song còn ~4-6s
-      // (reproduce 2026-10-07 17:07: tin khách về sau ~12s chờ). Mỗi page vẫn
-      // try/catch riêng - một page lỗi không ảnh hưởng page khác.
-      const WATCHER_CONCURRENCY = 5;
+      const WATCHER_CONCURRENCY = 8;
       let pageCursor = 0;
       const watcherWorker = async () => {
         while (pageCursor < sources.length) {
@@ -1395,7 +1577,7 @@ function startPageConversationWatcher(io, database = getDb(), intervalMs = 10000
           } catch (err) {
             watcherLog('CHU KỲ LỖI page ' + s.external_id + ': ' + String(err && (err.stack || err.message || err)).slice(0, 400));
           }
-          await new Promise((r2) => setTimeout(r2, 120));
+          await new Promise((r2) => setTimeout(r2, 50));
         }
       };
       const workers = [];
@@ -1493,6 +1675,9 @@ module.exports = {
   sendPageMessage,
   fetchMessengerCustomerProfile,
   enrichPageContactProfile,
+  beginPageProfileScrape,
+  releasePageProfileScrape,
+  handlePageProfileScrapeResult,
   getLastCustomerMessageAt,
   classifyReplyWindow,
   PAGE_REPLY_WINDOW_MS,

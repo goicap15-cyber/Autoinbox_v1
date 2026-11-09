@@ -154,8 +154,13 @@ export default function ChatArea({
             }
 
             const { msg } = item;
-            const isPendingDirection = msg.direction_status === 'pending';
-            const isOutgoing = !isPendingDirection && (msg.is_outgoing === true || msg.is_outgoing === 1 || String(msg.is_outgoing || '').toLowerCase() === 'true' || String(msg.is_outgoing || '') === '1');
+            const isBoolOutgoing = msg.is_outgoing === true || msg.is_outgoing === 1 || String(msg.is_outgoing || '').toLowerCase() === 'true' || String(msg.is_outgoing || '') === '1';
+            // Fix B (server) giữ is_outgoing=1 cho outgoing "yếu chứng" và chỉ
+            // đánh direction pending chờ confirm. Tin đó PHẢI render như tin đi;
+            // style giữa (amber) chỉ dành cho row không khẳng định được chiều
+            // (page_dom ép is_outgoing=0 khi pending).
+            const isPendingDirection = msg.direction_status === 'pending' && !isBoolOutgoing;
+            const isOutgoing = isBoolOutgoing;
             const alignmentClass = isPendingDirection ? 'items-center' : (isOutgoing ? 'items-end' : 'items-start');
             const isUnsent = msg.is_unsent;
 

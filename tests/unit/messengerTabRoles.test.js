@@ -22,12 +22,17 @@ test('legacy personal and interaction keys map only to chat', () => {
   assert.equal(Roles.roleForTab([[Roles.roleKey('a1', 'interaction'), 8]], 'a1', 8), 'chat');
 });
 
-test('campaign, history and request tabs never forward realtime rows', () => {
-  for (const role of ['campaign', 'history', 'requests', 'request_action']) {
+test('campaign and request tabs never forward realtime rows; history forwards per upstream v1.0.23', () => {
+  for (const role of ['campaign', 'requests', 'request_action']) {
     assert.equal(Roles.canForwardRealtime(role), false);
     assert.equal(Roles.canForwardIncomingRealtime(role), false);
     assert.equal(Roles.canForwardCallRealtime(role), false);
   }
+  // merge v1.0.22-26: upstream cho tab history đứng yên nhận tin realtime
+  // (tab history đang cuộn dùng 'history_scrolling').
+  assert.equal(Roles.canForwardRealtime('history'), true);
+  assert.equal(Roles.canForwardIncomingRealtime('history'), true);
+  assert.equal(Roles.canForwardCallRealtime('history'), true);
 });
 
 test('only chat and discovery surfaces forward realtime events', () => {
@@ -41,7 +46,7 @@ test('only chat and discovery surfaces forward realtime events', () => {
 test('background reuses the stable interaction tab for operator sends', () => {
   const background = fs.readFileSync(path.join(__dirname, '../../src/extension/background.js'), 'utf8');
   assert.match(background, /case 'SEND_MESSAGE':[\s\S]+?await handleSendMessage\(message\.data\)/);
-  assert.match(background, /const personalRole = data\.campaign_id \? 'campaign' : 'interaction'/);
+  assert.match(background, /const personalRole = \(data\.campaign_id \|\| data\.send_via_profile\) \? 'campaign' : 'interaction'/);
   assert.ok(background.includes("runPersonalSendSerialized(`${data.account_id || user_id}:${personalRole}`"));
   assert.match(background, /tab_role: personalRole/);
   assert.match(background, /ensureRoleMessengerTab\(targetAcc, 'history'\)/);

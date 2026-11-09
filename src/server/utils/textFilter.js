@@ -29,6 +29,11 @@ const SYSTEM_PATTERNS = [
   // thành tin của khách mỗi lần initial sweep mở thread (reproduce 2026-10-07).
   /^Messages and calls are secured with end-to-end encryption\.?$/i,
   /^Messages and calls are end-to-end encrypted\.?$/i,
+  /^Bạn đang phản hồi bình luận của người dùng về bài viết trên\b/i,
+  /^You are replying to a user(?:'s)? comment on a post on\b/i,
+  /^[^\n]{1,80}\s+đã trả lời một quảng cáo\.?$/i,
+  /^[^\n]{1,80}\s+replied to an ad\.?$/i,
+  /^Tác nhân AI sẽ phản hồi\.?$/i,
   // Nhãn phân cách thời gian dạng tắt khi Messenger UI tiếng Anh ("9w",
   // "2d", "5h", "3m"...) - separator, không phải tin nhắn
   // (reproduce 2026-10-07: "9w" thành bubble rác trong hội thoại).
@@ -52,6 +57,9 @@ const SYSTEM_PATTERNS = [
   // nhả nguyên nhãn "Enter, Message sent 15:15 by Khang" thành một row riêng,
   // tin thật luôn đến bằng row của chính nó (reproduce 15:15).
   /^Enter,\s*Message sent \d{1,2}:\d{2}\s+by\s+.+$/i,
+  // Biến thể nhãn trợ năng không có "by <tên>" ("Enter, Message sent Tuesday
+  // 3:09", "Enter, Message sent 15:15") - không bao giờ là tin người dùng.
+  /^Enter,\s*Message sent\b/i,
   /^Thiếu lịch sử chat/i,
   /^Thiếu tin nhắn\.?$/i,
   /^Không khôi phục được tin nhắn\.?$/i,
@@ -84,6 +92,11 @@ const SYSTEM_PATTERNS = [
   // Status & Presence (exact standalone matches only)
   /^(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen)$/i,
   /^(?:Đã gửi|Đã nhận|Đã xem|Sent|Delivered|Seen)\s+\d+\s+(?:giây|phút|giờ|ngày|tuần|tháng|năm)\s+(?:trước|ago)$/i,
+  // Nhãn trạng thái gửi UI EN viết tắt ("Sent 1m ago", "Seen 2h ago",
+  // "Delivered just now") - DOM dán dưới bong bóng tin mình gửi, observer
+  // nhặt thành lá __bubble_N riêng khiến thread nhảy lên đầu như có tin mới
+  // (reproduce 2026-11-09: tin "check check xem nào" kèm lá "Sent 1m ago").
+  /^(?:Sent|Delivered|Seen)\s+(?:just\s+now|\d+\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\s+ago)$/i,
   /^(?:Đang hoạt động.*|Hoạt động(?:\s+\d+.*)?|Đã hoạt động.*|Active now|Active recently|Active \d+.*|Online|Offline)$/i,
   /^(?:Typing[.…]*|Đang nhập[.…]*|Đang gửi[.…]*|Sending[.…]*)$/i,
   /^(?:Đang tải|Loading)[.…]*$/i,
@@ -96,6 +109,12 @@ const SYSTEM_PATTERNS = [
   /^(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?\d{1,2}:\d{2}(?:\s*(?:T[2-7]|CN|AM|PM|ch|sa|chiều|sáng|tối))?$/i,
   /^(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?\d{1,2}\s*(?:ch|sa|am|pm|chiều|sáng|tối)$/i,
   /^(?:T[2-7]|CN)$/i,
+  // Pill giờ UI EN có thứ trong tuần ("Tue 3:08 PM", "Tuesday 3:09 PM") -
+  // cùng họ pill T[2-7]/CN bản VN ngay trên, render giữa nhóm tin trong
+  // thread E2EE (reproduce 2026-11-09: lá "Tue 3:08 PM" thành bong bóng rác).
+  // Bắt buộc có phút + AM/PM nên trả lời hẹn lịch kiểu "Tue 3pm"/"Sun 7:30"
+  // không bị nuốt.
+  /^(?:Mon(?:day)?|Tues?(?:day)?|Wed(?:nesday)?|Thurs?(?:day)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)$/i,
   // Short date/time separator headers (e.g. "53 9 Tháng 9, 2026", "9 Tháng 9", "Thứ Năm, 9 Tháng 9")
   /^(?:(?:Thứ\s*(?:[2-7]|Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|T[2-7]|CN),?\s*)?(?:\d{1,2}(?::\d{2})?(?:\s*(?:ch|sa|am|pm))?\s+)?\d{1,2}\s+(?:Tháng|thg)\s+\d{1,2}(?:,?\s*\d{4})?$/i,
 
@@ -108,6 +127,9 @@ const SYSTEM_PATTERNS = [
   // 'Bạn đã gửi một file đính kèm.') - không bao giờ là tin nhắn thật.
   /^Bạn đã gửi (?:một )?(?:file|tệp|tập tin|ảnh|video) đính kèm\.?$/i,
   /^You sent (?:an )?attachment\.?$/i,
+  /^(?:(?:Bạn|Tôi|You|[^\n]{1,80})\s+)?(?:đã gửi|sent|shared)\s+(?:(?:một|\d+|an?|one)\s+)?(?:ảnh|bức ảnh|photo|photos|image|images|video|videos|tệp|file|files|tập tin|nhãn dán|sticker|GIF|tin nhắn thoại|file âm thanh|voice message|audio)(?:\s+đính kèm)?\.?$/iu,
+  /^(?:[^\n]{1,60}[\s\u00a0]*[·•][\s\u00a0]*)?(?:Đã chỉnh sửa|Edited)\.?$/iu,
+  /^(?:drive\.google\.com|docs\.google\.com|Google Docs|Google Drive|youtube\.com|youtu\.be|facebook\.com|fb\.watch|tiktok\.com|vt\.tiktok\.com|instagram\.com|zalo\.me|shopee\.vn|lazada\.vn|tiki\.vn|maps\.app\.goo\.gl|goo\.gl|bit\.ly)$/i,
 
   /^Bạn đã phản hồi ghi chú của (?:họ|họ\.|họ\.?)$/i,
   /^Bạn đã trả lời tin của .+\.$/i,
@@ -153,6 +175,10 @@ const SYSTEM_PATTERNS = [
   // Banner quảng cáo ghim đỉnh hội thoại lead + chip bật AI (harvest orphan
   // dễ nhặt nhầm - 2026-09-28)
   /^Đoạn chat này chứa tin trả lời quảng cáo/i,
+  /^Bạn đang phản hồi bình luận của người dùng về bài viết trên\b/i,
+  /^You are replying to a user(?:'s)? comment on a post on\b/i,
+  /^[^\n]{1,80}\s+đã trả lời một quảng cáo\.?$/i,
+  /^[^\n]{1,80}\s+replied to an ad\.?$/i,
   /^Bật tính năng phản hồi bằng AI$/i,
   /^Xem quảng cáo$/i,
   /^Người gửi:?$/i,
@@ -180,6 +206,12 @@ const SYSTEM_PATTERNS = [
   // Short day-of-week / relative-day separator, same family (spec 047).
   /^(?:Thứ (?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ Nhật|Hôm nay|Hôm qua|Today|Yesterday)$/i,
 
+  // Pill ngày EN giữa nhóm tin ("Oct 16, 2026, 10:49 AM") + mảnh pill bị
+  // DOM cắt ("58 AM by Khang") nhặt thành tin rác (reproduce 2026-11-03).
+  // Đồng bộ src/extension/textFilter.js và closure background.js.
+  /^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}(?:,?\s+\d{1,2}:\d{2}\s*(?:AM|PM)?)?$/i,
+  /^\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s+by\s+[A-ZÀ-ỸĐ][\p{L}\p{M}\s.]{0,40}$/u,
+
   // Meta Business Suite navigation / menu actions
   /^(?:Meta Business Suite|Liên kết|Chỉnh sửa|Trợ giúp|Tùy chọn khác|Cài đặt|Settings|Help|Edit)$/i,
   /^(?:Thông báo|Notifications)$/i,
@@ -196,6 +228,20 @@ const SYSTEM_PATTERNS = [
 
 const SEPARATOR_ONLY_REGEX = /^[\s\u00b7\u2022.\-|•·]+$/;
 
+// Mảnh nhãn giờ-gửi FB dính vào bong bóng ("9:58 AM by Khang", "58 PM by
+// You" - reproduce 2026-11-03): label EN "Message sent October 16, 2026,
+// 9:58 AM by Khang" bị cắt mất đầu thành bubble rác. Tên người gửi phải viết
+// hoa đầu từ để không nuốt tin thật kiểu "gặp 3 PM by zoom". \s đã bao gồm
+// U+202F narrow space mà FB dùng giữa phút và AM/PM.
+const FB_SENDER_LABEL_FRAGMENT_PATTERNS = [
+  /(?:^|\s)\d{0,2}:\d{2}\s?(?:AM|PM|SA|CH|SÁNG|CHIỀU|TỐI)?\s+by\s+(?:[A-ZÀ-Ỹ][^\s]*\s?){1,5}$/i,
+  /^\d{1,2}\s?(?:AM|PM|SA|CH)\s+by\s+(?:[A-ZÀ-Ỹ][^\s]*\s?){1,5}$/i,
+  // Nhãn trợ năng nguyên vẹn làm cả bubble: "Message sent October 16, 2026,
+  // 9:58 AM by Khang" (có/khóang ngày), "Tin nhắn do X gửi lúc 9:58".
+  /^message sent\b[^\n]*\b\d{1,2}:\d{2}\b[^\n]*\bby\s+[A-ZÀ-Ỹ][^\n]*$/i,
+  /^tin nhắn do [^\n]+? gửi lúc\s*\d{1,2}:\d{2}/i
+];
+
 // Chỉ riêng dòng hội thoại hệ thống (kết nối/bạn bè/cuộc gọi) - không bao
 // gồm các pattern metadata khác. Dùng để chặn MEDIA_HINT/unread giả cho
 // thread hệ thống trong khi vẫn giữ isSystemOrMetadataText rộng cho lọc
@@ -211,7 +257,12 @@ const SYSTEM_CONVERSATION_NOTICE_PATTERNS = [
   // Notice E2EE (bản tiếng Anh) - bộ heal sidebar (server.js SYNC_THREADS_RESULT)
   // cần nhận ra nó để gỡ unread sai cho thread chưa có tin khách thật.
   /^Messages and calls are secured with end-to-end encryption\.?$/i,
-  /^Messages and calls are end-to-end encrypted\.?$/i
+  /^Messages and calls are end-to-end encrypted\.?$/i,
+  /^Bạn đang phản hồi bình luận của người dùng về bài viết trên\b/i,
+  /^You are replying to a user(?:'s)? comment on a post on\b/i,
+  /^[^\n]{1,80}\s+đã trả lời một quảng cáo\.?$/i,
+  /^[^\n]{1,80}\s+replied to an ad\.?$/i,
+  /^Tác nhân AI sẽ phản hồi\.?$/i
 ];
 
 function isSystemConversationNotice(text) {
@@ -229,6 +280,9 @@ function isSystemOrMetadataText(text) {
   if (SEPARATOR_ONLY_REGEX.test(trimmed)) return true;
   if (/(?:Chưa\s*có\s*tin\s*nhắn|ChÃ|tin\s*nh[áÃaàáảãạâầấẩẫậăằắẳẵặ]*[n]|No\s*messages?)/i.test(trimmed)) return true;
   if (RELATIVE_TIME_METADATA_RE.test(trimmed)) return true;
+  for (const pat of FB_SENDER_LABEL_FRAGMENT_PATTERNS) {
+    if (pat.test(trimmed)) return true;
+  }
   if (isKnownPageSystemNotice(trimmed)) return true;
 
   for (const pat of SYSTEM_PATTERNS) {
@@ -307,7 +361,7 @@ function isSidebarActivitySummary(text) {
   const value = String(text || '').replace(/\s+/g, ' ').trim();
   if (!value) return false;
   return /^(?:Bạn đã gửi|You (?:sent|shared))\s+(?:(?:một|1|an?|one)\s+)?(?:ảnh|photo|image|video|tệp|file|sticker|GIF)\.?$/iu.test(value)
-    || /^.{1,80}\s+đã gửi\s+(?:một|1)\s+(?:ảnh|video|tệp|file|sticker|GIF)\.?$/iu.test(value)
+    || /^(?:(?:Bạn|Tôi|You|.{1,80})\s+)?(?:đã gửi|sent|shared)\s+(?:(?:một|\d+|an?|one)\s+)?(?:ảnh|bức ảnh|photo|photos|image|images|video|videos|tệp|file|files|tập tin|nhãn dán|sticker|GIF|tin nhắn thoại|file âm thanh|voice message|audio)(?:\s+đính kèm)?\.?$/iu.test(value)
     || /^(?:Cuộc gọi nhỡ|Missed call)\.?$/iu.test(value);
 }
 
@@ -329,8 +383,59 @@ function isSidebarActivityNotification(text) {
     || /^(?:trả\s*lời\s*\??|đang gõ(?: tin nhắn)?|đã xem(?: tin nhắn)?|đã nhìn(?: tin nhắn)?|xem tin nhắn|tin nhắn mới|gửi tin nhắn|hủy bỏ|đang gọi\W*)$/iu.test(value);
 }
 
+// ---- Chrome thẻ cuộc gọi (F2, 2026-11-09) ----
+// Card cuộc gọi render tiêu đề ("Missed audio call 2:22 PM" / "Audio call")
+// + nút "Call back" (VN "Gọi lại") + chip thời lượng ("9 secs"). Observer
+// DOM nhặt các nhãn này thành bubble text riêng. KHÔNG đưa vào
+// SYSTEM_PATTERNS vì "Gọi lại"/"Call back" trần có thể là tin thật của khách
+// - lá chrome chỉ bị bỏ qua khi KÈM bằng chứng call row (cùng family mid
+// hoặc call row lân cận ±10 phút; xem ConversationRepository.saveMessages-
+// Transaction và guard WS trong server.js).
+const CALL_BUTTON_EN_RE = /^(?:call\s*back)\s*[.!?…]*$/i;
+const CALL_BUTTON_VN_RE = /^(?:gọi\s*lại)\s*[.!?…]*$/i;
+// Chip thời lượng lá: đơn vị tối thiểu 2 ký tự ('9 secs', '2 mins', '1m 30s')
+// - loại đơn vị 1 chữ ('2h', '5m') vì khách thật có thể gõ trả lời hẹn giờ.
+const CALL_DURATION_LEAF_RE = /^(?:\d{1,5}(?::\d{2}){1,2}\s*(?:am|pm)?|\d{1,5}\s*(?:giây|phút|giờ|sec|secs|seconds?|min|mins|minutes?|hr|hrs|hours?)(?:\s*\d{1,5}\s*(?:giây|sec|secs|seconds?|phút|min|mins|minutes?))?|\d{1,5}\s*(?:m|min|mins|minutes?|phút|h|hr|hrs|hours?|giờ)\s+\d{1,5}\s*(?:s|sec|secs|seconds?|giây))$/i;
+// Bản nới (đơn vị 1 chữ, '2h') - CHỈ dùng cho content row media_type='call'
+// (không bao giờ là tin người dùng gõ).
+const CALL_DURATION_ONLY_RE = /^(?:\d{1,5}(?::\d{2}){1,2}\s*(?:am|pm)?|\d{1,5}\s*(?:giây|phút|giờ|s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?)(?:\s*\d{1,5}\s*(?:giây|s|sec|secs|seconds?|phút|m|min|mins|minutes?))?)$/i;
+const CALL_CARD_TITLE_RE = /^(?:missed\s+)?(?:audio|video)\s+call(?:\s+\d{1,2}(?::\d{2}){1,2}\s*(?:am|pm)?)?$/i;
+const CALL_CARD_TITLE_VN_RE = /^(?:bỏ\s*lỡ\s*)?cuộc\s*gọi(?:\s+(?:thoại|video|nhỡ|bị\s*lỡ)){1,2}$/i;
+
+// Chrome đủ mạnh để chặn chỉ với bằng chứng lân cận (không gồm "Gọi lại" -
+// khách thật có thể gõ đúng 2 từ này sau cuộc gọi nhỡ).
+function isStrongCallCardChromeText(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return false;
+  return CALL_BUTTON_EN_RE.test(trimmed)
+    || CALL_DURATION_LEAF_RE.test(trimmed)
+    || CALL_CARD_TITLE_RE.test(trimmed)
+    || CALL_CARD_TITLE_VN_RE.test(trimmed);
+}
+
+function isCallCardChromeText(text) {
+  return isStrongCallCardChromeText(text) || CALL_BUTTON_VN_RE.test(String(text || '').trim());
+}
+
+// Nội dung row media_type='call' là nhãn card FB, không bao giờ là tin người
+// dùng gõ - chuẩn hóa nhãn rác ('Call back', '9 secs', '2:22 PM') thành nhãn
+// CRM đọc được. Content đã đúng tiếng Việt (có 'nhỡ'/'bỏ lỡ') giữ nguyên.
+function normalizeCallRowContent(content) {
+  const raw = String(content ?? '');
+  const trimmed = raw.trim();
+  if (!trimmed) return content;
+  if (/(?:bỏ\s*lỡ|nhỡ)/i.test(trimmed)) return trimmed;
+  if (CALL_BUTTON_EN_RE.test(trimmed) || CALL_BUTTON_VN_RE.test(trimmed)) return 'Cuộc gọi nhỡ';
+  if (/^missed\s+(?:audio|video)\s+call/i.test(trimmed)) return 'Cuộc gọi nhỡ';
+  if (CALL_DURATION_ONLY_RE.test(trimmed)) return 'Cuộc gọi';
+  if (/^(?:audio|video)\s+call/i.test(trimmed)) return /^video/i.test(trimmed) ? 'Cuộc gọi video' : 'Cuộc gọi';
+  if (/^call\s+ended/i.test(trimmed)) return 'Cuộc gọi';
+  return trimmed;
+}
+
 const INVALID_CONTACT_NAME_PATTERNS = [
   /^(?:Tất cả tin nhắn|Tất cả|All messages|All)$/i,
+  /^Khách hàng(?:\s*\([^)]*\))?$/i,
   /(?:Tất cả tin nhắn\s*){2,}/i,
   /(?:All messages\s*){2,}/i,
   /(?:Hộp thư đến\s*){2,}/i,
@@ -374,9 +479,12 @@ function isInvalidContactName(name) {
 
 function cleanContactName(rawName, fallback = 'Khách hàng') {
   if (!rawName || typeof rawName !== 'string') return fallback;
-  const trimmed = rawName.trim();
-  if (isInvalidContactName(trimmed)) return fallback;
-  return trimmed;
+  const stripped = rawName
+    .replace(/(?:Tin nhắn chưa đọc|Unread messages?)\s*:[\s\S]*$/iu, '')
+    .replace(/\s*[·•]\s*(?:\d+\s*(?:giây|phút|giờ|ngày|tuần|tháng|năm|s|m|h|d|w|y)(?:\s*(?:trước|ago))?|bây giờ|just now|vừa xong|hôm qua|yesterday)\s*$/iu, '')
+    .trim();
+  if (isInvalidContactName(stripped)) return fallback;
+  return stripped;
 }
 
 // 2026-09-29: Business Suite vẽ dòng attribution "Người gửi: <agent>" bên dưới
@@ -424,6 +532,9 @@ module.exports = {
   cleanMessageText,
   isSidebarActivitySummary,
   isSidebarActivityNotification,
+  isCallCardChromeText,
+  isStrongCallCardChromeText,
+  normalizeCallRowContent,
   isInvalidContactName,
   cleanContactName,
   stripBizSentByAttribution,

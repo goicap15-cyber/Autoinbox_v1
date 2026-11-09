@@ -230,7 +230,7 @@ export default function AuthScreen({ onAuthenticated }) {
               <MessageCircle size={20} fill="currentColor" />
             </div>
             <div>
-              <div className="font-bold tracking-tight leading-none">MISSPRICE</div>
+              <div className="font-bold tracking-tight leading-none">ADSUP</div>
               <div className="text-[10px] tracking-[0.24em] text-slate-500 mt-1">CRM</div>
             </div>
           </div>
@@ -346,7 +346,7 @@ export default function AuthScreen({ onAuthenticated }) {
           <p className="text-center text-sm font-medium text-slate-500">Đăng nhập an toàn · Dữ liệu được lưu trên máy của bạn</p>
         </div>
 
-        <aside className="relative hidden lg:flex overflow-hidden bg-gradient-to-br from-blue-800 via-blue-600 to-sky-400 text-white p-14 flex-col" aria-label="Giới thiệu MISSPRICE CRM">
+        <aside className="relative hidden lg:flex overflow-hidden bg-gradient-to-br from-blue-800 via-blue-600 to-sky-400 text-white p-14 flex-col" aria-label="Giới thiệu AdsupCRM">
           <div className="absolute -top-28 -right-24 w-80 h-80 rounded-full border-[46px] border-white/5" />
           <div className="absolute top-24 -left-40 w-[520px] h-[520px] rounded-full border-[72px] border-white/[0.04]" />
           <div className="relative z-10">

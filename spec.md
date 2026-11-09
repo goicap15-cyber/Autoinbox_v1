@@ -227,3 +227,15 @@ erDiagram
    - Mã hóa tài khoản & thông tin nhạy cảm trong SQLite DB.
 3. **Quản lý Tài nguyên Tiến trình:**
    - Mỗi tiến trình `Chrome Portable` ngầm được tối ưu bằng các cờ `--disable-gpu --disable-software-rasterizer --no-first-run` để giữ mức RAM tiêu thụ < 250MB/profile.
+
+---
+
+### 4.7. Sửa lỗi Đồng bộ Hội thoại Tài khoản Cá nhân & Ngăn Chrome Rác Mở khi Khởi động App
+1. **Đồng bộ Hội thoại Tài khoản Cá nhân (`personal_messenger`):**
+   - Khi tài khoản Facebook cá nhân đăng ký kết nối (`REGISTER_ACCOUNT`), hệ thống tự động mở cửa sổ đồng bộ (`InboxSyncScheduler.startSyncWindow`) và kích hoạt `SYNC_THREADS` (`scan_mode: 'full'`) để lấy ngay danh sách hội thoại (`Hội thoại` / `INBOX`) và `Tin nhắn chờ` mà không bị hủy bởi `SET_SIDEBAR_SYNC_WINDOW: { enabled: false }`.
+   - Trong `handleSync100Threads` (`src/extension/background.js`), không điều hướng ngược lại `/messages` gốc khi tab đã nằm ở `/messages/t/<id>` hoặc `/messages/e2ee/t/<id>` (vì cột danh sách hội thoại bên trái luôn hiển thị sẵn), đồng thời ưu tiên quét `inboxTarget` (`INBOX`) trước `requestsTab` để danh sách hội thoại cá nhân hiển thị tức thì trên giao diện CRM.
+   - Khi ẩn cửa sổ Chrome chạy ngầm (`hideChromeWindowFromScreen`), giữ trạng thái cửa sổ không bị Chromium đánh dấu occluded/hidden hoàn toàn để React DOM của Messenger tiếp tục render danh sách hội thoại.
+2. **Ngăn Cửa sổ Chrome Rác Mở khi Khởi động App:**
+   - Không tự động bật hàng loạt cửa sổ Chrome cho các tài khoản `DISCONNECTED`, tài khoản mồ côi (`owner_user_id IS NULL`), hoặc profile chưa có phiên đăng nhập Facebook hợp lệ khi mở ứng dụng (`startServer`).
+   - Tự động dọn dẹp các tiến trình Chrome mồ côi và các bản ghi tài khoản mồ côi không có cookie đăng nhập khi khởi động server.
+

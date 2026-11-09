@@ -7,12 +7,20 @@
  * Deliberately narrower than a broad "0[35789]x" regex: real carrier
  * prefixes are assigned individually, not by decade, and new ones (e.g. 095)
  * must be turned on explicitly rather than matched by accident.
+ *
+ * 2026-10-22: thêm dò số di động quốc tế (+CC...). libphonenumber-js (max)
+ * xác thực từng ứng viên theo siêu dữ liệu ~240 quốc gia; chỉ nhận số còn
+ * liên lạc được (loại trừ máy bàn/phí cao/tổng đài). Số VN (+84/84/0) vẫn do
+ * registry đầu số riêng xử lý — nhánh quốc tế bỏ qua VN để một số không bị
+ * lưu thành 2 dạng.
  */
+const { parsePhoneNumberFromString } = require('libphonenumber-js/max');
 
 // Bump whenever PREFIX_REGISTRY or the extraction shape changes - persisted
 // per capture (contact_phone_captures.rule_version) so old evidence can be
 // told apart from evidence produced under a newer rule set.
 const RULE_VERSION = 1;
+const INTL_RULE_VERSION = 2;
 
 function rangePrefixes(startSuffix, endSuffix) {
   const out = [];
@@ -98,14 +106,45 @@ function normalizeVietnamMobile(rawToken) {
 // exact-length check happens afterward in normalizeVietnamMobile.
 const CANDIDATE_PATTERN = /(?<!\d)(\+?84|0)(?:[\s.\-]?\(?\d{1,4}\)?){1,4}(?!\d)/g;
 
+// Ứng viên quốc tế: cụm bắt đầu bằng '+' theo sau 6-19 ký tự số/dấu phân cách,
+// chặn biên không khớp giữa chữ số. libphonenumber sẽ quyết định nhận hay bỏ.
+const INTL_CANDIDATE_PATTERN = /\+[0-9][0-9\s.\-()]{5,18}[0-9]/g;
+
+// Chỉ loại loại số không dùng để liên lạc khách: máy bàn, phí cao, tổng đài
+// miễn phí, thư thoại, máy nhắn tin. MOBILE / FIXED_LINE_OR_MOBILE / VOIP /
+// PERSONAL_NUMBER / UAN / không xác định đều nhận — ưu tiên không bỏ sót lead.
+const INTL_REJECTED_TYPES = new Set(['FIXED_LINE', 'PREMIUM_RATE', 'TOLL_FREE', 'VOICEMAIL', 'PAGER']);
+
+function findInternationalNumbers(text) {
+  if (!text || typeof text !== 'string') return [];
+  const results = [];
+  let match;
+  INTL_CANDIDATE_PATTERN.lastIndex = 0;
+  while ((match = INTL_CANDIDATE_PATTERN.exec(text)) !== null) {
+    const raw = match[0];
+    const parsed = parsePhoneNumberFromString(raw);
+    if (!parsed || !parsed.isValid() || parsed.country === 'VN') continue;
+    if (INTL_REJECTED_TYPES.has(parsed.getType())) continue;
+    results.push({
+      raw,
+      normalized: parsed.number,
+      prefix: '+' + parsed.countryCallingCode,
+      country: parsed.country
+    });
+  }
+  return results;
+}
+
 /**
  * Scans free-form message text for valid Vietnamese mobile numbers.
  * Only returns entries that pass normalization + active-prefix checks;
  * malformed/invalid-prefix/wrong-length candidates are silently dropped, per
  * FR-003 - the detector's job is only to say what IS valid, not narrate why
  * a token was rejected outside of tests.
+ * 2026-10-22: gộp thêm số di động quốc tế hợp lệ (normalized dạng E.164
+ * '+CC...', kèm trường country; số VN không có trường country).
  * @param {string} text
- * @returns {{ raw: string, normalized: string, prefix: string }[]}
+ * @returns {{ raw: string, normalized: string, prefix: string, country?: string }[]}
  */
 function findPhoneNumbers(text) {
   if (!text || typeof text !== 'string') return [];
@@ -119,13 +158,18 @@ function findPhoneNumbers(text) {
       results.push({ raw, normalized: outcome.normalized, prefix: outcome.prefix });
     }
   }
+  for (const intl of findInternationalNumbers(text)) {
+    results.push(intl);
+  }
   return results;
 }
 
 module.exports = {
   RULE_VERSION,
+  INTL_RULE_VERSION,
   PREFIX_REGISTRY,
   isPrefixActive,
   normalizeVietnamMobile,
+  findInternationalNumbers,
   findPhoneNumbers
 };

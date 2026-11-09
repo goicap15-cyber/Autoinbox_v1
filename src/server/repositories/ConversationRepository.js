@@ -1,7 +1,8 @@
 const crypto = require('crypto');
-const { isInvalidContactName, cleanContactName, cleanMessageText, isSystemOrMetadataText, stripBizSentByAttribution, isBizSentByAttributionOnly, isBizFeedbackOnly } = require('../utils/textFilter');
+const { isInvalidContactName, cleanContactName, cleanMessageText, isSystemOrMetadataText, stripBizSentByAttribution, isBizSentByAttributionOnly, isBizFeedbackOnly, isCallCardChromeText, isStrongCallCardChromeText, normalizeCallRowContent } = require('../utils/textFilter');
 const { isKnownPageSystemNotice } = require('../utils/pageSystemNotice');
 const { isBlacklistedThreadId } = require('../utils/threadGuard');
+const { normalizePreviewText } = require('../utils/unreadGuard');
 let defaultDb;
 function getDefaultDb() {
   if (!defaultDb) defaultDb = require('../database/db');
@@ -48,9 +49,68 @@ function shouldCommitDirectionFlip(stableMessageId, existingIsOutgoing, proposed
   return false;
 }
 
+// Geometry-decisive flips commit ngay (không 2-strike) — nhưng bubble đang
+// hydrate có thể sinh HAI phép đo quyết đoán NGƯỢC nhau cách nhau vài giây
+// (lá nhãn a11y đo một mình -> trái, rồi bubble text mount -> phải). Phép
+// flip quyết đoán ĐẦU TIÊN mới là sự thật; phép ngược chiều trong cửa sổ
+// cooldown là artifact hydrate, không được thắng (reproduce 2026-11-04 10:47:
+// tin khách "ccxxcxc" đo trái đúng -> lật IN, vài giây sau đọc phải sai lật
+// ngược OUT ngay trước mắt user). Sau cooldown, sửa chữa thật vẫn lọt được.
+const GEOMETRY_FLIP_COOLDOWN_MS = 120 * 1000;
+let geometryFlipLedger = new Map(); // fb_message_id -> { direction: 0|1, at: epochMs }
+function geometryFlipAllowed(stableMessageId, proposedOutgoing) {
+  const record = geometryFlipLedger.get(stableMessageId);
+  if (!record) return true;
+  if (Number(record.direction) === Number(proposedOutgoing)) return true;
+  if (Date.now() - record.at > GEOMETRY_FLIP_COOLDOWN_MS) {
+    geometryFlipLedger.delete(stableMessageId);
+    return true;
+  }
+  return false;
+}
+function rememberGeometryFlip(stableMessageId, committedOutgoing) {
+  const existing = geometryFlipLedger.get(stableMessageId);
+  if (existing && Number(existing.direction) === Number(committedOutgoing)) return; // giữ anchor ĐẦU của chiều này, re-commit không dời mốc
+  geometryFlipLedger.set(stableMessageId, { direction: committedOutgoing ? 1 : 0, at: Date.now() });
+  directionFlipCandidates.delete(stableMessageId);
+  if (geometryFlipLedger.size > 500) geometryFlipLedger.delete(geometryFlipLedger.keys().next().value);
+}
+
 class ConversationRepository {
   static bubbleFamilyId(messageId) {
-    return String(messageId || '').replace(/__bubble_\d+$/, '');
+    return String(messageId || '')
+      .replace(/__bubble_\d+$/, '')
+      .replace(/^[^@]+@msgr\.(\d{15,22})$/, '$1');
+  }
+
+  static extractSnowflakeBigInt(fbMessageId) {
+    const raw = String(fbMessageId || '').replace(/__bubble_\d+$/, '').replace(/_media(?:_\d+)?$/, '').trim();
+    const midMatch = raw.match(/^mid\.\$([A-Za-z0-9_-]{20,44})$/);
+    if (midMatch) {
+      try {
+        const b64 = midMatch[1].replace(/-/g, '+').replace(/_/g, '/');
+        const buf = Buffer.from(b64, 'base64');
+        if (buf.length >= 16) {
+          const last8 = buf.readBigUInt64BE(buf.length - 8);
+          const sf = (last8 & 0x03ffffffffffffffn) << 6n;
+          const ts = Number(sf >> 22n);
+          if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return sf;
+        }
+      } catch (_) {}
+    }
+    const m = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
+    if (!m) return null;
+    try {
+      const sf = BigInt(m[1]);
+      const ts = Number(sf >> 22n);
+      if (ts >= 1577836800000 && ts <= Date.now() + 86400000) return sf;
+    } catch (_) {}
+    return null;
+  }
+
+  static extractSnowflakeTimestampMs(fbMessageId) {
+    const sf = ConversationRepository.extractSnowflakeBigInt(fbMessageId);
+    return sf !== null ? Number(sf >> 22n) : 0;
   }
 
   // Facebook may group several real, consecutive bubbles under one native
@@ -170,6 +230,40 @@ class ConversationRepository {
     } catch (_) {
       return null;
     }
+  }
+
+  // Fix A (2026-11-09): preview sidebar sinh khi hint đến TRƯỚC tin thật; khi
+  // tin thật vào DB mà promoteSidebarPreview lọt (chều bị đọc sai lúc insert,
+  // 2 preview cùng nội dung, hoa/thường khác...) thì row preview mồ côi đứng
+  // cạnh row thật -> tin hiện x2 (reproduce: "Jjjjjj" thread 1411372724455599).
+  // Sau khi row thật (CHỈ chiều vào) chèn/cập nhật, dọn preview cùng thread có
+  // nội dung chuẩn hóa trùng. So khớp chuẩn hóa (unreadGuard) thay vì exact
+  // để bắt cả biến thể sidebar đổi khoảng trắng/hoa thường.
+  static absorbMatchedSidebarPreviews(threadId, realContents, database = getDefaultDb()) {
+    if (!threadId || !Array.isArray(realContents)) return 0;
+    // unreadGuard.normalizePreviewText không lowercase - absorb gói thêm để
+    // bắt biến thể hoa/thường sidebar hay trôi ("Jjjjjj" vs "jjjjjj").
+    const norm = (text) => {
+      const cleaned = normalizePreviewText(text);
+      return cleaned ? cleaned.toLocaleLowerCase('vi-VN') : '';
+    };
+    const normalized = [...new Set(realContents.map(norm).filter(Boolean))];
+    if (!normalized.length) return 0;
+    const previews = database.prepare(`
+      SELECT id, content FROM messages
+      WHERE thread_id = ? AND fb_message_id LIKE 'sidebar_preview_%'
+    `).all(threadId);
+    if (!previews.length) return 0;
+    const deletePreview = database.prepare('DELETE FROM messages WHERE id = ?');
+    let absorbed = 0;
+    for (const preview of previews) {
+      const previewText = norm(preview.content);
+      if (previewText && normalized.includes(previewText)) {
+        deletePreview.run(preview.id);
+        absorbed += 1;
+      }
+    }
+    return absorbed;
   }
 
   static hasNewerOutgoingAfterMatchingIncoming(threadId, content, database = getDefaultDb()) {
@@ -338,7 +432,28 @@ class ConversationRepository {
       }
     }
 
+    const hasExplicitRequestUrl = /\/messages\/(?:(?:e2ee\/)?(?:requests|spam)|(?:requests|spam)\/e2ee)(?:\/|\?)/i.test(String(thread_url || ''));
+    let safeInboxFolder = normalizedInboxFolder;
+    if (['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(safeInboxFolder) && !hasExplicitRequestUrl) {
+      safeInboxFolder = existing ? null : 'INBOX';
+    }
+
     if (existing) {
+      const existingRow = database.prepare('SELECT inbox_folder, thread_url FROM threads WHERE id = ?').get(existing.id);
+      const existingFolder = existingRow?.inbox_folder || 'INBOX';
+      const existingUrl = String(existingRow?.thread_url || '');
+      const existingHasNormalInboxUrl = /\/messages\/(?:e2ee\/)?t\//i.test(existingUrl)
+        && !/\/messages\/(?:(?:e2ee\/)?(?:requests|spam)|(?:requests|spam)\/e2ee)(?:\/|\?)/i.test(existingUrl);
+      const hasExistingMessages = Boolean(
+        database.prepare('SELECT 1 FROM messages WHERE thread_id = ? LIMIT 1').get(existing.id)
+      );
+      // Hội thoại đã nằm ở INBOX (có URL hộp thư chính hoặc đã có tin nhắn trong DB)
+      // KHÔNG BAO GIỜ bị đẩy ngược sang Tin nhắn chờ.
+      const allowMoveToRequest = inboxFolderVerified === 1
+        && hasExplicitRequestUrl
+        && !existingHasNormalInboxUrl
+        && !hasExistingMessages;
+
       const existingIsInvalid = isInvalidContactName(existing.contact_name);
       let targetName = existing.contact_name;
       if (cleanIncomingName && cleanIncomingName !== 'Khách hàng') {
@@ -355,11 +470,12 @@ class ConversationRepository {
             thread_url = COALESCE(?, thread_url),
             last_message = COALESCE(?, last_message),
             is_unread = COALESCE(?, is_unread),
+            unread_manual = CASE WHEN ? = 0 AND COALESCE(unread_manual, 0) = 1 THEN 0 ELSE unread_manual END,
             inbox_folder = CASE
-              WHEN inbox_folder = 'INBOX'
+              WHEN COALESCE(inbox_folder, 'INBOX') = 'INBOX'
                 AND ? IN ('MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE')
                 AND ? = 0
-              THEN inbox_folder
+              THEN 'INBOX'
               ELSE COALESCE(?, inbox_folder)
             END
         WHERE id = ?
@@ -367,12 +483,13 @@ class ConversationRepository {
           external_thread_id, 
           source_id || null, 
           targetName,
-          thread_url, 
+           (existingHasNormalInboxUrl && ['MESSAGE_REQUEST_SPAM', 'MESSAGE_REQUEST_POSSIBLE'].includes(normalizedInboxFolder)) ? existingUrl : thread_url, 
           last_message, 
-          is_unread === undefined ? null : (is_unread ? 1 : 0), 
-          normalizedInboxFolder,
-          inboxFolderVerified,
-          normalizedInboxFolder,
+          is_unread === undefined ? null : (is_unread ? 1 : 0),
+          is_unread === undefined ? null : (is_unread ? 1 : 0),
+          safeInboxFolder,
+          allowMoveToRequest ? 1 : 0,
+          safeInboxFolder,
           existing.id
       );
       return this.getThread(existing.id, database);
@@ -381,7 +498,7 @@ class ConversationRepository {
     database.prepare(`
       INSERT INTO threads (id, external_thread_id, account_id, source_id, thread_url, contact_name, last_message, is_unread, inbox_folder)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(preferredId, external_thread_id, account_id, source_id || null, thread_url, cleanIncomingName || 'Khách hàng', last_message, is_unread === undefined ? 1 : (is_unread ? 1 : 0), normalizedInboxFolder || 'INBOX');
+    `).run(preferredId, external_thread_id, account_id, source_id || null, thread_url, cleanIncomingName || 'Khách hàng', last_message, is_unread === undefined ? 1 : (is_unread ? 1 : 0), safeInboxFolder || 'INBOX');
     return this.getThread(preferredId, database);
   }
 
@@ -422,7 +539,7 @@ class ConversationRepository {
     const maxByThread = new Map(database.prepare(`
       SELECT thread_id, MAX(timestamp_ms) AS max_ts
       FROM messages
-      WHERE timestamp_ms > 0 AND thread_id IN (${ids.map(() => '?').join(',')})
+      WHERE timestamp_ms > 0 AND timestamp_ms <= ${Date.now() + 60000} AND thread_id IN (${ids.map(() => '?').join(',')})
       GROUP BY thread_id
     `).all(...ids).map((r) => [String(r.thread_id), Number(r.max_ts)]));
     for (const row of rows) {
@@ -447,6 +564,36 @@ class ConversationRepository {
     database.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = ? WHERE id = ?')
       .run(lastMessage, new Date(timestampMs).toISOString(), threadId);
     return true;
+  }
+
+  // Chỉnh last_activity về thời gian tin thật mới nhất thay vì fake "now".
+  // Tự tiến khi tin thật mới hơn giá trị đang lưu; kéo lùi khi giá trị đang
+  // lưu vượt tin thật trên 5 phút (vết bump CURRENT_TIMESTAMP của poller/
+  // backfill khiến hội thoại cũ thành "hoạt động hôm nay" - 2026-10-21).
+  // Chênh lệch trong 5 phút thì giữ nguyên để không phá nhịp realtime.
+  static alignThreadActivity(threadId, lastMessage, observedTimestampMs, database = getDefaultDb()) {
+    const rawMs = Number(observedTimestampMs || 0);
+    if (!Number.isFinite(rawMs) || rawMs <= 0) return false;
+    // last_activity lưu precision GIÂY (định dạng CURRENT_TIMESTAMP) — làm tròn
+    // ts quan sát về giây để so sánh khớp, tránh re-write lặp mỗi chu kỳ poll.
+    const timestampMs = Math.floor(rawMs / 1000) * 1000;
+    const thread = database.prepare('SELECT last_activity FROM threads WHERE id = ?').get(threadId);
+    if (!thread) return false;
+    const currentText = String(thread.last_activity || '');
+    let currentTimestampMs = 0;
+    if (currentText) {
+      // 'YYYY-MM-DD HH:MM:SS' của SQLite CURRENT_TIMESTAMP là UTC; Date.parse
+      // thiếu 'Z' sẽ hiểu nhầm thành giờ máy (UTC+7) lệch 7 tiếng.
+      currentTimestampMs = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(currentText)
+        ? (Date.parse(currentText + 'Z') || 0)
+        : (Date.parse(currentText) || 0);
+    }
+    if (timestampMs > currentTimestampMs || currentTimestampMs - timestampMs > 5 * 60 * 1000) {
+      database.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = ? WHERE id = ?')
+        .run(lastMessage, new Date(timestampMs).toISOString().slice(0, 19).replace('T', ' '), threadId);
+      return true;
+    }
+    return false;
   }
 
   // Writes a resolved avatar to the contacts row only when no real avatar is
@@ -488,16 +635,78 @@ class ConversationRepository {
     `).all(threadId, limit, offset).reverse();
   }
 
+  // H1 (2026-11-09): bộ tên thành viên nhóm đã chuẩn hóa (gộp khoảng trắng +
+  // lowercase) để nhận diện nhãn tên bị parser DOM nhặt thành tin. Thread
+  // không có dòng nào trong group_members (1-1) trả về null = gate tắt.
+  static getGroupMemberNameSet(threadId, database = getDefaultDb()) {
+    if (!threadId) return null;
+    try {
+      const rows = database.prepare('SELECT name FROM group_members WHERE thread_id = ?').all(String(threadId));
+      if (!rows || !rows.length) return null;
+      const names = new Set();
+      for (const row of rows) {
+        const name = String(row.name || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (name) names.add(name);
+      }
+      return names.size ? names : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Nội dung sau khi gỡ hậu tố chỉnh sửa của Messenger ("Tôi · Đã chỉnh sửa",
+  // "Giang · Edited") — bản render hai khoảng trắng trước dấu chấm vẫn khớp.
+  static stripGroupEditMarker(content) {
+    return String(content || '')
+      .replace(/\s+/g, ' ').trim()
+      .replace(/\s*[·•]\s*(?:đã chỉnh sửa|edited)\s*$/i, '')
+      .replace(/\s*[·•]\s*$/, '')
+      .trim();
+  }
+
+  // Nhãn tên thành viên phía trên bong bóng bị parser nhặt thành tin riêng:
+  // text thuần, trùng TÊN thành viên trong group_members (hoặc nhãn chính mình
+  // "Tôi"/"Bạn"/"You"), không media, không dấu vết tin gửi từ CRM. Tin thật của
+  // thành viên luôn mang member_name nên không dính gate (H1, 2026-11-09).
+  static isGroupSenderNameLabelRow({
+    content, memberName, isOutgoing, mediaType, mediaUrl,
+    clientMessageId, sentByAgent, memberNames
+  }) {
+    if (!memberNames || !memberNames.size) return false;
+    if (mediaUrl || (mediaType && mediaType !== 'text')) return false;
+    if (clientMessageId || sentByAgent) return false;
+    if (!isOutgoing && String(memberName || '').trim() !== '') return false;
+    const base = ConversationRepository.stripGroupEditMarker(content);
+    if (!base) return false;
+    const baseLower = base.toLowerCase();
+    if (!isOutgoing) return memberNames.has(baseLower);
+    // Chiều ĐI: nhãn tên chính mình (tên account có thể nằm trong danh sách
+    // thành viên) hoặc "Tôi"/"Bạn" — tin mình gõ tay trùng tên thành viên khác
+    // vẫn qua; không có client_message_id ở đây vì đã bị loại ở trên.
+    return memberNames.has(baseLower) || ['tôi', 'bạn', 'you', 'me'].includes(baseLower);
+  }
+
+  // H3 (2026-11-09): row base của họ id bubble (mid.$X hay bản sao mirror
+  // "mid.$X" / "<uid>.X") trong cùng thread. family quá ngắn -> không lookup.
+  static findBubbleFamilyBaseRow(threadId, familyId, database = getDefaultDb()) {
+    if (!threadId || !familyId || String(familyId).length < 12) return null;
+    return database.prepare(`
+      SELECT id, fb_message_id FROM messages
+      WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
+      LIMIT 1
+    `).get(threadId, familyId, familyId) || null;
+  }
+
   static saveMessagesTransaction(threadId, messages = [], database = getDefaultDb()) {
     if (isBlacklistedThreadId(threadId)) return { insertedIds: [], updatedIds: [], skippedCount: 0 };
     const insertMsg = database.prepare(`
-      INSERT INTO messages (thread_id, fb_message_id, sender_id, sender_name, content, media_type, media_url, timestamp_ms, timestamp_source, is_outgoing, sender_role, sequence_order, direction_status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (thread_id, fb_message_id, sender_id, sender_name, content, media_type, media_url, timestamp_ms, timestamp_source, is_outgoing, sender_role, sequence_order, direction_status, created_at, reply_to_text)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(fb_message_id) DO UPDATE SET
         sender_name = COALESCE(excluded.sender_name, messages.sender_name),
         content = CASE WHEN excluded.content IS NOT NULL AND excluded.content <> '' THEN excluded.content ELSE messages.content END,
         media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
-        media_url = COALESCE(excluded.media_url, messages.media_url),
+        media_url = CASE WHEN messages.attachment_id IS NOT NULL AND messages.media_url IS NOT NULL THEN messages.media_url ELSE COALESCE(excluded.media_url, messages.media_url) END,
         -- Một lần quét lại thiếu thông tin thời gian (ts <= 0) không được xóa
         -- timestamp đã lưu - tin cũ bị "mất thời gian" sẽ bị normalize xếp nhầm ngày.
         -- Quét lại cũng không được đẩy timestamp đã lưu tiến lên: DOM/sidebar
@@ -521,10 +730,37 @@ class ConversationRepository {
         -- partial DOM/history scan may have a different local index and must
         -- not move that existing text.
         sequence_order = messages.sequence_order,
-        direction_status = CASE WHEN excluded.direction_status = 'confirmed' THEN 'confirmed' ELSE messages.direction_status END
+        direction_status = CASE WHEN excluded.direction_status = 'confirmed' THEN 'confirmed' ELSE messages.direction_status END,
+        -- H5 (2026-11-09): quote reply chỉ ĐIỀN khi row chưa có - quét lại
+        -- không được ghi đè quote đã lưu.
+        reply_to_text = COALESCE(NULLIF(TRIM(COALESCE(messages.reply_to_text, '')), ''), excluded.reply_to_text)
     `);
     const transaction = database.transaction((msgs) => {
-      const result = { insertedIds: [], updatedIds: [], skippedCount: 0 };
+      const result = { insertedIds: [], updatedIds: [], skippedCount: 0, absorbedPreviewCount: 0 };
+      // Base mid.$X và các bản render lại mid.$X__bubble_N có thể vào CÙNG một
+      // batch: guard bubble phía dưới chỉ soi DB nên không thấy base chưa được
+      // lưu -> cả ba row đều insert (reproduce 2026-11-03: Dkkskkss/Kaskkss/
+      // Hhhgggh mỗi tin ×3). Soi trước cả batch để bubble hoãn/làm đại diện.
+      const batchBaseIds = new Set();
+      const batchCallStamps = [];
+      for (const m of msgs) {
+        const id = String(m.fb_message_id || m.messageId || m.client_message_id || '');
+        if (/^mid\.\$/.test(id) && !/__bubble_\d+$/.test(id)) batchBaseIds.add(id);
+        // F2: family/giờ các row call trong cùng batch - lá chrome thẻ call có
+        // thể đến TRƯỚC base, lookup DB lúc đó chưa thấy.
+        if ((m.media_type || '') === 'call') {
+          const callFamily = String(id).replace(/__bubble_\d+$/, '');
+          if (callFamily) batchCallStamps.push({ familyId: callFamily, ts: Number(m.timestamp_ms || m.timestamp || 0) });
+        }
+      }
+      const pendingBubbleMerges = new Map();
+      // H1: bộ tên thành viên nhóm của thread — rỗng/1-1 thì gate tên tắt.
+      const groupMemberNames = ConversationRepository.getGroupMemberNameSet(threadId, database);
+      // Nội dung tin thật chiều VÀO đã được xác nhận trong thread (insert/
+      // update) - cuối transaction dùng để hấp thụ preview mồ côi cùng nội
+      // dung (Fix A 2026-11-09). Chỉ thu cho stableId KHÔNG phải preview để
+      // batch preview (server.js) không tự hấp thụ chính nó.
+      const incomingAbsorbContents = [];
       for (const msg of msgs) {
         const isOutgoing = msg.is_outgoing === true || msg.is_outgoing === 1 ? 1 : 0;
         const directionStatus = msg.direction_status === 'pending' || msg.directionStatus === 'pending'
@@ -536,13 +772,23 @@ class ConversationRepository {
         const memberName = (!isOutgoing && msg.member_name)
           ? String(msg.member_name).trim() || null
           : null;
+        // H5 (2026-11-09): quote reply do background.js history sync extract
+        // (msg.reply_quote_text) - batch từng bỏ qua trường này nên tin rep
+        // lần đầu bắt bằng quét lại mất "Trả lời tin nhắn của X".
+        const replyQuoteText = String(msg.reply_quote_text || msg.reply_to_text || '').replace(/\s+/g, ' ').trim().slice(0, 500) || null;
         const senderRole = isOutgoing ? 'operator' : 'customer';
         const observedSequence = Number.isFinite(Number(msg.sequence_order ?? msg.dom_order))
           ? Number(msg.sequence_order ?? msg.dom_order)
           : null;
         let stableId = msg.fb_message_id || msg.messageId || msg.client_message_id || ConversationRepository.fingerprint(threadId, msg);
-        const observedTimestampMs = Number(msg.timestamp_ms || msg.timestamp || 0);
-        const observedTimestampSource = msg.timestamp_source || 'sync';
+        const rawObservedTs = Number(msg.timestamp_ms || msg.timestamp || 0);
+        const snowflakeTs = ConversationRepository.extractSnowflakeTimestampMs(stableId);
+        let observedTimestampMs = (Number.isFinite(rawObservedTs) && rawObservedTs > 0 && rawObservedTs <= Date.now() + 60000) ? rawObservedTs : 0;
+        let observedTimestampSource = msg.timestamp_source || 'sync';
+        if (snowflakeTs > 0 && (observedTimestampMs <= 0 || ['realtime_fallback', 'facebook_label', 'dom_clock_order', 'dom_order', 'unknown', 'sync'].includes(observedTimestampSource))) {
+          observedTimestampMs = snowflakeTs;
+          observedTimestampSource = 'facebook_payload';
+        }
         let content = msg.content ?? msg.text ?? msg.cleaned ?? null;
         const mediaType = msg.media_type || (msg.media_url ? 'image' : 'text');
         const mediaUrl = msg.media_url || null;
@@ -559,6 +805,68 @@ class ConversationRepository {
           continue;
         }
         content = cleanedContent;
+        // H1 (2026-11-09): nhãn tên thành viên nhóm bị parser nhặt thành tin
+        // (content trùng tên, member_name rỗng) — chặn đối xứng cổng realtime.
+        if (!mediaUrl && (mediaType === 'text' || !mediaType)
+          && ConversationRepository.isGroupSenderNameLabelRow({
+            content,
+            memberName,
+            isOutgoing: isOutgoing === 1,
+            mediaType,
+            mediaUrl,
+            clientMessageId: msg.client_message_id || null,
+            sentByAgent: msg.sent_by_agent || null,
+            memberNames: groupMemberNames
+          })) {
+          result.skippedCount += 1;
+          continue;
+        }
+        // F2 (2026-11-09): row call - nội dung là nhãn card FB ('Call back',
+        // '9 secs', '2:22 PM'), không bao giờ là tin người dùng gõ -> chuẩn
+        // hóa thành nhãn CRM đọc được ngay từ cổng vào.
+        if (mediaType === 'call') {
+          content = normalizeCallRowContent(content);
+        } else if (!mediaUrl && (mediaType === 'text' || !mediaType) && isCallCardChromeText(content)) {
+          // Lá chrome thẻ cuộc gọi ("Call back"/duration/tiêu đề card) do
+          // observer DOM nhặt nhầm: chỉ bỏ qua khi CÓ bằng chứng call row -
+          // cùng family mid (base đã lưu trong DB hoặc cùng batch) HOẶC call
+          // row lân cận ±10 phút trong thread. 'Gọi lại' trần không có family
+          // thì sống (khách thật có thể gõ sau cuộc gọi nhỡ).
+          const callFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
+          const callBaseRow = callFamilyId.length >= 12
+            ? database.prepare(`
+                SELECT id, content, is_outgoing FROM messages
+                WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE '%.' || ?)
+                  AND media_type = 'call'
+                ORDER BY id DESC LIMIT 1
+              `).get(threadId, callFamilyId, callFamilyId) || null
+            : null;
+          const sameBatchCall = batchCallStamps.find((c) => c.familyId === callFamilyId) || null;
+          let nearbyCallRow = null;
+          if (!callBaseRow && !sameBatchCall && observedTimestampMs > 0) {
+            nearbyCallRow = database.prepare(`
+              SELECT id, content, is_outgoing FROM messages
+              WHERE thread_id = ? AND media_type = 'call' AND timestamp_ms > 0
+                AND ABS(timestamp_ms - ?) <= 600000
+              LIMIT 1
+            `).get(threadId, observedTimestampMs) || null;
+          }
+          const nearbyBatchCall = (!callBaseRow && !sameBatchCall && !nearbyCallRow)
+            ? batchCallStamps.find((c) => c.ts > 0 && observedTimestampMs > 0
+                && Math.abs(c.ts - observedTimestampMs) <= 600000) || null
+            : null;
+          const leafIsStrongChrome = isStrongCallCardChromeText(content);
+          if (callBaseRow || sameBatchCall || ((nearbyCallRow || nearbyBatchCall) && leafIsStrongChrome)) {
+            if (callBaseRow) {
+              const mappedCallContent = normalizeCallRowContent(callBaseRow.content);
+              if (mappedCallContent && mappedCallContent !== String(callBaseRow.content || '')) {
+                database.prepare('UPDATE messages SET content = ? WHERE id = ?').run(mappedCallContent, callBaseRow.id);
+              }
+            }
+            result.skippedCount += 1;
+            continue;
+          }
+        }
         // History crawlers can label an operator bubble as CONTACT/current_user.
         // The existing outgoing row is authoritative; reject that incoming
         // history observation before it reaches INSERT/UPSERT. CHỈ áp cho row
@@ -627,6 +935,116 @@ class ConversationRepository {
             continue;
           }
         }
+        // mid.$X__bubble_N là id FB-native: FB tự gắn suffix khi render LẠI
+        // đúng tin mid.$X - nếu row gốc đã có trong thread thì observation này
+        // không được thành row thứ hai; text thật từ bản render sau hợp nhất
+        // vào row gốc (reproduce 2026-10-05→07: 16 tin nhóm bị tách đôi, row
+        // gốc dán nhầm tên người gửi còn text thật nằm dưới id __bubble_N).
+        // KHÔNG áp cho id anchor kiểu peer@msgr.N__bubble_N - đó là id tổng
+        // hợp cho pending outgoing, có thể là tin thật riêng (like-group).
+        if (/^mid\.\$/.test(String(stableId))) {
+          const bubbleFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
+          const incomingText = String(content || '').trim();
+          const isIncomingLinkCardFile = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(incomingText);
+          if (bubbleFamilyId.length >= 12 && incomingText && !isPureEmojiContent && mediaType === 'text' && !mediaUrl) {
+            const likeEscFam = bubbleFamilyId.replace(/[_%]/g, (c) => `\\${c}`);
+            const familyRows = database.prepare(`
+              SELECT id, fb_message_id, content, media_url, sender_name FROM messages
+              WHERE thread_id = ? AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+              ORDER BY id ASC
+            `).all(threadId, bubbleFamilyId, `${likeEscFam}__bubble_%`);
+            let handledByFamily = false;
+            for (const famRow of familyRows) {
+              const famText = String(famRow.content || '').trim();
+              if (!famText) continue;
+              const isFamLinkCardFile = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(famText);
+              if (famText === incomingText) {
+                stableId = famRow.fb_message_id;
+                handledByFamily = true;
+                break;
+              }
+              if ((famText.length > incomingText.length && famText.includes(incomingText) && incomingText.length >= 6)
+                || (isIncomingLinkCardFile && /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(famText))) {
+                result.skippedCount += 1;
+                handledByFamily = 'skip';
+                break;
+              }
+              if ((incomingText.length > famText.length && incomingText.includes(famText) && famText.length >= 6)
+                || (isFamLinkCardFile && /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(incomingText))) {
+                database.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, famRow.id);
+                stableId = famRow.fb_message_id;
+                handledByFamily = true;
+                break;
+              }
+            }
+            if (handledByFamily === 'skip') continue;
+          }
+        }
+        if (/^mid\.\$/.test(String(stableId)) && /__bubble_\d+$/.test(String(stableId))) {
+          const bubbleFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
+          const bubbleFamilyBase = bubbleFamilyId.length >= 12
+            ? database.prepare(`
+                SELECT id, content, media_url, sender_name, reply_to_text FROM messages
+                WHERE thread_id = ? AND fb_message_id = ?
+                LIMIT 1
+              `).get(threadId, bubbleFamilyId)
+            : null;
+          if (bubbleFamilyBase) {
+            const baseText = String(bubbleFamilyBase.content || '').trim();
+            const incomingText = String(content || '').trim();
+            const baseSender = String(bubbleFamilyBase.sender_name || memberName || '').trim();
+            const isBaseEmptyOrSenderHeader = !baseText
+              || (baseSender && baseText.toLowerCase() === baseSender.toLowerCase());
+            if (baseText === incomingText || isBaseEmptyOrSenderHeader) {
+              if (incomingText && baseText !== incomingText) {
+                database.prepare('UPDATE messages SET content = ? WHERE id = ?').run(content, bubbleFamilyBase.id);
+              }
+              if (mediaUrl && !bubbleFamilyBase.media_url) {
+                database.prepare('UPDATE messages SET media_url = ? WHERE id = ?').run(mediaUrl, bubbleFamilyBase.id);
+              }
+              // H5 (2026-11-09): quote của lá phải chảy vào base trước khi lá bị
+              // skip (cả 2 nhánh skip: trùng content lẫn base shell), nếu không
+              // mất "Trả lời tin nhắn của X" (reproduce "chuển luôn nhe s"
+              // thread ORDER MEDIA).
+              if (replyQuoteText && !String(bubbleFamilyBase.reply_to_text || '').trim()) {
+                database.prepare('UPDATE messages SET reply_to_text = ? WHERE id = ?').run(replyQuoteText, bubbleFamilyBase.id);
+              }
+              result.skippedCount += 1;
+              continue;
+            }
+            // Nếu bubbleFamilyBase đã chứa nội dung tin nhắn thật KHÁC với
+            // incomingText, đây là bong bóng thứ N thật trong cùng article
+            // mid.$X -> giữ nguyên stableId (mid.$X__bubble_N) để không mất tin
+            // (upstream v1.0.26). Lá tự mang quote qua INSERT; downstream cấp
+            // slot __bubble_N trống hoặc trỏ về row trùng text trong family.
+          } else if (bubbleFamilyId.length >= 12 && pendingBubbleMerges.has(bubbleFamilyId)) {
+            const stash = pendingBubbleMerges.get(bubbleFamilyId);
+            if (!stash.content && content) stash.content = content;
+            if (!stash.mediaUrl && mediaUrl) stash.mediaUrl = mediaUrl;
+            if (!stash.replyQuoteText && replyQuoteText) stash.replyQuoteText = replyQuoteText;
+            result.skippedCount += 1;
+            continue;
+          } else if (bubbleFamilyId.length >= 12 && batchBaseIds.has(bubbleFamilyId)) {
+            // Base cùng batch nhưng chưa xử lý xong: hoãn bubble lại, giải
+            // quyết sau vòng lặp khi base đã nằm trong DB (hoặc đã bị guard bỏ).
+            pendingBubbleMerges.set(bubbleFamilyId, {
+              content, mediaUrl, mediaType,
+              senderId,
+              isOutgoing,
+              replyQuoteText,
+              timestampMs: observedTimestampMs,
+              timestampSource: observedTimestampSource,
+              createdAt: observedCreatedAt
+            });
+            continue;
+          } else if (bubbleFamilyId.length >= 12) {
+            // Không có base đâu cả (DB lẫn batch): bubble đầu tiên làm đại
+            // diện dưới id base, đồng thời đánh dấu vào batchBaseIds để các
+            // bubble tiếp theo trong cùng article giữ nguyên __bubble_2, __bubble_3.
+            stableId = bubbleFamilyId;
+            batchBaseIds.add(bubbleFamilyId);
+          }
+        }
         // Otid thuần số + out=0: đối xứng guard WS — otid do client MÌNH sinh
         // khi gửi; khách đến luôn mang <uid>@msgr.N / mid.$. Mid rút gọn của
         // khách đã được ghép về dạng đầy đủ ở trên nên không dính guard này
@@ -647,6 +1065,40 @@ class ConversationRepository {
           if (midOwnerRow && midOwnerRow.thread_id !== threadId) {
             stableId = `${stableId}::${threadId}`;
             existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+          } else if (existing && mediaType === 'text' && !mediaUrl && content) {
+            // Cùng threadId + cùng stableId nhưng nội dung text KHÁC nhau hoàn toàn
+            // (do nhiều bong bóng liên tiếp trong 1 article dùng chung data-message-id):
+            // tách sang slot __bubble_N để không ghi đè mất bong bóng trước đó.
+            const existingText = String(existing.content || '').trim();
+            const newText = String(content || '').trim();
+            const existingSender = String(existing.sender_name || memberName || '').trim();
+            const isExistingSenderHeader = existingSender && existingText.toLowerCase() === existingSender.toLowerCase();
+            if (existingText && newText && existingText !== newText && !isExistingSenderHeader
+              && !/^sidebar_preview_|^pending_/.test(String(stableId))) {
+              const baseFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
+              const likeEsc = baseFamilyId.replace(/[_%]/g, (c) => `\\${c}`);
+              const sameTextInFamily = database.prepare(`
+                SELECT fb_message_id FROM messages
+                WHERE thread_id = ?
+                  AND (fb_message_id = ? OR fb_message_id LIKE ? ESCAPE '\\')
+                  AND TRIM(COALESCE(content, '')) = ?
+                LIMIT 1
+              `).get(threadId, baseFamilyId, `${likeEsc}__bubble_%`, newText);
+              if (sameTextInFamily) {
+                stableId = sameTextInFamily.fb_message_id;
+                existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+              } else {
+                for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
+                  const candidateBubbleId = `${baseFamilyId}__bubble_${bIdx}`;
+                  const slotTaken = database.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateBubbleId);
+                  if (!slotTaken) {
+                    stableId = candidateBubbleId;
+                    existing = null;
+                    break;
+                  }
+                }
+              }
+            }
           }
         }
         let promotedSidebarPreview = false;
@@ -669,22 +1121,92 @@ class ConversationRepository {
             }
           } catch (_) { /* non-fatal: fall through to normal insert path */ }
         }
-        if (!existing && isOutgoing && msg.fb_message_id && String(msg.fb_message_id).startsWith('mid.') && content) {
+        if (!existing && isOutgoing && msg.fb_message_id) {
           try {
-            const pendingCandidate = database.prepare(`
-              SELECT id, fb_message_id, client_message_id FROM messages
-              WHERE thread_id = ? AND is_outgoing = 1
-                AND (fb_message_id LIKE 'pending_%' OR delivery_status = 'pending')
-                AND COALESCE(content, '') = COALESCE(?, '')
-                AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 120000)
-              ORDER BY id DESC LIMIT 1
-            `).get(threadId, content, observedTimestampMs, observedTimestampMs);
-            if (pendingCandidate) {
-              database.prepare(
-                'UPDATE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\') WHERE id = ?'
-              ).run(String(msg.fb_message_id), pendingCandidate.id);
-              stableId = String(msg.fb_message_id);
-              existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+            const cleanedFbId = String(msg.fb_message_id)
+              .replace(/::[^:]+$/, '')
+              .replace(/_media$/, '')
+              .replace(/__bubble_\d+$/, '')
+              .trim();
+            const bareSfMatch = cleanedFbId.match(/^(?:\d+@msgr\.)?(\d{15,21})$/);
+            const bareSf = bareSfMatch ? bareSfMatch[1] : null;
+            if (bareSf) {
+              const sfCandidate = database.prepare(`
+                SELECT id, fb_message_id FROM messages
+                WHERE thread_id = ? AND is_outgoing = 1
+                  AND (fb_message_id = ? OR fb_message_id LIKE '%@msgr.' || ?)
+                ORDER BY id DESC LIMIT 1
+              `).get(threadId, bareSf, bareSf);
+              if (sfCandidate) {
+                if (String(msg.fb_message_id).includes('@msgr.') && !String(sfCandidate.fb_message_id).includes('@msgr.')) {
+                  database.prepare('UPDATE OR IGNORE messages SET fb_message_id = ? WHERE id = ?')
+                    .run(String(msg.fb_message_id), sfCandidate.id);
+                  stableId = String(msg.fb_message_id);
+                } else {
+                  stableId = String(sfCandidate.fb_message_id);
+                }
+                existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+              }
+            }
+            const isCanonicalIncomingId = String(msg.fb_message_id).startsWith('mid.')
+              || String(msg.fb_message_id).includes('@msgr.')
+              || /^\d{15,21}$/.test(String(msg.fb_message_id));
+            if (!existing && isCanonicalIncomingId && !/__bubble_\d+$/.test(String(msg.fb_message_id))) {
+              if (mediaType === 'text' && !mediaUrl && content) {
+                const pendingCandidate = database.prepare(`
+                  SELECT id, fb_message_id, client_message_id FROM messages
+                  WHERE thread_id = ? AND is_outgoing = 1
+                    AND (
+                      fb_message_id LIKE 'pending_%'
+                      OR delivery_status = 'pending'
+                      OR (fb_message_id GLOB '[0-9]*' AND fb_message_id NOT LIKE '%@msgr.%')
+                    )
+                    AND COALESCE(content, '') = COALESCE(?, '')
+                    AND (? <= 0 OR COALESCE(timestamp_ms, 0) <= 0 OR ABS(timestamp_ms - ?) <= 120000)
+                  ORDER BY id DESC LIMIT 1
+                `).get(threadId, content, observedTimestampMs, observedTimestampMs);
+                if (pendingCandidate) {
+                  database.prepare(
+                    'UPDATE OR IGNORE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\') WHERE id = ?'
+                  ).run(String(msg.fb_message_id), pendingCandidate.id);
+                  stableId = String(msg.fb_message_id);
+                  existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+                }
+              } else if (mediaType !== 'text' || mediaUrl) {
+                const mediaCandidate = database.prepare(`
+                  SELECT id, fb_message_id, client_message_id, created_at, timestamp_ms FROM messages
+                  WHERE thread_id = ? AND is_outgoing = 1
+                    AND (attachment_id IS NOT NULL OR client_message_id IS NOT NULL)
+                    AND (
+                      fb_message_id LIKE 'pending_%'
+                      OR delivery_status = 'pending'
+                      OR fb_message_id LIKE '%__bubble_%'
+                      OR (fb_message_id GLOB '[0-9]*' AND fb_message_id NOT LIKE '%@msgr.%')
+                    )
+                    AND (attachment_id IS NOT NULL OR (media_type IS NOT NULL AND media_type != 'text'))
+                    AND datetime(created_at) >= datetime('now', '-180 seconds')
+                  ORDER BY id DESC LIMIT 1
+                `).get(threadId);
+                if (mediaCandidate) {
+                  try {
+                    const OutboundConfirmationService = require('../services/OutboundConfirmationService');
+                    OutboundConfirmationService.confirmObservation({
+                      threadId,
+                      fbMessageId: String(msg.fb_message_id),
+                      isOutgoing: true,
+                      mediaType: mediaType !== 'text' ? mediaType : 'image',
+                      content: content || '',
+                      observedAt: observedTimestampMs || Date.now(),
+                      confirmationSource: 'history_sync'
+                    }, { database });
+                  } catch (_) {}
+                  database.prepare(
+                    'UPDATE OR IGNORE messages SET fb_message_id = ?, delivery_status = COALESCE(NULLIF(delivery_status, \'pending\'), \'sent\'), delivery_error = NULL WHERE id = ?'
+                  ).run(String(msg.fb_message_id), mediaCandidate.id);
+                  stableId = String(msg.fb_message_id);
+                  existing = database.prepare('SELECT content, media_type, media_url, timestamp_ms, timestamp_source, created_at, is_outgoing, sender_role, sequence_order, direction_status, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+                }
+              }
             }
           } catch (_) { /* non-fatal */ }
         }
@@ -753,6 +1275,42 @@ class ConversationRepository {
         let timestampSource = observedTimestampSource;
         let createdAt = observedCreatedAt;
         if (existing) {
+          // Hard guard (soi gương reconcileExistingMessage): quan sát quét
+          // (dom/history/label) không được lật chiều tin ĐÃ confirmed outgoing
+          // - chỉ nguồn payload/WS mới được. Bulk upsert cũ ghi đè is_outgoing
+          // qua CASE excluded nên một lần scan đọc sai là tin mình gửi thành
+          // tin khách (reproduce 2026-11-03: 4 tin 14:05 bị lật out=0 kèm
+          // ts giờ-quét 07:11).
+          const crawlTriesToFlipOutgoing = isHistoryObservation
+            && Number(existing.is_outgoing) === 1
+            && isOutgoing === 0
+            && existing.direction_status === 'confirmed'
+            && directionStatus === 'confirmed';
+          // History quét lại với nhãn hydrate lỗi thời ("do Bạn gửi") không
+          // được lật ngược row INCOMING đã có tên người gửi thật (hoặc đã
+          // được heal gán sender_id='CONTACT') thành OUTGOING qua UPSERT -
+          // chiều ngược của guard hasMatchingOutgoingText phía trên
+          // (reproduce 2026-11-03: heal xong bị crawler đọc sớm lật lại).
+          const guardRow = database.prepare('SELECT sender_id, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+          const namedIncomingFlipBlocked = isHistoryObservation
+            && isOutgoing === 1
+            && Number(existing.is_outgoing) === 0
+            && (
+              (guardRow && guardRow.sender_name && !/^(?:bạn|you)$/i.test(String(guardRow.sender_name).trim()))
+              || String((guardRow && guardRow.sender_id) || '') === 'CONTACT'
+            );
+          let upsertIsOutgoing = isOutgoing;
+          let upsertSenderRole = senderRole;
+          let upsertDirectionStatus = directionStatus;
+          if (crawlTriesToFlipOutgoing) {
+            console.log(`[ConversationRepo] 🛡️ Blocked bulk crawl flip of confirmed outgoing row: ${stableId} (source=${historySource || observedTimestampSource})`);
+            upsertIsOutgoing = 1;
+            upsertSenderRole = 'operator';
+          } else if (namedIncomingFlipBlocked) {
+            upsertIsOutgoing = 0;
+            upsertSenderRole = 'customer';
+            upsertDirectionStatus = 'confirmed';
+          }
           const oldRank = ConversationRepository.getTimestampRank(existing.timestamp_source);
           const newRank = ConversationRepository.getTimestampRank(observedTimestampSource);
           // History sync adds a deterministic millisecond DOM offset to
@@ -764,20 +1322,36 @@ class ConversationRepository {
           const isCanonicalHistoryCorrection = msg.source === 'dom_history_sync'
             && observedTimestampSource === existing.timestamp_source
             && observedTimestampMs !== Number(existing.timestamp_ms || 0);
+          // Giờ-quét không được đè giờ thật của tin cũ: rescan không parse
+          // được giờ label sẽ dán "bây giờ" (Date.now()) khiến tin cũ rơi
+          // xuống cuối thread (reproduce 2026-11-03: 12 row ts cách nhau 1ms
+          // 07:11:08.51x). Ngoại lệ rank 6 (facebook_payload) - giờ từ server
+          // FB là giờ thật.
+          const scanStampLooksBogus = observedTimestampMs > 0
+            && newRank < 6
+            && Number(existing.timestamp_ms || 0) > 0
+            && Date.now() - observedTimestampMs < 120000
+            && Date.now() - Number(existing.timestamp_ms) >= 600000;
+          // Row cuộc gọi: card DOM không có giờ đáng tin - quét lại có thể dập
+          // giờ-quét/nhãn giải nhầm ngày lên row đã lưu. Chỉ rank >= 6 (payload
+          // server FB) được sửa giờ (reproduce 2026-11-09).
+          const existingIsCallRow = String((existing && existing.media_type) || '').toLowerCase() === 'call';
           const shouldUpgradeTimestamp = observedTimestampMs > 0
+            && !scanStampLooksBogus
+            && (!existingIsCallRow || newRank >= 6)
             && (newRank > oldRank || isCanonicalHistoryCorrection);
           if (!shouldUpgradeTimestamp) {
             timestampMs = existing.timestamp_ms || 0;
             timestampSource = existing.timestamp_source || 'unknown';
             createdAt = existing.created_at;
           }
-          const directionChanged = directionStatus === 'confirmed'
-            && (existing.direction_status !== 'confirmed' || existing.is_outgoing !== isOutgoing);
+          const directionChanged = upsertDirectionStatus === 'confirmed'
+            && (existing.direction_status !== 'confirmed' || existing.is_outgoing !== upsertIsOutgoing);
           const timestampChanged = shouldUpgradeTimestamp && (
             timestampMs !== (existing.timestamp_ms || 0) || timestampSource !== existing.timestamp_source
           );
           const sequenceChanged = false;
-          const roleChanged = existing.sender_role !== senderRole;
+          const roleChanged = existing.sender_role !== upsertSenderRole;
           // Backfill tên thành viên cho row cũ: history quét lại giải được
           // member_name (row cũ chưa từng có) phải tính là thay đổi, nếu không
           // nhánh no-change nuốt luôn.
@@ -785,21 +1359,93 @@ class ConversationRepository {
           const mediaChanged = (mediaUrl && existing.media_url !== mediaUrl) || (mediaType !== 'text' && existing.media_type !== mediaType);
           const changed = existing.content !== content || mediaChanged || timestampChanged || directionChanged || sequenceChanged || roleChanged || senderNameChanged;
           if (!changed) {
+            // v1.0.26 (upstream): quote reply đến sau phải được điền cả khi row
+            // không đổi gì khác - nhánh no-change không chạy INSERT/UPSERT nên
+            // ON CONFLICT fill không có cơ hội chạy.
+            if (replyQuoteText) {
+              try {
+                database.prepare("UPDATE messages SET reply_to_text = COALESCE(NULLIF(TRIM(COALESCE(reply_to_text, '')), ''), ?) WHERE fb_message_id = ? AND (reply_to_text IS NULL OR TRIM(reply_to_text) = '')").run(replyQuoteText, stableId);
+              } catch (_) {}
+            }
             if (promotedSidebarPreview) result.updatedIds.push(stableId);
             else result.skippedCount += 1;
+            if (!upsertIsOutgoing && content && !/^sidebar_preview_/.test(stableId)) incomingAbsorbContents.push(content);
             continue;
           }
-          insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
+          insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, upsertIsOutgoing, upsertSenderRole, observedSequence, upsertDirectionStatus, createdAt, replyQuoteText);
           result.updatedIds.push(stableId);
+          if (!upsertIsOutgoing && content && !/^sidebar_preview_/.test(stableId)) incomingAbsorbContents.push(content);
           continue;
         }
-        insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt);
+        insertMsg.run(threadId, stableId, senderId, memberName, content, mediaType, mediaUrl, timestampMs, timestampSource, isOutgoing, senderRole, observedSequence, directionStatus, createdAt, replyQuoteText);
         result.insertedIds.push(stableId);
+        if (!isOutgoing && content && !/^sidebar_preview_/.test(stableId)) incomingAbsorbContents.push(content);
         // Batch có thể mang row ma lật chiều ĐỨNG TRƯỚC base (guard 513 cần
         // base đã tồn tại) - base vừa insert thì dọn sibling __bubble_N.
         try {
           ConversationRepository.collapseFlippedBubbleSiblings(threadId, stableId, content, database);
         } catch (_) { /* sweep là lành hóa, không chặn persist */ }
+      }
+      // Giải quyết bubble đã hoãn: base giờ đã đi qua vòng lặp.
+      for (const [familyId, stash] of pendingBubbleMerges) {
+        const baseRow = database.prepare(
+          'SELECT id, content, media_url, media_type, sender_name, reply_to_text FROM messages WHERE thread_id = ? AND fb_message_id = ? LIMIT 1'
+        ).get(threadId, familyId);
+        if (baseRow) {
+          const baseText = String(baseRow.content || '').trim();
+          const stashText = String(stash.content || '').trim();
+          const baseSenderHdr = String(baseRow.sender_name || '').trim();
+          const isShellBaseRow = !baseText
+            || (baseSenderHdr && baseText.toLowerCase() === baseSenderHdr.toLowerCase());
+          // upstream v1.0.26: base đã có nội dung thật KHÁC stash -> stash là
+          // bong bóng thứ N thật, KHÔNG được đè mất content base - cấp slot
+          // __bubble_N riêng (đồng bộ ngữ nghĩa family guard ở trên).
+          if (stashText && baseText && !isShellBaseRow && baseText !== stashText
+            && baseRow.media_type === 'text' && !baseRow.media_url) {
+            let slotId = null;
+            for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
+              const candidateBubbleId = `${familyId}__bubble_${bIdx}`;
+              if (!database.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateBubbleId)) {
+                slotId = candidateBubbleId;
+                break;
+              }
+            }
+            const ownBubbleId = slotId || `${familyId}__bubble_x${Date.now() % 100000}`;
+            insertMsg.run(threadId, ownBubbleId, stash.senderId, null, stash.content, stash.mediaType || 'text', stash.mediaUrl,
+              stash.timestampMs, stash.timestampSource, stash.isOutgoing,
+              stash.isOutgoing ? 'operator' : 'customer', null, 'confirmed', stash.createdAt, stash.replyQuoteText || null);
+            result.insertedIds.push(ownBubbleId);
+            if (!stash.isOutgoing && stash.content) incomingAbsorbContents.push(stash.content);
+          } else {
+          // F2: base call row không được bơm chrome lá ('Call back') đè nhãn
+          // đã chuẩn hóa - nội dung call row chỉ qua normalizeCallRowContent.
+          if (stash.content && baseRow.media_type !== 'call' && String(baseRow.content || '').trim() !== String(stash.content).trim()) {
+            database.prepare('UPDATE messages SET content = ? WHERE id = ?').run(stash.content, baseRow.id);
+          }
+          if (stash.mediaUrl && !baseRow.media_url) {
+            database.prepare('UPDATE messages SET media_url = ? WHERE id = ?').run(stash.mediaUrl, baseRow.id);
+          }
+          // H5 (2026-11-09): quote của lá hoãn cũng phải chảy vào base đã lưu.
+          if (stash.replyQuoteText && !String(baseRow.reply_to_text || '').trim()) {
+            database.prepare('UPDATE messages SET reply_to_text = ? WHERE id = ?').run(stash.replyQuoteText, baseRow.id);
+          }
+          }
+        } else {
+          // Base bị guard bỏ hoặc không tồn tại: bubble đại diện lên đời base.
+          // 15 tham số đúng thứ tự INSERT - trước đây thiếu sender_name làm
+          // content rơi vào cột sender_name, media_type vào content và thiếu
+          // created_at -> SQLite ném lỗi cả batch khi nhánh này chạy.
+          insertMsg.run(threadId, familyId, stash.senderId, null, stash.content, stash.mediaType || 'text', stash.mediaUrl,
+            stash.timestampMs, stash.timestampSource, stash.isOutgoing,
+            stash.isOutgoing ? 'operator' : 'customer', null, 'confirmed', stash.createdAt, stash.replyQuoteText || null);
+          result.insertedIds.push(familyId);
+          if (!stash.isOutgoing && stash.content) incomingAbsorbContents.push(stash.content);
+        }
+      }
+      // Fix A: row thật chiều VÀO đã nằm trong thread -> preview cùng nội dung
+      // (chuẩn hóa) là bản chiếu mồ côi, dọn trong cùng transaction.
+      if (incomingAbsorbContents.length) {
+        result.absorbedPreviewCount = ConversationRepository.absorbMatchedSidebarPreviews(threadId, incomingAbsorbContents, database);
       }
       return result;
     });
@@ -810,37 +1456,83 @@ class ConversationRepository {
 
   static normalizeMessageSequence(threadId, database = getDefaultDb()) {
     const rows = database.prepare(`
-      SELECT id, fb_message_id, timestamp_ms, created_at, sequence_order
+      SELECT id, fb_message_id, client_message_id, attachment_id, timestamp_ms, created_at, sequence_order
       FROM messages
       WHERE thread_id = ?
     `).all(threadId);
 
-    if (rows.length < 2) return rows.length;
+    if (rows.length === 0) return 0;
 
-    function parseSafeUtcTimestamp(row) {
-      const ms = Number(row?.timestamp_ms || 0);
-      if (Number.isFinite(ms) && ms > 0) return ms;
+    function parseRowCreatedMs(row) {
       if (!row?.created_at) return 0;
       const s = String(row.created_at).trim();
-      if (s.endsWith('Z')) return Date.parse(s) || 0;
+      if (s.endsWith('Z') || s.includes('T')) return Date.parse(s) || 0;
       return Date.parse(s.replace(' ', 'T') + 'Z') || 0;
     }
 
+    // Backfill timestamp_ms từ E2EE Snowflake ID nếu tin nhắn bị thiếu timestamp_ms (= 0)
+    // hoặc bị đóng dấu nhầm bằng giờ quét lại (lệch > 2 giây so với giờ gốc trên server FB).
+    // Ngoại lệ: row do CRM tạo (client_message_id / attachment_id) bị gắn nhầm anchor cũ __bubble_N
+    // không bao giờ được lùi timestamp_ms về ngày hôm qua theo anchor cũ.
+    const updateTsStmt = database.prepare("UPDATE messages SET timestamp_ms = ?, timestamp_source = 'facebook_payload' WHERE id = ?");
+    for (const row of rows) {
+      const createdMs = parseRowCreatedMs(row);
+      const isCrmRowWithBubbleAnchor = Boolean(row.client_message_id || row.attachment_id)
+        && /__bubble_\d+$/.test(String(row.fb_message_id || ''));
+      const sfTs = ConversationRepository.extractSnowflakeTimestampMs(row.fb_message_id);
+      if (isCrmRowWithBubbleAnchor && createdMs > 0 && sfTs > 0 && sfTs < createdMs - 30000) {
+        if (Math.abs(Number(row.timestamp_ms || 0) - createdMs) > 2000) {
+          row.timestamp_ms = createdMs;
+          try { updateTsStmt.run(createdMs, row.id); } catch (_) {}
+        }
+        continue;
+      }
+      if (sfTs > 0) {
+        const curTs = Number(row.timestamp_ms || 0);
+        if (curTs <= 0 || Math.abs(curTs - sfTs) > 2000) {
+          row.timestamp_ms = sfTs;
+          try { updateTsStmt.run(sfTs, row.id); } catch (_) {}
+        }
+      }
+    }
+
+    if (rows.length < 2) return rows.length;
+
+    function parseSafeUtcTimestamp(row) {
+      const createdMs = parseRowCreatedMs(row);
+      const isCrmRowWithBubbleAnchor = Boolean(row?.client_message_id || row?.attachment_id)
+        && /__bubble_\d+$/.test(String(row?.fb_message_id || ''));
+      const sfTs = ConversationRepository.extractSnowflakeTimestampMs(row?.fb_message_id);
+      if (sfTs > 0 && !(isCrmRowWithBubbleAnchor && createdMs > 0 && sfTs < createdMs - 30000)) {
+        return sfTs;
+      }
+      const ms = Number(row?.timestamp_ms || 0);
+      if (Number.isFinite(ms) && ms > 0) return ms;
+      if (Boolean(row?.client_message_id || row?.attachment_id || String(row?.fb_message_id || '').startsWith('sidebar_preview_'))) {
+        return createdMs;
+      }
+      return 0;
+    }
+
     rows.sort((a, b) => {
-      // 6 byte giữa của mid.$ là entropy ngẫu nhiên của Facebook, KHÔNG tăng
-      // dần theo thời gian - so hash trước đây là nguyên nhân chính khiến tin
-      // 23/09 nhảy lên trước tin 22/09. Timestamp là tiêu chí chính.
+      const sfA = ConversationRepository.extractSnowflakeBigInt(a?.fb_message_id);
+      const sfB = ConversationRepository.extractSnowflakeBigInt(b?.fb_message_id);
+      if (sfA !== null && sfB !== null) {
+        if (sfA !== sfB) return sfA < sfB ? -1 : 1;
+        const occA = ConversationRepository.bubbleOccurrenceId(a?.fb_message_id);
+        const occB = ConversationRepository.bubbleOccurrenceId(b?.fb_message_id);
+        if (occA !== occB) return occA - occB;
+      }
+
       const tsA = parseSafeUtcTimestamp(a);
       const tsB = parseSafeUtcTimestamp(b);
+      if ((sfA !== null || sfB !== null) && tsA > 0 && tsB > 0 && tsA !== tsB) {
+        return tsA - tsB;
+      }
       const minuteA = tsA > 0 ? Math.floor(tsA / 60000) : 0;
       const minuteB = tsB > 0 ? Math.floor(tsB / 60000) : 0;
       if (minuteA > 0 && minuteB > 0 && minuteA !== minuteB) {
         return minuteA - minuteB;
-      }
-      // Tin không còn thời gian nào hợp lệ (cả timestamp_ms lẫn created_at)
-      // đứng sau mọi tin đã biết thời gian, giữ thứ tự cũ trong nhóm của nó.
-      if ((minuteA > 0) !== (minuteB > 0)) {
-        return minuteA > 0 ? -1 : 1;
       }
 
       const orderA = a.sequence_order !== null && a.sequence_order !== undefined ? Number(a.sequence_order) : a.id;
@@ -915,6 +1607,7 @@ class ConversationRepository {
   // one test's pending candidate can't leak into another's assertions.
   static _resetDirectionFlipTracking() {
     directionFlipCandidates = new Map();
+    geometryFlipLedger = new Map();
   }
 
   // Reconciles an already-existing message row with a freshly re-scanned
@@ -924,12 +1617,22 @@ class ConversationRepository {
   // is_outgoing when it disagrees with what's stored - but only once that
   // disagreement is confirmed twice (see shouldCommitDirectionFlip). Never
   // inserts a second row and never throws on repeated identical re-scans.
-  static reconcileExistingMessage(stableMessageId, { source, isOutgoing, directionStatus, direction_status, directionConfidence, direction_confidence, tsMs, tsSource, createdAt, content = null } = {}, database = getDefaultDb()) {
-    const existingMsg = database.prepare('SELECT timestamp_ms, timestamp_source, is_outgoing, direction_status FROM messages WHERE fb_message_id = ?').get(stableMessageId);
+  static reconcileExistingMessage(stableMessageId, { source, isOutgoing, directionStatus, direction_status, directionConfidence, direction_confidence, directionEvidence = null, tsMs, tsSource, createdAt, content = null, senderName = null } = {}, database = getDefaultDb()) {
+    const existingMsg = database.prepare('SELECT timestamp_ms, timestamp_source, is_outgoing, direction_status, sender_name, sender_id, client_message_id, sent_by_agent, delivery_status, media_type FROM messages WHERE fb_message_id = ?').get(stableMessageId);
     if (!existingMsg) return { updated: false, reason: 'not_found' };
 
+    // Card cuộc gọi không mang bằng chứng chiều/giờ đáng tin trong DOM: quan
+    // sát quét lại đọc từ node thoái hóa (content "👍", không nhãn giờ) vừa lật
+    // chiều cuộc gọi đi thành của khách vừa dập giờ-quét lên row (reproduce
+    // 2026-11-09: 2 row call thread 1411372724455599 dính ts 15:09 giờ-quét +
+    // lật out 1->0). Giờ chỉ nhận rank >= 6 (facebook_payload - server FB),
+    // chiều không bao giờ sửa.
+    const isCallRow = String(existingMsg.media_type || '').toLowerCase() === 'call';
+
     const shouldUpdateTimestamp = Boolean(
-      tsMs && tsMs > 0 && ConversationRepository.shouldUpgradeTimestamp(
+      tsMs && tsMs > 0
+      && (!isCallRow || ConversationRepository.getTimestampRank(tsSource) >= 6)
+      && ConversationRepository.shouldUpgradeTimestamp(
         existingMsg.timestamp_source,
         tsSource,
         existingMsg.timestamp_ms,
@@ -965,6 +1668,27 @@ class ConversationRepository {
       };
     }
 
+    // Row cuộc gọi bị khóa reconcile: mọi nhánh sửa chiều phía dưới (geometry
+    // quyết đoán, 2-strike, lật theo tên) đều bị bỏ qua.
+    if (isCallRow) {
+      const wouldFlipDirection = isDirectionKnown
+        && Number(existingMsg.is_outgoing) !== normalizedOutgoing;
+      if (!shouldUpdateTimestamp && !wouldFlipDirection) return { updated: false, reason: 'call_row_locked' };
+      if (shouldUpdateTimestamp) {
+        database.prepare('UPDATE messages SET timestamp_ms = ?, timestamp_source = ?, created_at = ? WHERE fb_message_id = ?')
+          .run(tsMs, tsSource, createdAt, stableMessageId);
+      }
+      console.log(`[ConversationRepo] 🛡️ Bỏ qua sửa row cuộc gọi theo DOM (chiều/giờ card không đáng tin): ${stableMessageId}`);
+      return {
+        updated: shouldUpdateTimestamp,
+        timestampUpdated: shouldUpdateTimestamp,
+        directionUpdated: false,
+        previousTimestampSource: existingMsg.timestamp_source,
+        previousIsOutgoing: existingMsg.is_outgoing,
+        previousDirectionStatus: existingMsg.direction_status
+      };
+    }
+
     const isPageObservation = source === 'page_dom_observer';
     // Personal Messenger crawler (dom_observer) and history sync (dom_history_sync)
     // can also produce noisy direction readings on restart. Apply the same 2-strike
@@ -973,15 +1697,44 @@ class ConversationRepository {
     const existingIsPending = existingMsg.direction_status === 'pending';
     const shouldPromotePending = isPageObservation && existingIsPending;
 
+    // Row không dấu vết tin gửi từ CRM (không client_message_id, không
+    // sent_by_agent, không pending): quan sát geometry quyết đoán (bong bóng
+    // rõ một bên, direction_evidence='geometry') được sửa chiều NGAY, cả hai
+    // hướng. Nhãn tên bị 2 acc trùng tên làm mơ hồ — geometry là bằng chứng
+    // duy nhất tin được; không có lối này lần đọc sai trước bị khóa vĩnh viễn
+    // vì mọi reading đúng bị guard dưới chặn (reproduce 2026-11-03 12:09).
+    const existingRowHasNoCrmTrace = (existingMsg.client_message_id === null || existingMsg.client_message_id === '')
+      && Number(existingMsg.sent_by_agent || 0) === 0
+      && (existingMsg.delivery_status === null
+        || !['pending', 'sending'].includes(String(existingMsg.delivery_status)));
+    const isDecisiveGeometryObservation = isCrawlObservation
+      && (directionEvidence === 'geometry' || (normalizedOutgoing === 0 && (directionEvidence === 'avatar' || directionEvidence === 'label_name')))
+      && existingRowHasNoCrmTrace
+      && Number(existingMsg.is_outgoing) !== normalizedOutgoing;
+
     // Hard guard: if the stored row is already confirmed outgoing (is_outgoing=1),
     // a crawl/history source alone must never flip it to incoming. Only an
     // explicit, authoritative source (e.g. facebook_payload, network confirmation)
     // may override a confirmed outgoing row.
     const crawlTriesToFlipOutgoing = isCrawlObservation
+      && !isDecisiveGeometryObservation
       && Number(existingMsg.is_outgoing) === 1
       && normalizedOutgoing === 0
       && existingMsg.direction_status === 'confirmed';
     if (crawlTriesToFlipOutgoing) {
+      // NGOẠI LỆ đối xứng với guard "named incoming" bên dưới: observation
+      // mang TÊN người gửi giải được từ nhãn Messenger ("Message sent 12:10
+      // PM by <Tên>:") là bằng chứng hướng đáng tin — được lật row outgoing
+      // đã ghi sai do đoán hình học (reproduce 2026-11-03 12:10: tin khách
+      // lật thành outgoing vì regex label EN không khớp, geometry cửa sổ ẩn
+      // đoán sai, mọi reading đúng sau đó bị guard này chặn vĩnh viễn).
+      const hasNamedSenderEvidence = Boolean(senderName)
+        && !/^(?:bạn|you|khách hàng|customer)$/i.test(String(senderName).trim());
+      if (hasNamedSenderEvidence) {
+        database.prepare("UPDATE messages SET is_outgoing = 0, sender_name = ?, sender_role = 'customer' WHERE fb_message_id = ?").run(String(senderName).trim(), stableMessageId);
+        console.log(`[ConversationRepo] 🔁 Lật chiều theo nhãn có tên: ${stableMessageId} -> incoming (${senderName})`);
+        return { updated: true, reason: 'label_evidence_flip' };
+      }
       // Record as a candidate but do NOT commit under any circumstance.
       // This prevents a consistently-wrong geometry reading on a wide video
       // from ever flipping our own sent media to incoming.
@@ -990,8 +1743,33 @@ class ConversationRepository {
       if (!shouldUpdateTimestamp) return { updated: false, reason: 'crawl_blocked_outgoing_flip' };
     }
 
-    const shouldUpdateDirection = !crawlTriesToFlipOutgoing && isCrawlObservation && (
-      shouldPromotePending
+    // Chiều ngược: quét lại với nhãn hydrate lỗi thời ("do Bạn gửi") không
+    // được lật row INCOMING đã có tên người gửi thật thành OUTGOING.
+    const crawlFlipsNamedIncoming = isCrawlObservation
+      && Number(existingMsg.is_outgoing) === 0
+      && normalizedOutgoing === 1
+      && (existingMsg.sender_name
+        && !/^(?:bạn|you|khách hàng|customer|người dùng facebook|facebook user)$/i.test(String(existingMsg.sender_name).trim()));
+    if (crawlFlipsNamedIncoming) {
+      console.log(`[ConversationRepo] 🛡️ Blocked crawl flip of named incoming row: ${stableMessageId} (source=${source})`);
+      directionFlipCandidates.delete(stableMessageId);
+      if (!shouldUpdateTimestamp) return { updated: false, reason: 'crawl_blocked_named_incoming_flip' };
+    }
+
+    // Lật geometry ngược chiều trong cooldown = artifact hydrate, chặn SẠCH
+    // (không rơi xuống 2-strike crawl — phép đo xấu sẽ gom đủ 2 strike sau
+    // cooldown nếu nó là thật; trong cửa sổ thì không được thắng).
+    const geometryFlipBlockedByCooldown = isDecisiveGeometryObservation
+      && Number(existingMsg.is_outgoing) !== normalizedOutgoing
+      && !geometryFlipAllowed(stableMessageId, normalizedOutgoing);
+    if (geometryFlipBlockedByCooldown) {
+      console.log(`[ConversationRepo] ⏳ Chặn lật geometry ngược chiều trong cooldown: ${stableMessageId} -> ${normalizedOutgoing === 1 ? 'outgoing' : 'incoming'}`);
+    }
+
+    const shouldUpdateDirection = isCrawlObservation && !geometryFlipBlockedByCooldown
+      && !crawlTriesToFlipOutgoing && !crawlFlipsNamedIncoming && (
+      isDecisiveGeometryObservation
+      || shouldPromotePending
       || shouldCommitDirectionFlip(stableMessageId, existingMsg.is_outgoing, normalizedOutgoing)
     );
 
@@ -1018,6 +1796,22 @@ class ConversationRepository {
       stableMessageId
     );
 
+    if (shouldUpdateDirection && isDecisiveGeometryObservation) {
+      rememberGeometryFlip(stableMessageId, normalizedOutgoing);
+      // Lật chiều kèm vai người gửi: tin khách cần sender CONTACT, tin đi
+      // cần sender account — không cập nhật kèm thì UI lệ vai dù is_outgoing đúng.
+      database.prepare(`
+        UPDATE messages
+        SET sender_role = ?,
+            sender_id = CASE WHEN ? = 0 THEN 'CONTACT'
+                        ELSE COALESCE((SELECT account_id FROM threads
+                          WHERE threads.id = messages.thread_id), sender_id) END,
+            sender_name = CASE WHEN ? = 0 THEN NULL ELSE sender_name END
+        WHERE fb_message_id = ?
+      `).run(normalizedOutgoing === 1 ? 'operator' : 'customer', normalizedOutgoing, normalizedOutgoing, stableMessageId);
+      console.log(`[ConversationRepo] 🔁 Sửa chiều theo geometry quyết đoán: ${stableMessageId} -> ${normalizedOutgoing === 1 ? 'outgoing' : 'incoming'}`);
+    }
+
     return {
       updated: true,
       timestampUpdated: shouldUpdateTimestamp,
@@ -1042,6 +1836,12 @@ class ConversationRepository {
   static shouldUpgradeTimestamp(oldSource, newSource, oldTs = 0, newTs = 0) {
     const oldRank = ConversationRepository.getTimestampRank(oldSource);
     const newRank = ConversationRepository.getTimestampRank(newSource);
+    // Stamp giờ-quét: ts mới ≈ "bây giờ" theo máy cào trong khi tin đã có giờ
+    // cũ hơn hẳn (>= 10 phút) -> cấm nâng cấp, giữ giờ thật đã lưu. Ngoại lệ
+    // rank 6 (facebook_payload/facebook_timestamp) - giờ từ server FB là giờ thật.
+    if (newRank < 6 && newTs > 0 && oldTs > 0
+      && Date.now() - Number(newTs) < 120000
+      && Date.now() - Number(oldTs) >= 600000) return false;
     if (newRank > oldRank) return true;
     if (newRank < oldRank) return false;
     // When ranks are identical:
@@ -1400,7 +2200,7 @@ class ConversationRepository {
           ELSE messages.content
         END,
         media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
-        media_url = COALESCE(excluded.media_url, messages.media_url),
+        media_url = CASE WHEN messages.attachment_id IS NOT NULL AND messages.media_url IS NOT NULL THEN messages.media_url ELSE COALESCE(excluded.media_url, messages.media_url) END,
         timestamp_ms = CASE WHEN ? = 1 THEN excluded.timestamp_ms ELSE messages.timestamp_ms END,
         timestamp_source = CASE WHEN ? = 1 THEN excluded.timestamp_source ELSE messages.timestamp_source END,
         is_outgoing = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.is_outgoing ELSE messages.is_outgoing END,

@@ -301,6 +301,31 @@ Hệ thống UI áp dụng 2 Theme chính thức dựa trên semantic CSS variab
 - **Extension Status Indicator per Account:** Backend bổ sung trạng thái kết nối live theo account: trường `is_extension_connected` trong `/api/accounts` hoặc bắn Socket event `EXTENSION_CONNECTION_CHANGED`.
 - **Định danh `client_message_id` & `server.js` WebSocket:** Thêm `client_message_id` khi Frontend emit `SEND_MESSAGE`. Backend forward ID này qua Extension. Bổ sung case `SEND_MESSAGE_RESULT` trong WebSocket handler của `server.js` để map `client_message_id` và phát `MESSAGE_SENT` / `MESSAGE_SEND_FAILED`.
 
+---
+
+## 6. KẾ HOẠCH SỬA LỖI ĐỒNG BỘ HỘI THOẠI CÁ NHÂN & CHROME RÁC KHI MỞ APP
+
+### 6.1. Sửa lỗi Đồng bộ Hội thoại User (`personal_messenger`)
+- **`src/extension/background.js`:**
+  - Sửa `waitForPendingSetupCompletion`: Chỉ kiểm tra dialog khôi phục mã PIN (`recoveryDialogOpen`) thay vì bắt buộc phải có composer đang mở (`MESSENGER_COMPOSER_NOT_READY`), giúp tài khoản mới đăng nhập ở `/messages` hoàn tất đăng ký ngay.
+  - Sửa `handleSync100Threads`:
+    - Bổ sung fallback `getFacebookTab(account_id) || ensureRoleMessengerTab(account_id, 'chat')` khi quét `realtime`.
+    - Bỏ vòng lặp ép điều hướng về `/messages` gốc khi URL đang ở `/messages/t/...` hoặc `/messages/e2ee/t/...`; chỉ điều hướng về `/messages` khi tab chưa ở `/messages` hoặc đang kẹt ở `/messages/requests` / `/messages/spam` (giống chuẩn `CRM_FB_V1`).
+    - Đưa `inboxTarget` (`INBOX`) lên đầu mảng `scrapeTargets` trước `requestsTab` (`MESSAGE_REQUEST_POSSIBLE` / `MESSAGE_REQUEST_SPAM`) để hội thoại chính đổ về UI ngay lập tức.
+- **`src/server/server.js` & `src/server/services/InboxSyncScheduler.js`:**
+  - Khi nhận `REGISTER_ACCOUNT`, không bắn `SET_SIDEBAR_SYNC_WINDOW: { enabled: false, reason: 'register_idle' }` làm hủy tiến trình quét và đóng tab discovery.
+  - Tự động kích hoạt cửa sổ đồng bộ ban đầu (`InboxSyncScheduler.startSyncWindow(account_id, 120000)`) khi tài khoản kết nối hoặc hoàn tất thêm mới (`scheduleNewAccountBootstrapSync`).
+  - Giữ `scan_mode: 'full'` cho sự kiện `register` và `new_account_bootstrap`.
+
+### 6.2. Sửa lỗi Chrome Rác Tự Mở khi Khởi động App & Xung đột Migration DB
+- **`src/server/database/db.js`:** Đổi version của migration `comment_lead_thread_after_send_only` từ `20261014001` (trùng với `add_messages_delivery_channel`) sang `20261014003`.
+- **`src/server/services/ProcessManager.js`:**
+  - Export `resolveAccountProfileDir` và bổ sung `hasValidFacebookProfile(profileDir)` kiểm tra sự tồn tại của file SQLite `Cookies` trong profile.
+  - Cập nhật `hideChromeWindowFromScreen` kết hợp `WS_EX_TOOLWINDOW` và tọa độ `-32000, -32000` để vừa ẩn khỏi màn hình/taskbar vừa duy trì khả năng render DOM của Chromium.
+- **`src/server/server.js`:**
+  - Trong `startServer()`, dọn dẹp các tài khoản mồ côi (`owner_user_id IS NULL` và không có profile hợp lệ), chuẩn hóa `allowedProfileDirs` qua `processManager.resolveAccountProfileDir`, và tắt việc tự động mở Chrome hàng loạt khi khởi động app (mặc định chỉ mở khi người dùng bấm "Kết nối", hoặc chỉ cho phép qua biến môi trường `FB_CRM_AUTO_RECONNECT_ON_START === '1'` với điều kiện tài khoản `ACTIVE` và có profile hợp lệ).
+
+
 
 
 

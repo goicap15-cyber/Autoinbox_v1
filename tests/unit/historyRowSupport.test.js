@@ -35,7 +35,10 @@ test('personal Messenger keeps icon-only likes and semantic-only videos', () => 
   assert.match(content, /const semanticVideo = Array\.from/);
   assert.match(background, /rowEmojiContent && \(leafBubbles\.length === 0 \|\| hasOnlyClockFragments\)/);
   assert.match(background, /videoElement \|\| semanticVideoElement/);
-  assert.match(background, /mediaElement \|\| mediaAnchor \|\| semanticVideoElement \|\| row/);
+  // D2 (2026-10-30): đo thẳng media element, không bao giờ đo row wrapper
+  // (100% width -> mọi media bị đọc thành outgoing).
+  assert.match(background, /mediaElement \|\| mediaAnchor \|\| semanticVideoElement \|\| null/);
+  assert.doesNotMatch(background, /semanticVideoElement \|\| row\)/);
 });
 
 test('personal Messenger treats glued minute suffixes as timestamp chrome', () => {
@@ -101,8 +104,18 @@ test('new role=article label matching contact_name -> incoming', () => {
   assert.equal(r.senderName, 'Người dùng Facebook');
 });
 
-test('new role=article label NOT matching contact_name -> outgoing (exclusion inference)', () => {
+test('new role=article label fuzzy-subset of contact_name -> incoming (merge 04/11: nickname "Khang" ⊂ "Lê Văn Khang...")', () => {
   const r = resolveDirectionFromLabel('Lúc 14:38, Người dùng Facebook: Em chào chị...', 'Người dùng Facebook thật khác');
+  assert.equal(r.matched, true);
+  // Fuzzy ⊂ contact của bản merge 04/11: tên trên nhãn là biến thể/nickname
+  // của contact -> tin khách (reproduce 2026-11-03: "Khang" ⊂ contact, exact
+  // hụt nickname rồi rơi nhánh "must be us" bóp tin khách thành tin đi).
+  assert.equal(r.isOutgoing, false);
+  assert.equal(r.senderName, 'Người dùng Facebook');
+});
+
+test('new role=article label totally different from contact_name -> outgoing (exclusion inference kept)', () => {
+  const r = resolveDirectionFromLabel('Lúc 14:38, Trần Văn B: Em chào chị...', 'Nguyễn Trường');
   assert.equal(r.matched, true);
   assert.equal(r.isOutgoing, true);
   assert.equal(r.senderName, 'Bạn');

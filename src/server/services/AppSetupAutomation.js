@@ -8,23 +8,37 @@
 //    mật khẩu → điền vào form xác nhận và bấm "Gửi". Mật khẩu KHÔNG lưu lại.
 // Mọi nút bấm bắt theo text đa ngôn ngữ + role, không dùng class tự sinh của FB.
 const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
-const { resolveChromePath } = require('../../../chrome-bundling/resolveChromePath');
-const { resolveBinRoot } = require('../utils/appResourceRoot');
+const childProcess = require('child_process');
+const { execFile, spawn, spawnSync } = childProcess;
+
+// Ghi đè tạm thời child_process.spawn khi gọi puppeteer.launch() vì @puppeteer/browsers
+// mặc định truyền windowsHide: true trên Windows làm cửa sổ Chrome bị ẩn hoàn toàn (SW_HIDE)!
+async function launchWithVisibleSpawn(fn) {
+  const origSpawn = childProcess.spawn;
+  childProcess.spawn = function visibleChromeSpawn(cmd, spawnArgs, opts) {
+    if (opts && typeof opts === 'object' && /chrome/i.test(String(cmd || ''))) {
+      opts = { ...opts, windowsHide: false };
+    }
+    return origSpawn.call(this, cmd, spawnArgs, opts);
+  };
+  try {
+    return await fn();
+  } finally {
+    childProcess.spawn = origSpawn;
+  }
+}
+const { resolveChromePath, findSystemChromePath } = require('../../../chrome-bundling/resolveChromePath');
+const { resolveBinRoot, loadPuppeteer } = require('../utils/appResourceRoot');
+const { APP_DATA_ROOT } = require('../utils/appDataRoot');
 // Bộ quét Fanpage (UMD — chạy được cả trong Node): bóc JSON Comet từ HTML facebook.com/pages
 const FbPageDiscovery = require('../../extension/pageDiscovery');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-// puppeteer-core v25 là ESM thuần — nạp qua dynamic import (cùng cách
-// ProcessManager đã dùng, chạy được cả trong app.asar đóng gói).
-// puppeteer-extra/stealth KHÔNG dùng được với puppeteer-core ESM này.
-let puppeteerPromise = null;
 function getPuppeteer() {
-  if (!puppeteerPromise) {
-    puppeteerPromise = import('puppeteer-core').then((m) => m.default || m);
-  }
-  return puppeteerPromise;
+  return loadPuppeteer();
 }
 
 // ── Deps server.js bơm vào qua configurePageSetupAutomation() ──
@@ -37,6 +51,7 @@ function getPuppeteer() {
 // - dataDir                   : thư mục lưu screenshot debug
 const DEPS = {
   getCookies: async () => [],
+  saveCookies: () => {},
   getOrCreateVerifyToken: () => '',
   recordRun: () => {},
   upsertPages: () => {},
@@ -63,25 +78,337 @@ function configurePageSetupAutomation(deps = {}) {
 
 // Chrome thật (headful) cho tự động hóa: ưu tiên Chrome bundled của dự án,
 // fallback Chrome cài sẵn trên máy — giống đúng cách ProcessManager chạy Chrome.
-async function launchAutomationChrome() {
-  const args = ['--no-sandbox', '--lang=vi-VN', '--window-size=1200,860'];
-  const base = { headless: false, args, defaultViewport: null };
-  let exe = null;
+function cleanupOldAutomationProfiles() {
   try {
-    exe = resolveChromePath({ repoRoot: resolveBinRoot() });
-  } catch (_) { /* bỏ qua, dùng fallback dưới */ }
-  const candidates = [
-    ...(exe ? [{ ...base, executablePath: exe }] : []),
-    base,
-    { ...base, channel: 'chrome' },
-    { ...base, executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' },
-  ];
-  const puppeteer = await getPuppeteer();
-  let lastErr = null;
-  for (const opt of candidates) {
-    try { return await puppeteer.launch(opt); } catch (e) { lastErr = e; }
+    const profilesRoot = path.join(APP_DATA_ROOT, 'profiles');
+    if (!fs.existsSync(profilesRoot)) return;
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const entry of fs.readdirSync(profilesRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('page_auto_')) continue;
+      const full = path.join(profilesRoot, entry.name);
+      try {
+        const st = fs.statSync(full);
+        if (st.mtimeMs < cutoff) fs.rmSync(full, { recursive: true, force: true });
+      } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+async function spawnVisibleChromeAndConnect(puppeteer, exePath, baseArgs) {
+  const profilesRoot = path.join(APP_DATA_ROOT, 'profiles');
+  fs.mkdirSync(profilesRoot, { recursive: true });
+  const profileDir = path.join(profilesRoot, `page_auto_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
+  fs.mkdirSync(profileDir, { recursive: true });
+
+  const cleanEnv = {
+    ...process.env,
+    HTTP_PROXY: '',
+    HTTPS_PROXY: '',
+    ALL_PROXY: '',
+    http_proxy: '',
+    https_proxy: '',
+    all_proxy: '',
+    NO_PROXY: '127.0.0.1,localhost',
+    no_proxy: '127.0.0.1,localhost',
+  };
+
+  const child = spawn(exePath, [
+    ...baseArgs,
+    `--user-data-dir=${path.resolve(profileDir)}`,
+    '--remote-debugging-port=0',
+    'about:blank',
+  ], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: false,
+    env: cleanEnv,
+  });
+
+  let spawnError = null;
+  child.once('error', (e) => { spawnError = e; });
+
+  const portFile = path.join(profileDir, 'DevToolsActivePort');
+  let wsEndpoint = null;
+  const deadline = Date.now() + 14000;
+  while (Date.now() < deadline) {
+    if (spawnError) throw spawnError;
+    if (fs.existsSync(portFile)) {
+      try {
+        const lines = fs.readFileSync(portFile, 'utf8').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+        if (lines.length >= 2 && Number(lines[0]) > 0) {
+          wsEndpoint = `ws://127.0.0.1:${lines[0]}${lines[1]}`;
+          break;
+        }
+      } catch (_) {}
+    }
+    await new Promise((r) => setTimeout(r, 120));
   }
-  throw lastErr || new Error('Không khởi động được Chrome để tự động hóa.');
+
+  if (!wsEndpoint) {
+    try {
+      if (child.pid && process.platform === 'win32') {
+        spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+      }
+    } catch (_) {}
+    try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch (_) {}
+    throw new Error(`Chrome không tạo được cổng DevToolsActivePort (exe: ${exePath})`);
+  }
+
+  const browser = await puppeteer.connect({
+    browserWSEndpoint: wsEndpoint,
+    defaultViewport: null,
+  });
+
+  try { child.unref(); } catch (_) {}
+  browser._spawnedChild = child;
+  browser._autoProfileDir = profileDir;
+  browser.process = () => child;
+  const origClose = browser.close.bind(browser);
+  browser.close = async () => {
+    try { await origClose(); } catch (_) {}
+    await new Promise((r) => setTimeout(r, 250));
+    if (child.pid && process.platform === 'win32') {
+      try {
+        process.kill(child.pid, 0);
+        spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+      } catch (_) {}
+    }
+    setTimeout(() => {
+      try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch (_) {}
+    }, 600);
+  };
+
+  if (child.pid) {
+    setTimeout(() => showAutomationWindows(child.pid), 350);
+    setTimeout(() => showAutomationWindows(child.pid), 1200);
+  }
+  return browser;
+}
+
+async function launchAutomationChrome() {
+  cleanupOldAutomationProfiles();
+  const args = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--lang=vi-VN',
+    '--window-position=80,50',
+    '--window-size=1240,880',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion',
+    '--hide-crash-restore-bubble',
+    '--disable-session-crashed-bubble',
+    '--no-first-run',
+    '--no-default-browser-check',
+  ];
+
+  const puppeteer = await getPuppeteer();
+  const binRoot = resolveBinRoot();
+  const legacyBin = path.join(binRoot, 'bin', 'chrome-win', 'chrome.exe');
+  let bundledExe = null;
+  try {
+    bundledExe = resolveChromePath({ repoRoot: binRoot, legacyBinChromePath: legacyBin, preferSystemChrome: false });
+  } catch (_) {}
+  const sysExe = findSystemChromePath();
+
+  const exeList = [];
+  if (bundledExe && fs.existsSync(bundledExe)) exeList.push(bundledExe);
+  if (sysExe && fs.existsSync(sysExe) && !exeList.includes(sysExe)) exeList.push(sysExe);
+
+  const errors = [];
+
+  // 1) Ưu tiên số 1: puppeteer.launch với pipe: true + ép windowsHide: false (qua launchWithVisibleSpawn).
+  //    Dùng đường ống nhân hệ điều hành (anonymous pipe) nên KHÔNG mở cổng TCP 127.0.0.1,
+  //    miễn nhiễm 100% với Proxifier / VPN / Firewall trên máy khách VÀ mở cửa sổ Chrome nổi ngay lập tức!
+  for (const exe of exeList) {
+    const pipeProfile = path.join(APP_DATA_ROOT, 'profiles', `page_auto_pipe_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+    try {
+      fs.mkdirSync(pipeProfile, { recursive: true });
+      const browser = await launchWithVisibleSpawn(() => puppeteer.launch({
+        executablePath: exe,
+        headless: false,
+        pipe: true,
+        defaultViewport: null,
+        ignoreDefaultArgs: ['--enable-automation'],
+        userDataDir: pipeProfile,
+        args,
+      }));
+      const origClose = browser.close.bind(browser);
+      browser.close = async () => {
+        try { await origClose(); } catch (_) {}
+        setTimeout(() => {
+          try { fs.rmSync(pipeProfile, { recursive: true, force: true }); } catch (_) {}
+        }, 800);
+      };
+      const pid = browser.process?.()?.pid;
+      if (pid) {
+        setTimeout(() => showAutomationWindows(pid), 400);
+        setTimeout(() => showAutomationWindows(pid), 1400);
+        setTimeout(() => showAutomationWindows(pid), 2800);
+      }
+      DEPS.log(`Đã mở Chrome tự động hóa (Visible Pipe) thành công: ${exe}`);
+      return browser;
+    } catch (e) {
+      errors.push(`VisiblePipe(${path.basename(exe)}): ${e?.message || e}`);
+      try { fs.rmSync(pipeProfile, { recursive: true, force: true }); } catch (_) {}
+    }
+  }
+
+  // 2) Dự phòng số 2: mở trực tiếp qua spawn (windowsHide: false) + kết nối DevToolsActivePort
+  for (const exe of exeList) {
+    try {
+      const browser = await spawnVisibleChromeAndConnect(puppeteer, exe, args);
+      DEPS.log(`Đã mở Chrome tự động hóa (Direct Spawn) thành công: ${exe}`);
+      return browser;
+    } catch (e) {
+      errors.push(`DirectSpawn(${path.basename(exe)}): ${e?.message || e}`);
+    }
+  }
+
+  // 3) Dự phòng số 3: puppeteer.launch với pipe: false + ép windowsHide: false
+  const launchCandidates = [];
+  for (const exe of exeList) {
+    launchCandidates.push({ executablePath: exe, pipe: false });
+  }
+  launchCandidates.push({ channel: 'chrome', pipe: true });
+
+  for (const cand of launchCandidates) {
+    const fallbackProfile = path.join(APP_DATA_ROOT, 'profiles', `page_auto_pup_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+    try {
+      fs.mkdirSync(fallbackProfile, { recursive: true });
+      const browser = await launchWithVisibleSpawn(() => puppeteer.launch({
+        headless: false,
+        defaultViewport: null,
+        ignoreDefaultArgs: ['--enable-automation'],
+        userDataDir: fallbackProfile,
+        args,
+        ...cand,
+      }));
+      const origClose = browser.close.bind(browser);
+      browser.close = async () => {
+        try { await origClose(); } catch (_) {}
+        setTimeout(() => {
+          try { fs.rmSync(fallbackProfile, { recursive: true, force: true }); } catch (_) {}
+        }, 800);
+      };
+      const pid = browser.process?.()?.pid;
+      if (pid) {
+        setTimeout(() => showAutomationWindows(pid), 400);
+        setTimeout(() => showAutomationWindows(pid), 1400);
+      }
+      return browser;
+    } catch (e) {
+      errors.push(`PuppeteerLaunch: ${e?.message || e}`);
+      try { fs.rmSync(fallbackProfile, { recursive: true, force: true }); } catch (_) {}
+    }
+  }
+
+  throw new Error('Không khởi động được Chrome tự động hóa: ' + (errors.join(' | ') || 'Không tìm thấy Chrome'));
+}
+
+// Chrome automation "chạy ngầm": ẩn cửa sổ bằng SW_HIDE ngay sau khi launch —
+// process + CDP vẫn sống nên click/đọc DOM hoạt động bình thường (cùng cơ chế
+// toggle OFF Chrome CRM của ProcessManager). Cửa sổ Chrome được tạo vài trăm
+// ms sau process nên bấm hide 2 lượt; nếu user đã bấm "Hiện Chrome" trong
+// modal thì bỏ qua các lượt còn lại.
+const userShownAutomationPids = new Set();
+
+function hideAutomationWindows(pid) {
+  if (process.platform !== 'win32' || !pid) return;
+  const psScript = `
+Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public class AutoHideWin {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int n);
+}' -ErrorAction SilentlyContinue
+$targetPids = @(${pid || 0})
+$cb = [AutoHideWin+EnumProc]{
+  param($h, $l)
+  $procId = [uint32]0
+  [void][AutoHideWin]::GetWindowThreadProcessId($h, [ref]$procId)
+  if ($targetPids -contains $procId) {
+    $sbC = New-Object System.Text.StringBuilder 128
+    [void][AutoHideWin]::GetClassName($h, $sbC, 128)
+    if ($sbC.ToString().StartsWith('Chrome_WidgetWin')) {
+      [void][AutoHideWin]::ShowWindowAsync($h, 0)
+    }
+  }
+  return $true
+}
+[void][AutoHideWin]::EnumWindows($cb, [IntPtr]::Zero)`;
+  const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => {});
+}
+
+function showAutomationWindows(pid) {
+  if (process.platform !== 'win32' || !pid) return;
+  const psScript = `
+Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public class AutoShowWin {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lp);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int m);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+}' -ErrorAction SilentlyContinue
+$targetPids = @(${pid || 0})
+$cb = [AutoShowWin+EnumProc]{
+  param($h, $l)
+  $procId = [uint32]0
+  [void][AutoShowWin]::GetWindowThreadProcessId($h, [ref]$procId)
+  if ($targetPids -contains $procId) {
+    $sbC = New-Object System.Text.StringBuilder 128
+    [void][AutoShowWin]::GetClassName($h, $sbC, 128)
+    if ($sbC.ToString().StartsWith('Chrome_WidgetWin')) {
+      [void][AutoShowWin]::ShowWindow($h, 9)
+      [void][AutoShowWin]::SetForegroundWindow($h)
+    }
+  }
+  return $true
+}
+[void][AutoShowWin]::EnumWindows($cb, [IntPtr]::Zero)`;
+  const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], () => {});
+}
+
+function scheduleAutomationChromeHide(browser) {
+  const proc = browser.process ? browser.process() : null;
+  const pid = proc ? proc.pid : 0;
+  if (!pid) return;
+  for (const delayMs of [600, 1800]) {
+    setTimeout(() => {
+      if (userShownAutomationPids.has(pid)) return;
+      try {
+        const live = browser.process && browser.process();
+        if (live && !live.killed) hideAutomationWindows(pid);
+      } catch (_) { /* browser đã đóng */ }
+    }, delayMs);
+  }
+}
+
+// Nút Hiện/Ẩn Chrome trong modal Fanpage — đụng mọi browser automation còn sống.
+function setAutomationChromeVisible(visible) {
+  const pids = [];
+  for (const job of jobs.values()) {
+    try {
+      const proc = job.browser && job.browser.process ? job.browser.process() : null;
+      if (proc && proc.pid) pids.push(proc.pid);
+    } catch (_) { /* browser đã đóng */ }
+  }
+  if (pids.length === 0) return { error: 'Chrome tự động hóa không còn chạy.' };
+  for (const pid of pids) {
+    if (visible) {
+      userShownAutomationPids.add(pid);
+      showAutomationWindows(pid);
+    } else {
+      userShownAutomationPids.delete(pid);
+      hideAutomationWindows(pid);
+    }
+  }
+  return { pids };
 }
 
 const jobs = new Map();
@@ -149,7 +476,7 @@ const SAVE_WEBHOOK_RE = '^(?:xác minh và lưu|verify and save|verificar y guar
 // Nút Confirm trong dialog đăng ký trường webhook (đa ngôn ngữ)
 const CONFIRM_SUBSCRIBE_RE = '^(?:confirm|xác nhận|done|xong|lưu|save|hoàn tất|ok)$';
 
-const DATA_DIR = DEPS.dataDir; // giữ tên biến cũ cho phần thân còn lại
+// DATA_DIR resolved dynamically via DEPS.dataDir // giữ tên biến cũ cho phần thân còn lại
 
 /* ---------- Khởi động tác vụ ---------- */
 
@@ -243,61 +570,228 @@ function closeBrowser(job) {
   if (job.browser) {
     const b = job.browser;
     job.browser = null;
+    try {
+      const proc = b.process ? b.process() : null;
+      if (proc && proc.pid) userShownAutomationPids.delete(proc.pid);
+    } catch (_) { /* đã đóng */ }
     b.close().catch(() => {});
   }
 }
 
 function errorShot(page, name) {
-  return page.screenshot({ path: path.join(DATA_DIR, name) }).catch(() => {});
+  // Cửa sổ ẩn (chạy ngầm) có thể không render được khung hình → PNG best-effort.
+  // Luôn kèm dump text (URL + dialog + body) để chẩn đoán kể cả khi chụp trượt.
+  const txtPath = path.join(DEPS.dataDir, String(name).replace(/\.png$/i, '') + '.txt');
+  return (async () => {
+    const info = await page.evaluate(() => {
+      const clean = (s) => String(s || '').replace(/[\u200b\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+      const dlgs = [...document.querySelectorAll('[role="dialog"], div[aria-modal="true"]')]
+        .map((d) => clean(d.innerText).slice(0, 400)).filter(Boolean);
+      return {
+        url: location.href,
+        body: clean(document.body && document.body.innerText).slice(0, 1500),
+        dialogs: dlgs,
+      };
+    }).catch(() => ({}));
+    const dump = [
+      `at: ${new Date().toISOString()}`,
+      `url: ${info.url || '?'}`,
+      ...((info.dialogs || []).map((d) => `dialog: ${d}`)),
+      `body: ${info.body || ''}`,
+    ].join('\n');
+    try { require('fs').writeFileSync(txtPath, dump); } catch (_) {}
+    await page.screenshot({ path: path.join(DEPS.dataDir, name) }).catch(() => {});
+  })().catch(() => {});
 }
 
 // Điền email liên hệ vào form tạo ứng dụng (cùng cơ chế setVal như pollAndFill)
-async function fillContactEmail(page, email) {
-  return page.evaluate((email) => {
-    const visible = (el) => el && el.offsetParent !== null && !el.disabled;
-    const byLabel = (re) => {
+async function typeIntoTaggedInput(page, tag, value) {
+  const sel = 'input[data-crm-auto-input="' + tag + '"]';
+  const handle = await page.$(sel);
+  if (!handle) return false;
+  await page.evaluate((el) => {
+    el.scrollIntoView({ block: 'center' });
+    el.focus();
+  }, handle).catch(() => {});
+  await handle.click({ clickCount: 3 }).catch(() => {});
+  await page.keyboard.down('Control').catch(() => {});
+  await page.keyboard.press('KeyA').catch(() => {});
+  await page.keyboard.up('Control').catch(() => {});
+  await page.keyboard.press('Backspace').catch(() => {});
+  const text = String(value || '').trim();
+  if (text) {
+    await handle.type(text, { delay: 5 }).catch(async () => {
+      await page.keyboard.type(text, { delay: 5 }).catch(() => {});
+    });
+  }
+  await page.evaluate((el, v) => {
+    if ((el.value || '').trim() !== v) {
+      const prev = el.value;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(el, v);
+      else el.value = v;
+      if (el._valueTracker && typeof el._valueTracker.setValue === 'function') {
+        el._valueTracker.setValue(prev);
+      }
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: v }));
+    }
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }, handle, text).catch(() => {});
+  await sleep(120);
+  return true;
+}
+
+async function tagAppCreationInputs(page) {
+  return page.evaluate(() => {
+    if (!document.body) return { hasName: false, hasEmail: false, emailValue: '' };
+    const isFormInput = (el) => {
+      if (!el || el.disabled || el.readOnly) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 50 || r.height < 14 || r.top < 95) return false;
+      if (el.closest('header, nav, [role="banner"], [role="navigation"], [role="search"]')) return false;
+      const t = String(el.getAttribute('type') || el.type || 'text').toLowerCase();
+      if (!['text', 'email', ''].includes(t)) return false;
+      const hint = [el.placeholder, el.getAttribute('aria-label'), el.name, el.id].filter(Boolean).join(' ').toLowerCase();
+      if (/search|tìm kiếm|buscar|pesquisar|rechercher/.test(hint)) return false;
+      return true;
+    };
+    // Also clear any accidental value typed into the top header search input
+    for (const s of document.querySelectorAll('header input, nav input, [role="banner"] input, [role="search"] input')) {
+      if (s && s.value) {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (setter) setter.call(s, '');
+        else s.value = '';
+        s.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }
+    const formInputs = [...document.querySelectorAll('input')].filter(isFormInput)
+      .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+    const byHeading = (re) => {
       for (const lb of [...document.querySelectorAll('label')]) {
         const t = ((lb.innerText || lb.textContent) || '').trim().toLowerCase();
         if (re.test(t)) {
           const forId = lb.getAttribute('for');
-          let el = forId ? document.getElementById(forId) : null;
-          if (!el) el = lb.querySelector('input');
-          if (visible(el)) return el;
+          const el = (forId ? document.getElementById(forId) : null) || lb.querySelector('input');
+          if (isFormInput(el)) return el;
+        }
+      }
+      for (const el of formInputs) {
+        const lblIds = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+        const lblText = lblIds.map((id) => document.getElementById(id)?.innerText || '').join(' ').toLowerCase();
+        if (lblText && re.test(lblText)) return el;
+        const ownHint = ((el.placeholder || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
+        if (ownHint && re.test(ownHint)) return el;
+      }
+      for (const node of [...document.querySelectorAll('span, div, label, h2, h3, h4')]) {
+        const txt = (node.innerText || '').trim();
+        if (!txt || txt.length > 140 || !re.test(txt.toLowerCase())) continue;
+        let anc = node.parentElement;
+        for (let up = 0; up < 6 && anc && anc !== document.body; up++) {
+          const cands = [...anc.querySelectorAll('input')].filter(isFormInput);
+          if (cands.length === 1) return cands[0];
+          if (cands.length > 1) break;
+          anc = anc.parentElement;
         }
       }
       return null;
     };
-    let el = byLabel(/email liên hệ|contact email|correo electr|e-mail de contato|e-mail de contact|contact e-mail/);
-    if (!el) {
-      const inputs = [...document.querySelectorAll('input[type="text"], input[type="email"]')].filter(visible);
-      el = inputs[1] || inputs[0] || null;
+    let nameEl = byHeading(/tên ứng dụng|app name|nombre de la aplicaci|nome do aplicativo|nom de l'application/i);
+    let emailEl = byHeading(/email liên hệ|contact email|correo electr|e-mail de contato|e-mail de contact|contact e-mail/i);
+    if ((!nameEl || !emailEl) && formInputs.length >= 2) {
+      if (!nameEl) nameEl = formInputs[0];
+      if (!emailEl) emailEl = formInputs.find((i) => i !== nameEl) || formInputs[1];
     }
-    if (!el) return false;
-    el.focus();
-    const proto = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    proto.call(el, email);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.blur();
-    return true;
-  }, email).then((r) => {
-    if (!r) throw new Error('Không tìm thấy ô "Email liên hệ" trên form.');
-  });
+    for (const old of document.querySelectorAll('[data-crm-auto-input]')) old.removeAttribute('data-crm-auto-input');
+    if (nameEl) nameEl.setAttribute('data-crm-auto-input', 'app-name');
+    if (emailEl && emailEl !== nameEl) emailEl.setAttribute('data-crm-auto-input', 'contact-email');
+    return {
+      hasName: Boolean(nameEl),
+      hasEmail: Boolean(emailEl && emailEl !== nameEl),
+      emailValue: emailEl ? String(emailEl.value || '').trim() : ''
+    };
+  }).catch(() => ({ hasName: false, hasEmail: false, emailValue: '' }));
 }
 
-// Lấy cookie Facebook của account từ Chrome thật (extension gửi về) — dùng chung cho 3 luồng
+async function fillContactEmail(page, email) {
+  const info = await tagAppCreationInputs(page);
+  if (!info.hasEmail) throw new Error('Không tìm thấy ô "Email liên hệ" trên form.');
+  await typeIntoTaggedInput(page, 'contact-email', email);
+}
+
+// Lấy cookie Facebook của account (nếu chưa có sẵn trên máy khách thì trả mảng rỗng
+// để vẫn mở Chrome cho người dùng đăng nhập trực tiếp rồi lưu cookie tự động).
 async function ensureAccountCookies(job, uid) {
-  setStatus(job, 'restoring', 'Đang nhận cookie phiên đăng nhập từ Chrome của tài khoản…');
-  const cookies = await DEPS.getCookies(uid);
-  if (!cookies || !cookies.length) {
-    throw new Error('Không lấy được cookie Facebook từ Chrome của tài khoản. Hãy đảm bảo Chrome của account đang chạy và đã đăng nhập Facebook.');
+  setStatus(job, 'restoring', 'Đang kiểm tra phiên đăng nhập của tài khoản…');
+  try {
+    const cookies = await DEPS.getCookies(uid);
+    if (Array.isArray(cookies) && cookies.length) return cookies;
+  } catch (e) {
+    try { DEPS.log(`Chưa có sẵn cookie của ${uid} (${e?.message || e}) — sẽ mở Chrome để kiểm tra/đăng nhập trực tiếp.`); } catch (_) {}
   }
-  return cookies;
+  return [];
+}
+
+async function getPrimaryAutomationPage(browser) {
+  try {
+    const pages = await browser.pages();
+    if (pages && pages.length > 0) return pages[0];
+  } catch (_) {}
+  return browser.newPage();
+}
+
+function isFacebookLoginUrl(rawUrl) {
+  return /log_in|login\.php|facebook\.com\/login/i.test(String(rawUrl || ''));
+}
+
+// Nếu phiên cookie trống hoặc đã hết hạn (rơi vào trang login), giữ cửa sổ Chrome mở
+// nổi lên trước mặt người dùng, chờ đăng nhập (tối đa 3 phút), lưu lại cookie vào DB
+// rồi điều hướng tiếp tới targetUrl!
+async function ensureLoggedInDevelopersPage(job, page, uid, targetUrl, sessionCookies) {
+  const curInitialUrl = String(page.url() || '');
+  if (!isFacebookLoginUrl(curInitialUrl) && !curInitialUrl.startsWith('chrome-error://')) {
+    const checkCookies = await page.cookies('https://www.facebook.com', 'https://developers.facebook.com').catch(() => []);
+    const hasCUser = checkCookies.some((c) => c.name === 'c_user' && String(c.value || '').trim() && String(c.value) !== '0');
+    const hasXs = checkCookies.some((c) => c.name === 'xs' && String(c.value || '').trim());
+    if (hasCUser && hasXs) {
+      return;
+    }
+  }
+  if (!isFacebookLoginUrl(curInitialUrl)) {
+    await page.goto('https://www.facebook.com/login.php?next=' + encodeURIComponent(targetUrl), { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+  }
+
+  try {
+    const pid = job.browser?.process?.()?.pid;
+    if (pid) showAutomationWindows(pid);
+  } catch (_) {}
+
+  setStatus(job, 'waiting_login', 'Cửa sổ Chrome đã mở — vui lòng đăng nhập Facebook trong Chrome (xong hệ thống sẽ tự lưu phiên và chạy tiếp)…');
+
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    if (['error', 'success'].includes(job.status)) throw new Error('Đã hủy tác vụ.');
+    const curUrl = page.url() || '';
+    const fbCookies = await page.cookies('https://www.facebook.com', 'https://developers.facebook.com').catch(() => []);
+    const hasCUser = fbCookies.some((c) => c.name === 'c_user' && String(c.value || '').trim() && String(c.value) !== '0');
+    const hasXs = fbCookies.some((c) => c.name === 'xs' && String(c.value || '').trim());
+    if (hasCUser && hasXs && !isFacebookLoginUrl(curUrl) && !/checkpoint|two_step_verification|twofactor/i.test(curUrl)) {
+      try { DEPS.saveCookies(uid, fbCookies); } catch (_) {}
+      if (Array.isArray(sessionCookies)) {
+        sessionCookies.splice(0, sessionCookies.length, ...fbCookies);
+      }
+      setStatus(job, 'loading_apps', 'Đã nhận phiên đăng nhập Facebook — đang mở trang cấu hình…');
+      await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+      return;
+    }
+    await sleep(1500);
+  }
+  throw new Error('Quá thời gian chờ đăng nhập Facebook trong Chrome (3 phút). Hãy thử lại.');
 }
 
 /* ---------- Luồng chính ---------- */
 
 async function run(job, uid, appName, email) {
+  const sessionCookies = await ensureAccountCookies(job, uid);
   const browser = await launchAutomationChrome();
   job.browser = browser;
   job.popups = []; // các popup OAuth (Kết nối trang) sẽ được thu vào đây
@@ -314,21 +808,21 @@ async function run(job, uid, appName, email) {
     }
   });
 
-  const page = await browser.newPage();
+  const page = await getPrimaryAutomationPage(browser);
   job.page = page;
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
 
-  await injectSession(page, { cookies: await ensureAccountCookies(job, uid) });
+  if (sessionCookies.length) {
+    await injectSession(page, { cookies: sessionCookies });
+  }
 
   // MỖI LẦN CHẠY = TẠO MỘT APP MỚI (không tái sử dụng app cũ)
   let appId = null;
 
   setStatus(job, 'loading_apps', 'Đang mở Developers Facebook…');
   await page.goto(APPS_URL, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login\.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM rồi đồng bộ lại.');
-  }
+  await ensureLoggedInDevelopersPage(job, page, uid, APPS_URL, sessionCookies);
 
   // TRƯỜNG HỢP 1: tài khoản FB mới — chưa đăng ký developer → chạy luồng đăng ký trước
   if (await needsDeveloperRegistration(page)) {
@@ -336,23 +830,26 @@ async function run(job, uid, appName, email) {
     // Đăng ký xong → vào lại danh sách ứng dụng để tạo app
     setStatus(job, 'loading_apps', 'Đăng ký developer xong — đang mở danh sách ứng dụng…');
     await page.goto(APPS_URL, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-    if (/log_in|login\.php/.test(page.url() || '')) {
-      throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM.');
-    }
+    await ensureLoggedInDevelopersPage(job, page, uid, APPS_URL, sessionCookies);
   }
   // TRƯỜNG HỢP 2: tài khoản đã đăng ký — đi thẳng vào wizard tạo app (phần dưới)
 
-  setStatus(job, 'finding_create', 'Đang tìm nút "Tạo ứng dụng"…');
+  setStatus(job, 'finding_create', 'Đang mở trang Tạo ứng dụng…');
   const link = await page
-    .waitForSelector('a[href*="/apps/creation"]', { timeout: 60000 })
+    .waitForSelector('a[href*="/apps/creation"]', { timeout: 12000 })
     .catch(() => null);
-  if (!link) {
-    throw new Error('Không thấy nút "Tạo ứng dụng" trên trang Ứng dụng. Bạn có thể tự bấm trong Chrome.');
+  if (link) {
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {}),
+      link.click().catch(() => page.evaluate((el) => el.click(), link)),
+    ]);
+  } else {
+    const clickedBtn = await clickMatching(page, '^(?:tạo ứng dụng|create app)$', '[role="button"], button, a');
+    if (clickedBtn) await sleep(2500);
+    if (!/\/apps\/creation/i.test(page.url() || '')) {
+      await page.goto('https://developers.facebook.com/apps/creation/', { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+    }
   }
-  await Promise.all([
-    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {}),
-    link.click().catch(() => page.evaluate((el) => el.click(), link)),
-  ]);
 
   setStatus(job, 'filling', 'Đang điền Tên ứng dụng & Email liên hệ…');
   const result = await pollAndFill(page, appName, email);
@@ -534,7 +1031,7 @@ async function clickEnabledMatching(page, source, selector) {
     const els = [...document.querySelectorAll(selector)];
     const matches = els.filter((el) => {
       const visible = el.offsetParent !== null || el.getClientRects().length > 0;
-      if (!visible) return false;
+      if (!visible || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
       if (el.getAttribute('aria-disabled') === 'true') return false;
       const t = (el.innerText || '').trim();
       return t && re.test(t);
@@ -1001,8 +1498,8 @@ async function clickMatching(page, source, selector) {
     const els = [...document.querySelectorAll(selector)];
     const matches = els.filter((el) => {
       const visible = el.offsetParent !== null || el.getClientRects().length > 0;
-      if (!visible) return false;
-      const t = (el.innerText || el.textContent || '').trim();
+      if (!visible || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+      const t = String(el.innerText || el.textContent || '').replace(/[\u200b\ufeff]/g, '').trim();
       return t && re.test(t);
     });
     if (!matches.length) return false;
@@ -1037,18 +1534,24 @@ async function dismissPopups(page) {
       const vis = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
       const dlgs = [...document.querySelectorAll('[role="dialog"], div[aria-modal="true"]')].filter(vis);
       for (const d of dlgs) {
-        const t = (d.innerText || '').toLowerCase();
+        // FB chèn zero-width space vào text nút ("Close ​") — phải bóc trước
+        // khi khớp regex, không thì popup "new way to create apps" không bao
+        // giờ được gỡ và đè wizard cả phút quét Use cases (reproduce 03-11).
+        const t = String(d.innerText || '').replace(/[\u200b\ufeff]/g, '').toLowerCase();
         const btns = [...d.querySelectorAll('[role="button"], button')];
         // Popup "new way to create apps" → bấm Create app để tiếp tục
-        const createBtn = btns.find((b) => /^(?:create app|tạo ứng dụng)$/i.test((b.innerText || '').trim()));
+        const createBtn = btns.find((b) => /^(?:create app|tạo ứng dụng)$/i.test(String(b.innerText || '').replace(/[\u200b\ufeff]/g, '').trim()));
         if (createBtn && /new way|cách mới|new system/.test(t)) {
           createBtn.scrollIntoView({ block: 'center' });
           createBtn.click();
           return 'create-app';
         }
-        // Popup thông báo chung → bấm Got it / OK / X để đóng
-        const dismiss = btns.find((b) => /^(?:got it|đã hiểu|ok|x)$/i.test((b.innerText || '').trim())
-          || (b.getAttribute('aria-label') || '').toLowerCase() === 'close');
+        // Popup thông báo chung → bấm Got it / OK / Close / X để đóng
+        const dismiss = btns.find((b) => {
+          const label = String(b.innerText || '').replace(/[\u200b\ufeff]/g, '').trim();
+          return /^(?:got it|đã hiểu|ok|x|close|đóng)$/i.test(label)
+            || (b.getAttribute('aria-label') || '').toLowerCase() === 'close';
+        });
         if (dismiss && !/gỡ ứng dụng|remove app/i.test(t)) {
           dismiss.click();
           return 'dismissed';
@@ -1102,6 +1605,9 @@ async function pickOtherOption(job, page) {
   let filterDone = false;
   let cardDone = false;
   while (Date.now() < deadline && !cardDone) {
+    // Popup FB (vd quảng cáo "new way to create apps") đè lên Use cases làm
+    // quét không thấy option — gỡ mỗi vòng như clickWhenAvailable đã làm.
+    await dismissPopups(page);
     const res = await page
       .evaluate((filterDone) => {
         const vis = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
@@ -1133,6 +1639,16 @@ async function pickOtherOption(job, page) {
 
     if (res.act === 'filter') { filterDone = true; await sleep(2500); continue; }
     if (res.act === 'card') { cardDone = true; break; }
+    // Nếu vẫn đang kẹt ở màn "Chi tiết ứng dụng" (do cú click Tiếp đầu tiên chỉ mới blur input), bấm lại Tiếp
+    if (!filterDone) {
+      const stillOnAppDetails = await page.evaluate(() => {
+        return /tên ứng dụng|app name|email liên hệ|contact email/i.test(document.body?.innerText || '')
+          && !/khác\s*\(\d+\)|others?\s*\(\d+\)|legacy|trải nghiệm cũ/i.test(document.body?.innerText || '');
+      }).catch(() => false);
+      if (stillOnAppDetails) {
+        await clickMatching(page, CONTINUE_RE, '[role="button"], button');
+      }
+    }
     await sleep(1500);
   }
   return cardDone;
@@ -1209,79 +1725,41 @@ function waitUserPassword(job) {
 /* ---------- Điền form Tên + Email (giữ nguyên từ phiên bản trước) ---------- */
 
 async function pollAndFill(page, appName, email) {
-  const attempt = () => page.evaluate((appName, email) => {
-    const visible = (el) => el && el.offsetParent !== null && !el.disabled;
-    const byLabel = (re) => {
-      for (const lb of [...document.querySelectorAll('label')]) {
-        const t = ((lb.innerText || lb.textContent) || '').trim().toLowerCase();
-        if (re.test(t)) {
-          const forId = lb.getAttribute('for');
-          let el = forId ? document.getElementById(forId) : null;
-          if (!el) el = lb.querySelector('input');
-          if (visible(el)) return el;
+  const deadline = Date.now() + 90000;
+  const startedAt = Date.now();
+  let lastErr = null;
+  while (Date.now() < deadline) {
+    try {
+      await dismissPopups(page);
+      const info = await tagAppCreationInputs(page);
+      // Wait until both Name and Email inputs are rendered (or 6s if only Name exists)
+      if (info.hasName && (info.hasEmail || Date.now() - startedAt > 6000)) {
+        await typeIntoTaggedInput(page, 'app-name', appName);
+        let after = await tagAppCreationInputs(page);
+        if (!after.hasEmail) {
+          await sleep(1200);
+          after = await tagAppCreationInputs(page);
         }
-      }
-      return null;
-    };
-    const findInputs = () => {
-      let name = byLabel(/tên ứng dụng|app name|nombre de la aplicaci|nome do aplicativo|nom de l'application/);
-      let emailEl = byLabel(/email liên hệ|contact email|correo electr|e-mail de contato|e-mail de contact|contact e-mail/);
-      if (!visible(name) || !visible(emailEl)) {
-        const inputs = [...document.querySelectorAll('input[type="text"]')].filter(visible);
-        if (!name && inputs.length >= 2) { name = inputs[0]; emailEl = emailEl || inputs[1]; }
-        else if (!name && inputs.length === 1) { name = inputs[0]; }
-      }
-      return { name: visible(name) ? name : null, email: visible(emailEl) ? emailEl : null };
-    };
-    const setVal = (el, v) => {
-      el.focus();
-      const proto = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      proto.call(el, v);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      el.blur();
-    };
-    return new Promise((resolve) => {
-      const deadline = Date.now() + 90000;
-      const tick = () => {
-        try {
-          const { name, email: emailEl } = findInputs();
-          if (name) {
-            setVal(name, appName);
-            if (emailEl) {
-              // KHÔNG đụng vào email nếu mình không có email mới — Facebook
-              // thường tự điền sẵn email của tài khoản, xóa nó là kẹt bước "Tiếp".
-              if (email && email.trim()) setVal(emailEl, email);
-              const filled = (emailEl.value || '').trim() !== '';
-              return resolve({ done: true, emailFilled: filled, needEmail: !filled });
-            }
-            setTimeout(() => {
-              const again = findInputs();
-              if (again.email) {
-                if (email && email.trim()) setVal(again.email, email);
-                const filled = (again.email.value || '').trim() !== '';
-                resolve({ done: true, emailFilled: filled, needEmail: !filled });
-              }
-              else resolve({ done: true, emailFilled: false, needEmail: true });
-            }, 1500);
-            return;
+        if (after.hasEmail) {
+          if (email && String(email).trim()) {
+            await typeIntoTaggedInput(page, 'contact-email', String(email).trim());
           }
-        } catch (e) {
-          return resolve({ done: false, reason: String(e && e.message || e) });
+          const finalCheck = await tagAppCreationInputs(page);
+          const filled = Boolean(finalCheck.emailValue);
+          return { done: true, emailFilled: filled, needEmail: !filled };
         }
-        if (Date.now() > deadline) return resolve({ done: false, reason: 'timeout' });
-        setTimeout(tick, 800);
-      };
-      tick();
-    });
-  }, appName, email).catch((e) => ({ done: false, reason: String(e && e.message || e) }));
-
-  let r = await attempt();
-  if (!r.done && r.reason && /execution context|destroyed|target closed/i.test(r.reason)) {
-    await new Promise((res) => setTimeout(res, 2000));
-    r = await attempt();
+        return { done: true, emailFilled: false, needEmail: true };
+      }
+    } catch (e) {
+      const msg = String(e?.message || e);
+      if (/target closed|session closed|browser has been closed/i.test(msg)) {
+        return { done: false, reason: msg };
+      }
+      lastErr = msg;
+    }
+    await sleep(600);
   }
-  return r;
+  return { done: false, reason: lastErr || 'timeout' };
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -1293,25 +1771,45 @@ async function setupMessenger(job, page, appId) {
   const verifyToken = DEPS.getOrCreateVerifyToken();
 
   setStatus(job, 'adding_messenger', 'Đang mở dashboard và thêm sản phẩm Messenger…');
-  await page.goto(`https://developers.facebook.com/apps/${appId}/dashboard/`, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+  if (!new RegExp(`/apps/${appId}(/|$|\\?)`).test(page.url() || '')) {
+    await page.goto(`https://developers.facebook.com/apps/${appId}/dashboard/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+  }
 
-  // Bấm "Thiết lập" của Messenger nếu chưa thêm. Dashboard mới render card
-  // "Available products" với NÚT "Set up" (không còn <a href product_route=
-  // messenger> — reproduce 2026-10-08 12:0x: automation đứng ở bước này, nút
-  // Set up không được bấm). Phân biệt card Messenger với Instagram/WhatsApp
-  // bằng phạm vi tổ tiên chứa "Messenger" mà không chứa "Instagram/WhatsApp".
-  const link = await page.waitForSelector('a[href*="product_route=messenger"]', { timeout: 8000 }).catch(() => null);
-  if (link) {
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {}),
-      link.click().catch(() => page.evaluate((el) => el.click(), link)),
-    ]);
-  } else {
-    const clickedSetUp = await page
+  // Bấm "Thiết lập / Set up" của Messenger ngay khi xuất hiện (không chờ 8s selector cũ,
+  // không sleep 6s + waitForNavigation 90s gây treo sau khi bấm Set up).
+  const setupDeadline = Date.now() + 18000;
+  let clickedSetUp = false;
+  while (Date.now() < setupDeadline) {
+    if (/\/messenger(\/|$|\?)/i.test(page.url() || '')) break;
+    await dismissPopups(page);
+    const step = await page
       .evaluate(() => {
-        const vis = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
+        if (!document.body) return { state: 'waiting' };
+        const vis = (el) => el && (el.offsetParent !== null || el.getClientRects().length > 0);
+        const fireClick = (el) => {
+          el.scrollIntoView({ block: 'center' });
+          const r = el.getBoundingClientRect();
+          const o = { bubbles: true, cancelable: true, view: window };
+          for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(t, o));
+          }
+          try { el.click(); } catch (_) {}
+          return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+        };
+
+        // Đã sang màn cài đặt Messenger (có heading Đặt cấu hình webhook / Configure webhooks)
+        const hasWebhookHeading = [...document.querySelectorAll('[role="heading"], h1, h2, h3')]
+          .some((h) => vis(h) && /đặt cấu hình webhook|configure webhooks|tạo mã truy cập|generate access token/i.test((h.innerText || '').trim()));
+        if (hasWebhookHeading) return { state: 'ready' };
+
+        const directLink = document.querySelector('a[href*="product_route=messenger"], a[href*="/messenger/"]');
+        if (directLink && vis(directLink)) {
+          const pos = fireClick(directLink);
+          return { state: 'clicked', ...pos };
+        }
+
         const btns = [...document.querySelectorAll('[role="button"], button, a')]
-          .filter((b) => vis(b) && /^(set up|thiết lập)$/i.test((b.innerText || '').trim()));
+          .filter((b) => vis(b) && /^(set up|thiết lập)$/i.test(String(b.innerText || '').replace(/[\u200b\ufeff]/g, '').trim()));
         for (const b of btns) {
           let anc = b;
           for (let up = 0; up < 10 && anc && anc !== document.body; up++) {
@@ -1319,22 +1817,46 @@ async function setupMessenger(job, page, appId) {
             if (!anc) break;
             const text = anc.innerText || '';
             if (/instagram|whatsapp/i.test(text)) break; // đi quá phạm vi card
-            if (/messenger/i.test(text)) { b.click(); return true; }
+            if (/messenger/i.test(text)) {
+              const pos = fireClick(b);
+              return { state: 'clicked', ...pos };
+            }
           }
         }
-        return false;
+        return { state: 'waiting' };
       })
-      .catch(() => false);
-    if (clickedSetUp) {
-      setStatus(job, 'adding_messenger', 'Đã bấm Set up Messenger — đợi Meta thêm sản phẩm…');
-      await sleep(6000);
-      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+      .catch(() => ({ state: 'waiting' }));
+
+    if (step.state === 'ready') break;
+    if (step.state === 'clicked') {
+      clickedSetUp = true;
+      setStatus(job, 'adding_messenger', 'Đã bấm Thiết lập Messenger — chuyển ngay sang cấu hình Webhook…');
+      // Chờ Meta thêm sản phẩm & tự chuyển sang /messenger (poll mỗi 250ms, tối đa 6.5s):
+      // Hễ URL đổi sang /messenger hoặc hiện mục webhook là điền ngay lập tức!
+      const transitionDeadline = Date.now() + 6500;
+      let retryMouseClicked = false;
+      const clickedAt = Date.now();
+      while (Date.now() < transitionDeadline) {
+        if (/\/messenger(\/|$|\?)/i.test(page.url() || '')) break;
+        const readyNow = await page.evaluate(() => {
+          if (!document.body) return false;
+          return /đặt cấu hình webhook|configure webhooks|url gọi lại|callback url/i.test(document.body.innerText || '');
+        }).catch(() => false);
+        if (readyNow) break;
+        if (!retryMouseClicked && Date.now() - clickedAt > 1400 && step.x && step.y && !/\/messenger(\/|$|\?)/i.test(page.url() || '')) {
+          retryMouseClicked = true;
+          await page.mouse.click(step.x, step.y).catch(() => {});
+        }
+        await sleep(250);
+      }
+      break;
     }
+    await sleep(300);
   }
 
   // Đảm bảo đang ở trang cấu hình Messenger (URL thật: messenger_api_settings)
-  if (!/\/messenger/.test(page.url() || '')) {
-    await page.goto(`https://developers.facebook.com/apps/${appId}/messenger/messenger_api_settings/`, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+  if (!/\/messenger(\/|$|\?)/i.test(page.url() || '')) {
+    await page.goto(`https://developers.facebook.com/apps/${appId}/messenger/messenger_api_settings/`, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
   }
 
   setStatus(job, 'filling_webhook', 'Đang điền URL gọi lại & mã xác minh webhook…');
@@ -1359,34 +1881,53 @@ async function setupMessenger(job, page, appId) {
   let errDialog = null;
   if (canSave) {
     setStatus(job, 'saving_webhook', 'Đang bấm "Xác minh và lưu"…');
-    const saved = await clickWhenEnabled(page, SAVE_WEBHOOK_RE, 30000);
+    const saved = await clickWhenEnabled(page, SAVE_WEBHOOK_RE, 20000);
     if (!saved) {
       await errorShot(page, 'sync-error.png');
       throw new Error('Nút "Xác minh và lưu" không bật được — Facebook có thể yêu cầu URL https public. Hãy kiểm tra Chrome.');
     }
 
-    // Facebook gọi webhook để xác minh — đợi kết quả / dialog lỗi
-    await sleep(20000);
-    errDialog = await page
-      .evaluate(() => {
-        const d = [...document.querySelectorAll('[role="dialog"]')].find((x) => x.offsetParent);
-        const t = d ? d.innerText || '' : '';
-        return /không thể|could not|unable to|failed|không xác minh/i.test(t) ? t.slice(0, 150) : null;
-      })
-      .catch(() => null);
+    // Đợi Facebook xác minh webhook thông minh (poll mỗi 400ms thay vì sleep cứng 20s):
+    // Hễ nút "Xác minh và lưu" biến mất/khóa lại (đã lưu xong) hoặc báo lỗi là đi tiếp ngay!
+    await sleep(1200);
+    const verifyDeadline = Date.now() + 9000;
+    while (Date.now() < verifyDeadline) {
+      const verifyState = await page
+        .evaluate(() => {
+          const vis = (el) => el && (el.offsetParent !== null || el.getClientRects().length > 0);
+          const d = [...document.querySelectorAll('[role="dialog"]')].find(vis);
+          const dt = d ? d.innerText || '' : '';
+          if (/không thể|could not|unable to|failed|không xác minh/i.test(dt)) {
+            return { done: true, err: dt.slice(0, 150) };
+          }
+          const saveBtns = [...document.querySelectorAll('[role="button"], button')]
+            .filter((b) => vis(b) && /^(xác minh và lưu|verify and save)$/i.test((b.innerText || '').trim()));
+          const activeSave = saveBtns.find((b) => b.getAttribute('aria-disabled') !== 'true' && !b.disabled);
+          if (!activeSave) {
+            return { done: true, err: null };
+          }
+          return { done: false, err: null };
+        })
+        .catch(() => ({ done: false, err: null }));
+      if (verifyState.done) {
+        errDialog = verifyState.err;
+        break;
+      }
+      await sleep(400);
+    }
     saveNote = errDialog
       ? `Facebook chưa xác minh được webhook (${errDialog.replace(/\n/g, ' ').slice(0, 120)}…) — kiểm tra URL public. `
       : 'Đã bấm "Xác minh và lưu" — Facebook xác minh thành công. ';
   }
-  await page.screenshot({ path: path.join(DATA_DIR, 'sync-last.png') }).catch(() => {});
+  await page.screenshot({ path: path.join(DEPS.dataDir, 'sync-last.png') }).catch(() => {});
 
   /* ---- Giai đoạn 3: kết nối trang & đồng bộ danh sách fanpage ---- */
   setStatus(job, 'connecting_pages', 'Đang kết nối trang Facebook (mục "Tạo mã truy cập")…');
   // Mở rộng card "Tạo mã truy cập" nếu đang thu gọn (nút "Xem thêm")
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 6; i++) {
     const st = await expandCard(page, 'tạo mã truy cập|generate access token');
     if (st !== 'no-heading') break;
-    await sleep(1500);
+    await sleep(450);
   }
   await connectPagesFlow(job, page);
 
@@ -1672,10 +2213,9 @@ async function subscribeAppToPageObject(job, page) {
   setStatus(job, 'subscribing_object', 'Đang đăng ký app với đối tượng Page (trang Webhooks)…');
   // Deep link ?view=page — vào THẲNG object Page (không có param là rơi object
   // khác → "vào sai trang", báo lỗi 2026-10-06).
-  await page.goto('https://developers.facebook.com/apps/' + job.appId + '/webhooks/?view=page', { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong Chrome của account rồi chạy lại.');
-  }
+  const webhooksUrl = 'https://developers.facebook.com/apps/' + job.appId + '/webhooks/?view=page';
+  await page.goto(webhooksUrl, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+  await ensureLoggedInDevelopersPage(job, page, job.uid, webhooksUrl, null);
   await sleep(4000);
 
   // Trang hay tự mở dialog "Đặt cấu hình webhook" đè lên bảng trường → đóng nó
@@ -1804,7 +2344,7 @@ async function subscribeAppToPageObject(job, page) {
     await clickAt(r, 'field ' + r.field);
     await sleep(900);
   }
-  await page.screenshot({ path: path.join(DATA_DIR, 'webhooks-debug.png') }).catch(() => {});
+  await page.screenshot({ path: path.join(DEPS.dataDir, 'webhooks-debug.png') }).catch(() => {});
 
   // Xác minh cuối: mọi trường phải chuyển "Hủy đăng ký" (nghĩa là đã đăng ký)
   const done = await page
@@ -1843,70 +2383,119 @@ async function subscribeAppToPageObject(job, page) {
 }
 
 async function pollAndFillWebhook(page, cbUrl, vToken) {
-  return page
-    .evaluate((cbUrl, vToken) => {
-      const visible = (el) => el && el.offsetParent !== null && !el.disabled;
-      const setVal = (el, v) => {
-        el.focus();
-        const proto = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        proto.call(el, v);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.blur();
-      };
-      const byLabel = (re) => {
-        for (const lb of [...document.querySelectorAll('label')]) {
-          const t = ((lb.innerText || lb.textContent) || '').trim().toLowerCase();
-          if (re.test(t)) {
-            const forId = lb.getAttribute('for');
-            let el = forId ? document.getElementById(forId) : null;
-            if (!el) el = lb.querySelector('input');
-            if (visible(el)) return el;
-          }
-        }
-        return null;
-      };
-      return new Promise((resolve) => {
-        const deadline = Date.now() + 60000;
-        const tick = () => {
-          try {
-            let urlEl = byLabel(/url gọi lại|callback url/i)
-              || [...document.querySelectorAll('input[type="url"]')].find(visible);
-            if (!urlEl) {
-              // card đang thu gọn — bấm nút "Xem thêm" của card webhook
-              const heads = [...document.querySelectorAll('[role="heading"], h1, h2, h3')];
-              const h = heads.find((x) => /đặt cấu hình webhook|configure webhooks/i.test((x.innerText || '').trim()));
-              if (h) {
-                let node = h;
-                for (let i = 0; i < 10 && node; i++) {
-                  node = node.parentElement;
-                  if (!node) break;
-                  const btn = [...node.querySelectorAll('[role="button"][aria-controls]')]
-                    .find((b) => b.getAttribute('aria-expanded') === 'false');
-                  if (btn) { btn.click(); break; }
-                }
-              }
-              if (Date.now() > deadline) return resolve({ done: false, reason: 'timeout — không thấy ô URL gọi lại' });
-              return setTimeout(tick, 1500);
-            }
-            const original = urlEl.value;
-            setVal(urlEl, cbUrl);
-
-            let tokenEl = byLabel(/xác minh mã|verify token/i);
-            if (!tokenEl) {
-              tokenEl = [...document.querySelectorAll('input[type="text"]')].find((i) => visible(i) && i !== urlEl) || null;
-            }
-            if (tokenEl) setVal(tokenEl, vToken);
-            // URL trùng giá trị cũ → nút Lưu sẽ bị khóa vì không có gì thay đổi
-            return resolve({ done: true, tokenFilled: !!tokenEl, unchanged: original === cbUrl });
-          } catch (e) {
-            return resolve({ done: false, reason: String(e && e.message || e) });
-          }
+  const deadline = Date.now() + 60000;
+  let lastErr = null;
+  while (Date.now() < deadline) {
+    try {
+      const state = await page.evaluate(() => {
+        if (!document.body) return { found: false };
+        const isWebhookInput = (el) => {
+          if (!el || el.disabled || el.readOnly) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width < 50 || r.height < 14 || r.top < 80) return false;
+          if (el.closest('header, nav, [role="banner"], [role="navigation"], [role="search"]')) return false;
+          const t = String(el.getAttribute('type') || el.type || 'text').toLowerCase();
+          if (!['text', 'url', ''].includes(t)) return false;
+          const hint = [el.placeholder, el.getAttribute('aria-label'), el.name, el.id].filter(Boolean).join(' ').toLowerCase();
+          if (/search|tìm kiếm|buscar|pesquisar|rechercher/.test(hint)) return false;
+          return true;
         };
-        tick();
+        const dlg = [...document.querySelectorAll('[role="dialog"], div[aria-modal="true"]')].find((d) => d.offsetParent !== null || d.getClientRects().length > 0);
+        const scope = dlg || document.body || document.documentElement;
+        if (!scope || typeof scope.querySelectorAll !== 'function') return { found: false };
+        const inputs = [...scope.querySelectorAll('input')].filter(isWebhookInput)
+          .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+        const byHeading = (re) => {
+          for (const lb of [...scope.querySelectorAll('label')]) {
+            const t = ((lb.innerText || lb.textContent) || '').trim().toLowerCase();
+            if (re.test(t)) {
+              const forId = lb.getAttribute('for');
+              const el = (forId ? document.getElementById(forId) : null) || lb.querySelector('input');
+              if (isWebhookInput(el)) return el;
+            }
+          }
+          for (const el of inputs) {
+            const lblIds = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+            const lblText = lblIds.map((id) => document.getElementById(id)?.innerText || '').join(' ').toLowerCase();
+            if (lblText && re.test(lblText)) return el;
+          }
+          for (const node of [...scope.querySelectorAll('span, div, label, h2, h3, h4')]) {
+            const txt = (node.innerText || '').trim();
+            if (!txt || txt.length > 140 || !re.test(txt.toLowerCase())) continue;
+            let anc = node.parentElement;
+            for (let up = 0; up < 6 && anc && anc !== document.body; up++) {
+              const cands = [...anc.querySelectorAll('input')].filter(isWebhookInput);
+              if (cands.length === 1) return cands[0];
+              if (cands.length > 1) break;
+              anc = anc.parentElement;
+            }
+          }
+          return null;
+        };
+        let urlEl = byHeading(/url gọi lại|callback url/i)
+          || inputs.find((el) => String(el.getAttribute('type') || '').toLowerCase() === 'url');
+        if (!urlEl && inputs.length >= 2) urlEl = inputs[0];
+        if (!urlEl) {
+          const vis = (el) => el && (el.offsetParent !== null || el.getClientRects().length > 0);
+          const fireClick = (el) => {
+            el.scrollIntoView({ block: 'center' });
+            const o = { bubbles: true, cancelable: true, view: window };
+            for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+              el.dispatchEvent(new MouseEvent(t, o));
+            }
+            try { el.click(); } catch (_) {}
+          };
+          const heads = [...document.querySelectorAll('[role="heading"], h1, h2, h3')];
+          const h = heads.find((x) => /đặt cấu hình webhook|configure webhooks/i.test((x.innerText || '').trim()));
+          if (h) {
+            let node = h;
+            for (let i = 0; i < 10 && node; i++) {
+              node = node.parentElement;
+              if (!node) break;
+              const btn = [...node.querySelectorAll('[role="button"][aria-controls]')]
+                .find((b) => b.getAttribute('aria-expanded') === 'false');
+              if (btn) { fireClick(btn); break; }
+              const addCbBtn = [...node.querySelectorAll('[role="button"], button')]
+                .find((b) => vis(b) && /^(?:thêm url gọi lại|add callback url|chỉnh sửa url gọi lại|edit callback url)$/i.test((b.innerText || '').trim()));
+              if (addCbBtn) { fireClick(addCbBtn); break; }
+            }
+          }
+          return { found: false };
+        }
+        let tokenEl = byHeading(/xác minh mã|verify token|mã xác minh/i)
+          || inputs.find((i) => i !== urlEl) || null;
+        for (const old of document.querySelectorAll('[data-crm-auto-input]')) old.removeAttribute('data-crm-auto-input');
+        urlEl.setAttribute('data-crm-auto-input', 'webhook-url');
+        if (tokenEl) tokenEl.setAttribute('data-crm-auto-input', 'webhook-token');
+        return {
+          found: true,
+          originalUrl: String(urlEl.value || ''),
+          hasToken: Boolean(tokenEl)
+        };
       });
-    }, cbUrl, vToken)
-    .catch((e) => ({ done: false, reason: String(e && e.message || e) }));
+      if (!state || !state.found) {
+        await sleep(300);
+        continue;
+      }
+      const okUrl = await typeIntoTaggedInput(page, 'webhook-url', cbUrl);
+      if (!okUrl) {
+        await sleep(300);
+        continue;
+      }
+      if (state.hasToken) {
+        await typeIntoTaggedInput(page, 'webhook-token', vToken);
+      }
+      return { done: true, tokenFilled: state.hasToken, unchanged: state.originalUrl === cbUrl };
+    } catch (e) {
+      const msg = String(e?.message || e);
+      if (/target closed|session closed|browser has been closed/i.test(msg)) {
+        return { done: false, reason: msg };
+      }
+      lastErr = msg;
+      await sleep(300);
+    }
+  }
+  return { done: false, reason: lastErr || 'timeout — không thấy ô URL gọi lại' };
 }
 
 // Chờ nút (theo text) bật Enabled rồi bấm
@@ -1919,7 +2508,7 @@ async function clickWhenEnabled(page, source, timeoutMs) {
         const els = [...document.querySelectorAll('[role="button"], button')].filter((el) => {
           if (el.getAttribute('aria-disabled') === 'true') return false;
           const visible = el.offsetParent !== null || el.getClientRects().length > 0;
-          if (!visible) return false;
+          if (!visible || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
           const t = (el.innerText || '').trim();
           return t && re.test(t);
         });
@@ -1934,7 +2523,7 @@ async function clickWhenEnabled(page, source, timeoutMs) {
       }, source)
       .catch(() => false);
     if (ok) return true;
-    await sleep(1200);
+    await sleep(300);
   }
   return false;
 }
@@ -1980,6 +2569,7 @@ function startDeleteApp(appId, uid) {
 }
 
 async function runDelete(job, uid, appId) {
+  const sessionCookies = await ensureAccountCookies(job, uid);
   const browser = await launchAutomationChrome();
   job.browser = browser;
   browser.on('disconnected', () => {
@@ -1988,19 +2578,19 @@ async function runDelete(job, uid, appId) {
     if (!['success', 'error'].includes(job.status)) failSoft(job, 'Cửa sổ Chrome đã bị đóng.');
   });
 
-  const page = await browser.newPage();
+  const page = await getPrimaryAutomationPage(browser);
   job.page = page;
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
 
-  await injectSession(page, { cookies: await ensureAccountCookies(job, uid) });
+  if (sessionCookies.length) {
+    await injectSession(page, { cookies: sessionCookies });
+  }
 
   // Vào trang DANH SÁCH ứng dụng — mỗi app có menu ⋯ riêng ở đó
   setStatus(job, 'loading_apps', 'Đang mở danh sách ứng dụng…');
   await page.goto('https://developers.facebook.com/apps/', { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM.');
-  }
+  await ensureLoggedInDevelopersPage(job, page, uid, 'https://developers.facebook.com/apps/', sessionCookies);
 
   // Tìm đúng card chứa App ID rồi lấy menu ⋯ của app đó
   setStatus(job, 'finding_menu', `Đang tìm ứng dụng ${appId} và mở menu ⋯…`);
@@ -2073,7 +2663,7 @@ async function runDelete(job, uid, appId) {
       DEPS.savePages(job.uid, latest ? (latest.pages || []) : []);
     DEPS.clearPageTokens(job.uid);
     DEPS.removeAccountPages(job.uid);
-      await page.screenshot({ path: path.join(DATA_DIR, 'delete-last.png') }).catch(() => {});
+      await page.screenshot({ path: path.join(DEPS.dataDir, 'delete-last.png') }).catch(() => {});
       setStatus(job, 'success', `Đã gỡ ứng dụng ${appId} khỏi Facebook và xóa dữ liệu trong CRM.`);
       closeBrowser(job);
       return;
@@ -2165,48 +2755,82 @@ function startPageSetup(appId, pageIds, uid, webhookUrl) {
   return { job };
 }
 
+const MAX_PARALLEL_TOKEN_TABS = 10;
+
+async function enableTabFocusEmulation(tab) {
+  try {
+    const cdp = await tab.createCDPSession();
+    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
+  } catch (_) {}
+}
+
 // Tab worker song song cho Lấy token: mở lại trang cấu hình app với cùng phiên
 // (cookie đã lấy sẵn) và mở rộng card "Tạo mã truy cập" chờ xử lý page riêng.
-async function openPageSetupWorkerTab(job, browser, cookies) {
+async function openPageSetupWorkerTab(job, browser, cookies, staggerMs = 0) {
+  if (staggerMs > 0) await sleep(staggerMs);
   const wp = await browser.newPage();
+  await enableTabFocusEmulation(wp);
   await wp.setUserAgent(UA);
   await wp.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
-  await injectSession(wp, { cookies });
+  if (Array.isArray(cookies) && cookies.length) {
+    await injectSession(wp, { cookies });
+  }
   await wp.goto(`https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
   if (/log_in|login\.php/.test(wp.url() || '')) {
     throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM.');
   }
-  await sleep(2500);
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 16; i++) {
     const st = await expandCard(wp, 'tạo mã truy cập|generate access token');
-    if (st !== 'no-heading') break;
-    await sleep(1500);
+    const hasRows = await wp.evaluate(() => document.querySelectorAll('tbody tr[role="row"]').length > 0).catch(() => false);
+    if (hasRows || (st !== 'no-heading' && i >= 2)) break;
+    await sleep(500);
   }
   return wp;
 }
 
-// Bảng token có thể render chậm trên tab vừa mở — chờ hàng của page xuất hiện
-// (mở rộng card lại mỗi vòng) trước khi bấm Add subscription / Tạo.
+// Bảng token có thể render chậm hoặc nằm phía dưới cần cuộn — chờ hàng của page xuất hiện
+// (mở rộng card + cuộn bảng mỗi vòng) trước khi bấm Add subscription / Tạo.
 async function waitPageSetupRow(tab, pageId, timeoutMs = 45000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const has = await tab
       .evaluate((pid) => {
         const rows = [...document.querySelectorAll('tbody tr[role="row"]')];
-        return rows.some((r) => {
+        const match = rows.find((r) => {
           const s = r.querySelector('span[label]');
           return s && s.getAttribute('label') === pid;
         });
+        if (match) {
+          match.scrollIntoView({ block: 'center' });
+          return true;
+        }
+        return false;
       }, String(pageId))
       .catch(() => false);
     if (has) return true;
     await expandCard(tab, 'tạo mã truy cập|generate access token').catch(() => {});
-    await sleep(1500);
+    await tab.evaluate(() => {
+      const tbody = document.querySelector('tbody[role="rowgroup"], tbody');
+      let el = tbody ? tbody.parentElement : null;
+      let scrolled = false;
+      while (el) {
+        const st = getComputedStyle(el);
+        if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight) {
+          el.scrollTop = Math.min(el.scrollTop + 900, el.scrollHeight);
+          scrolled = true;
+          break;
+        }
+        el = el.parentElement;
+      }
+      if (!scrolled) window.scrollBy(0, 900);
+    }).catch(() => {});
+    await sleep(600);
   }
   return false;
 }
 
 async function runPageSetup(job, uid) {
+  const sessionCookies = await ensureAccountCookies(job, uid);
   const browser = await launchAutomationChrome();
   job.browser = browser;
   browser.on('disconnected', () => {
@@ -2215,49 +2839,38 @@ async function runPageSetup(job, uid) {
     if (!['success', 'error'].includes(job.status)) failSoft(job, 'Cửa sổ Chrome đã bị đóng.');
   });
 
-  const page = await browser.newPage();
+  const page = await getPrimaryAutomationPage(browser);
   job.page = page;
+  await enableTabFocusEmulation(page);
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
 
-  const sessionCookies = await ensureAccountCookies(job, uid);
-  await injectSession(page, { cookies: sessionCookies });
-
-  setStatus(job, 'loading_apps', 'Đang mở cấu hình Messenger…');
-  await page.goto(`https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login\.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM.');
+  if (sessionCookies.length) {
+    await injectSession(page, { cookies: sessionCookies });
   }
 
-  // Cập nhật webhook (URL có thể đã đổi — vd tunnel mới)
-  const webhookUrl = job.webhookUrl || 'http://localhost:3000/webhook';
-  const verifyToken = DEPS.getOrCreateVerifyToken();
-  setStatus(job, 'filling_webhook', 'Đang cập nhật URL gọi lại & mã xác minh webhook…');
-  await expandCard(page, 'đặt cấu hình webhook|configure webhooks');
-  const wr = await pollAndFillWebhook(page, webhookUrl, verifyToken);
-  if (wr.done && !wr.unchanged) {
-    setStatus(job, 'saving_webhook', 'Đang bấm "Xác minh và lưu"…');
-    await clickWhenEnabled(page, '^(?:xác minh và lưu|verify and save)$', 30000);
-    await sleep(8000);
+  const settingsUrl = `https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`;
+  setStatus(job, 'loading_apps', 'Đang mở trang Cài đặt API Messenger (chỗ lấy token)…');
+  await page.goto(settingsUrl, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
+  await ensureLoggedInDevelopersPage(job, page, uid, settingsUrl, sessionCookies);
+
+  // Đảm bảo đang ở đúng trang messenger_api_settings (không nhảy sang /webhooks/?view=page)
+  if (!/messenger_api_settings/.test(page.url() || '')) {
+    await page.goto(`https://developers.facebook.com/apps/${job.appId}/messenger/messenger_api_settings/`, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
   }
+  await sleep(800);
 
-  // Đăng ký TRƯỜNG webhook ngay trong mục Webhooks của messenger_api_settings
-  // (bấm nút See more/Xem thêm mở rộng card — hướng dẫn của user 2026-10-06:
-  //  KHÔNG đi vòng qua trang /webhooks/ nữa, nút Đăng ký nằm ngay tại đây)
-  await subscribeWebhookFieldsInCard(job, page);
-  // Đăng ký ĐỐI TƯỢNG Page trên trang Webhooks (tầng bắt buộc để Meta đẩy event tức thì)
-  await subscribeAppToPageObject(job, page);
-
-  // Mở rộng card "Tạo mã truy cập" nếu đang thu gọn
-  for (let i = 0; i < 5; i++) {
+  // Mở rộng thẳng card "2. Tạo mã truy cập / Generate access tokens"
+  setStatus(job, 'scanning', 'Đang mở mục Tạo mã truy cập (Generate access tokens)…');
+  for (let i = 0; i < 10; i++) {
     const st = await expandCard(page, 'tạo mã truy cập|generate access token');
     if (st !== 'no-heading') break;
-    await sleep(1500);
+    await sleep(600);
   }
+  await sleep(700);
 
   // CÀO DANH SÁCH TRANG trong bảng (cập nhật pages.json — kể cả khi CRM đang rỗng)
-  // Gộp dần + chờ ổn định 2 vòng để không bỏ sót page render chậm.
-  const tableDeadline = Date.now() + 30000;
+  const tableDeadline = Date.now() + 25000;
   const tableRows = [];
   let tableStable = 0;
   while (Date.now() < tableDeadline) {
@@ -2271,11 +2884,14 @@ async function runPageSetup(job, uid) {
       } else { tableRows.push(r); grown = true; }
     }
     if (tableRows.length) {
+      const allTargetsVisible = job.pageIds.length > 0
+        && job.pageIds.every((pid) => tableRows.some((x) => String(x.pageId) === String(pid)));
+      if (allTargetsVisible) break;
       tableStable = grown ? 0 : tableStable + 1;
       if (tableStable >= 2) break;
     }
     await expandCard(page, 'tạo mã truy cập|generate access token');
-    await sleep(2000);
+    await sleep(800);
   }
   if (tableRows.length) {
     const clean = tableRows.map((r) => ({
@@ -2296,61 +2912,90 @@ async function runPageSetup(job, uid) {
     throw new Error('App chưa kết nối trang Facebook nào. Hãy bấm "Connect" trong Chrome (mục 2. Generate access tokens) để kết nối trang, rồi chạy lại.');
   }
 
-  const results = [];
-  // Xử lý song song bằng nhiều tab Chrome trên cùng 1 cửa sổ: mỗi tab mở lại
-  // trang cấu hình app, nhận pageId từ hàng đợi chung rồi tự đăng ký webhook +
-  // tạo token cho page của nó. Dialog subscribe/token là DOM riêng từng tab nên
-  // các tab không giành nhau; form re-auth dùng chung job.waitPwd qua lock
-  // trong askPassword. 3 tab là mức an toàn cho Facebook (nhiều hơn dễ dính
-  // checkpoint) và đủ nhẹ cho máy khách.
-  const PAGE_SETUP_PARALLEL_TABS = 3;
-  const workerCount = Math.max(1, Math.min(PAGE_SETUP_PARALLEL_TABS, targets.length));
-  let cursor = 0;
-  let doneCount = 0;
-
-  const worker = async (tab) => {
-    while (job.browser && !['success', 'error'].includes(job.status)) {
-      const idx = cursor;
-      cursor += 1;
-      if (idx >= targets.length) break;
-      const pageId = targets[idx];
-      try {
-        if (!await waitPageSetupRow(tab, pageId)) {
-          try { DEPS.log('[pages] Không thấy hàng của trang ' + pageId + ' trong bảng token — bỏ qua.'); } catch (_) {}
-          results.push({ pageId, token: null });
-          doneCount += 1;
-          continue;
-        }
-        setStatus(job, 'subscribing', `Đang đăng ký webhook cho trang ${pageId} (${doneCount + 1}/${targets.length}, ${workerCount} luồng)…`);
-        await subscribePageFields(job, tab, pageId);
-
-        setStatus(job, 'generating_token', `Đang tạo Page Access Token cho trang ${pageId} (${doneCount + 1}/${targets.length}, ${workerCount} luồng)…`);
-        const token = await generatePageToken(job, tab, pageId);
-        results.push({ pageId, token: token || null });
-        doneCount += 1;
-        setStatus(job, 'generating_token', `Xong ${doneCount}/${targets.length} trang…`);
-      } catch (e) {
-        if (!job.browser) throw e; // Chrome bị đóng — dừng toàn bộ worker
-        try { DEPS.log('[pages] Lỗi xử lý trang ' + pageId + ': ' + ((e && e.message) || e)); } catch (_) {}
-        results.push({ pageId, token: null });
-        doneCount += 1;
-      }
-    }
-  };
-
-  const tabs = [page];
-  for (let i = 1; i < workerCount; i++) {
-    try { tabs.push(await openPageSetupWorkerTab(job, browser, sessionCookies)); } catch (e) {
-      if (!job.browser) throw e;
-      try { DEPS.log('[pages] Không mở được tab song song #' + (i + 1) + ': ' + ((e && e.message) || e)); } catch (_) {}
-      break;
+  // Mở song song tối đa 10 tab (vd chọn 10 page -> mở 10 tab, chọn 20 page -> mở 10 tab chia nhau chạy cuốn chiếu)
+  const desiredTabs = Math.min(MAX_PARALLEL_TOKEN_TABS, targets.length);
+  const workerTabs = [page];
+  if (desiredTabs > 1 && job.browser) {
+    setStatus(job, 'opening_tabs', `Đang mở ${desiredTabs} tab song song để lấy token cho ${targets.length} trang…`);
+    const liveCookies = await page.cookies('https://www.facebook.com', 'https://developers.facebook.com').catch(() => []);
+    const workerCookies = liveCookies.length ? liveCookies : sessionCookies;
+    const extraTabs = await Promise.all(
+      Array.from({ length: desiredTabs - 1 }, (_, i) =>
+        openPageSetupWorkerTab(job, browser, workerCookies, (i + 1) * 120).catch((e) => {
+          try { DEPS.log(`[pages] Không mở được tab phụ #${i + 2}: ${e?.message || e}`); } catch (_) {}
+          return null;
+        })
+      )
+    );
+    for (const t of extraTabs) {
+      if (t) workerTabs.push(t);
     }
   }
-  await Promise.all(tabs.map((t) => worker(t)));
+
+  const results = new Array(targets.length);
+  let nextIdx = 0;
+  let doneCount = 0;
+  const activeTabCount = workerTabs.length;
+
+  const persistSinglePageToken = (pageId, token) => {
+    if (!token) return;
+    try {
+      const curPages = DEPS.listPages(job.uid);
+      const existing = curPages.find((x) => String(x.pageId) === String(pageId));
+      if (existing) existing.token = token;
+      else curPages.push({ pageId: String(pageId), name: 'Trang ' + pageId, token, connectedAt: new Date().toISOString() });
+      DEPS.savePages(job.uid, curPages);
+      const latestApp = DEPS.appGetLatest(job.uid);
+      if (latestApp && latestApp.appId === job.appId) {
+        DEPS.appUpdate(job.uid, job.appId, { pages: curPages });
+      }
+    } catch (_) {}
+  };
+
+  setStatus(job, 'generating_token', `Đang chạy ${activeTabCount} tab song song lấy token cho ${targets.length} trang…`);
+
+  await Promise.all(
+    workerTabs.map(async (tab) => {
+      while (job.browser && !['success', 'error'].includes(job.status)) {
+        const myIdx = nextIdx;
+        nextIdx += 1;
+        if (myIdx >= targets.length) break;
+        const pageId = targets[myIdx];
+        try {
+          if (!await waitPageSetupRow(tab, pageId)) {
+            try { DEPS.log('[pages] Không thấy hàng của trang ' + pageId + ' trong bảng token — bỏ qua.'); } catch (_) {}
+            results[myIdx] = { pageId, token: null };
+            doneCount += 1;
+            continue;
+          }
+          setStatus(job, 'subscribing', `Đang cấu hình & lấy token (${activeTabCount} tab song song — đang xử lý trang ${pageId}, xong ${doneCount}/${targets.length})…`);
+          await subscribePageFields(job, tab, pageId);
+
+          const token = await generatePageToken(job, tab, pageId);
+          results[myIdx] = { pageId, token: token || null };
+          if (token) persistSinglePageToken(pageId, token);
+          doneCount += 1;
+          setStatus(job, 'generating_token', `Đang lấy token (${activeTabCount} tab song song): xong ${doneCount}/${targets.length} trang…`);
+        } catch (e) {
+          if (!job.browser) throw e;
+          try { DEPS.log('[pages] Lỗi xử lý trang ' + pageId + ': ' + ((e && e.message) || e)); } catch (_) {}
+          results[myIdx] = { pageId, token: null };
+          doneCount += 1;
+        }
+      }
+    })
+  );
+
+  // Đóng các tab worker phụ sau khi hoàn tất
+  for (let i = 1; i < workerTabs.length; i++) {
+    try { await workerTabs[i].close(); } catch (_) {}
+  }
+
+  const finalResults = results.filter(Boolean);
 
   // Cập nhật token vào pages.json + bản ghi app mới nhất
   const allPages = DEPS.listPages(job.uid);
-  for (const r of results) {
+  for (const r of finalResults) {
     if (!r.token) continue;
     const p = allPages.find((x) => x.pageId === r.pageId);
     if (p) p.token = r.token;
@@ -2362,15 +3007,12 @@ async function runPageSetup(job, uid) {
     DEPS.appUpdate(job.uid, job.appId, { pages: allPages });
   }
 
-  // Đăng ký webhook qua Graph ngay với token vừa lấy — nếu bước DOM
-  // (subscribeAppToPageObject) fail âm thầm thì bước này cứu, và kết quả
-  // được BÁO RÕ cho user thay vì im lặng (báo lỗi 2026-10-06).
-  // Chạy 5 luồng cùng lúc — mỗi page là 1 POST Graph độc lập.
+  // Đăng ký webhook qua Graph ngay với token vừa lấy — chạy 10 luồng song song
   const subResults = [];
-  const tokenResults = results.filter((r) => r.token);
+  const tokenResults = finalResults.filter((r) => r.token);
   let subCursor = 0;
   setStatus(job, 'subscribing', `Đang đăng ký webhook qua Graph cho ${tokenResults.length} trang…`);
-  await Promise.all(Array.from({ length: Math.min(5, Math.max(1, tokenResults.length)) }, async () => {
+  await Promise.all(Array.from({ length: Math.min(10, Math.max(1, tokenResults.length)) }, async () => {
     while (subCursor < tokenResults.length && job.browser) {
       const r = tokenResults[subCursor];
       subCursor += 1;
@@ -2380,8 +3022,8 @@ async function runPageSetup(job, uid) {
     }
   }));
 
-  const okCount = results.filter((r) => r.token).length;
-  const summary = results.map((r) => {
+  const okCount = finalResults.filter((r) => r.token).length;
+  const summary = finalResults.map((r) => {
     const p = allPages.find((x) => x.pageId === r.pageId);
     const nm = p ? p.name : r.pageId;
     return `${nm}${r.token ? ' ✓' : ' (không lấy được token)'}`;
@@ -2427,7 +3069,15 @@ async function subscribePageFields(job, page, pageId) {
   log('nút Add subscription: ' + clicked + ' (page ' + pageId + ')');
   if (clicked !== 'clicked') return; // không có nút → có thể đã đăng ký, bỏ qua
 
-  await sleep(2500);
+  // Đợi hộp thoại Edit Page Subscriptions xuất hiện (poll mỗi 250ms, tối đa 3s thay vì sleep cứng 2.5s)
+  for (let w = 0; w < 12; w++) {
+    await sleep(250);
+    const hasBoxes = await page.evaluate(() => {
+      const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+      return [...document.querySelectorAll('[role="checkbox"], input[type="checkbox"]')].filter(vis).length >= 3;
+    }).catch(() => false);
+    if (hasBoxes) break;
+  }
 
   // Tick theo DOM thật của dialog "Edit Page Subscriptions": checkbox là
   // div[role=checkbox] (aria-checked), KHÔNG phải <input> — và text của hàng
@@ -2477,11 +3127,11 @@ async function subscribePageFields(job, page, pageId) {
 
   for (const t of layout.targets.filter((x) => !x.on)) {
     await page.mouse.click(t.x, t.y).catch(() => {});
-    await sleep(500);
+    await sleep(220);
   }
 
   // Xác minh trạng thái THẬT sau khi click
-  await sleep(1200);
+  await sleep(450);
   const verified = await page
     .evaluate((fields) => {
       const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
@@ -2535,11 +3185,10 @@ async function subscribePageFields(job, page, pageId) {
   } else {
     await clickWhenEnabled(page, CONFIRM_SUBSCRIBE_RE, 20000);
   }
-  await sleep(2500);
-  await page.screenshot({ path: path.join(DATA_DIR, `subscribe-debug-${pageId}.png`) }).catch(() => {});
+  await sleep(900);
   // Đóng dialog nếu còn
   await clickMatching(page, '^(?:đóng|close|x)$', '[role="button"], button');
-  await sleep(1000);
+  await sleep(350);
 }
 
 // Bấm "Tạo" → tick "Tôi hiểu" → bấm "Sao chép" → chụp token (hook clipboard + DOM)
@@ -2608,48 +3257,10 @@ async function graphSubscribePage(pageId, token) {
 }
 
 async function generatePageToken(job, page, pageId) {
-  const clicked = await page
-    .evaluate((pageId) => {
-      const rows = [...document.querySelectorAll('tbody tr[role="row"]')];
-      const row = rows.find((r) => {
-        const s = r.querySelector('span[label]');
-        return s && s.getAttribute('label') === pageId;
-      });
-      if (!row) return false;
-      const btn = [...row.querySelectorAll('[role="button"], button')]
-        .find((b) => /^(tạo|generate|create)$/i.test((b.innerText || '').trim()));
-      if (!btn) return false;
-      btn.scrollIntoView({ block: 'center' });
-      const o = { bubbles: true, cancelable: true, view: window };
-      for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-        btn.dispatchEvent(new MouseEvent(t, o));
-      }
-      return true;
-    }, pageId)
-    .catch(() => false);
-  if (!clicked) return null;
-  await sleep(2500);
+  const log = (m) => { try { DEPS.log('[token] ' + m); } catch (_) {} };
+  const valid = (t) => !!t && TOKEN_LIKE.test((t || '').trim());
 
-  // Tick quyền pages_manage_metadata rồi bấm "Generate Token" trong dialog
-  // (nếu có) — trước khi chụp token. Thiếu quyền này thì đăng ký webhook
-  // qua Graph chết và Meta không đẩy tin khách về CRM.
-  await tickTokenPermissions(page);
-  const genBtn = await page
-    .evaluate(() => {
-      const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
-      const btn = [...document.querySelectorAll('[role="button"], button')].filter(vis)
-        .find((b) => /^(?:generate token|generate access token|tạo mã truy cập|tạo mã)$/i.test((b.innerText || '').trim()));
-      if (!btn) return null;
-      const r = btn.getBoundingClientRect();
-      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
-    })
-    .catch(() => null);
-  if (genBtn) {
-    await page.mouse.click(genBtn.x, genBtn.y).catch(() => {});
-    await sleep(2500);
-  }
-
-  // Cài bẫy: clipboard API + sự kiện copy — bắt MỌI text được copy (trim sẵn)
+  // Cài bẫy clipboard + copy TRƯỚC khi mở dialog
   await page
     .evaluate(() => {
       window.__capturedToken = null;
@@ -2668,49 +3279,153 @@ async function generatePageToken(job, page, pageId) {
           }
         }
       } catch { /* bỏ qua */ }
-      document.addEventListener('copy', (e) => {
-        try {
-          const t = e.clipboardData ? e.clipboardData.getData('text') : '';
-          if (t && t.trim().length > 20) window.__capturedToken = t.trim();
-        } catch { /* bỏ qua */ }
-      });
-    })
-    .catch(() => {});
-
-  // Tick "Tôi hiểu" nếu dialog yêu cầu
-  await page
-    .evaluate(() => {
-      const visible = (el) => el && el.offsetParent !== null;
-      const labels = [...document.querySelectorAll('label')]
-        .filter((l) => /^(?:tôi hiểu|i understand)$/i.test((l.innerText || '').trim()) && visible(l));
-      for (const lb of labels) {
-        const input = lb.querySelector('input[type="checkbox"]')
-          || document.getElementById(lb.getAttribute('for') || '');
-        if (input && visible(input) && input.getAttribute('aria-checked') !== 'true' && !input.checked) {
-          input.click();
-          return true;
-        }
+      if (!window.__crmCopyHooked) {
+        window.__crmCopyHooked = true;
+        document.addEventListener('copy', (e) => {
+          try {
+            const t = e.clipboardData ? e.clipboardData.getData('text') : '';
+            if (t && t.trim().length > 20) window.__capturedToken = t.trim();
+          } catch { /* bỏ qua */ }
+        });
       }
-      return false;
     })
     .catch(() => {});
-  await sleep(1000);
 
-  // Bấm "Sao chép" (thử 2 lần)
-  await clickMatching(page, '^(?:sao chép|copy)$', '[role="button"], button');
-  await sleep(1200);
-  await clickMatching(page, '^(?:sao chép|copy)$', '[role="button"], button');
-  await sleep(1000);
+  const genPos = await page
+    .evaluate((pageId) => {
+      const rows = [...document.querySelectorAll('tbody tr[role="row"]')];
+      const row = rows.find((r) => {
+        const s = r.querySelector('span[label]');
+        return s && s.getAttribute('label') === pageId;
+      });
+      if (!row) return null;
+      const btn = [...row.querySelectorAll('[role="button"], button')]
+        .find((b) => /^(tạo|generate|create)$/i.test((b.innerText || '').trim()));
+      if (!btn) return null;
+      btn.scrollIntoView({ block: 'center' });
+      const r = btn.getBoundingClientRect();
+      const o = { bubbles: true, cancelable: true, view: window };
+      for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+        btn.dispatchEvent(new MouseEvent(t, o));
+      }
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    }, pageId)
+    .catch(() => null);
+  if (!genPos) {
+    log('Không tìm thấy nút Tạo/Generate cho trang ' + pageId);
+    return null;
+  }
+  await sleep(450);
 
-  // Đọc token: bẫy clipboard → quét input/textarea TOÀN TRANG (có thể nhiều dialog chồng nhau)
-  let token = await page.evaluate(() => window.__capturedToken || null).catch(() => null);
-  const valid = (t) => !!t && TOKEN_LIKE.test((t || '').trim());
-  if (!valid(token)) {
+  // Chờ dialog xuất hiện; nếu cú click DOM chưa mở dialog thì click chuột thật qua CDP
+  const hasDialogNow = await page.evaluate(() => {
+    return [...document.querySelectorAll('[role="dialog"]')].some((d) => d.offsetParent !== null || d.getClientRects().length > 0);
+  }).catch(() => false);
+  if (!hasDialogNow) {
+    await page.mouse.click(genPos.x, genPos.y).catch(() => {});
+    for (let w = 0; w < 8; w++) {
+      await sleep(250);
+      const okDlg = await page.evaluate(() => {
+        return [...document.querySelectorAll('[role="dialog"]')].some((d) => d.offsetParent !== null || d.getClientRects().length > 0);
+      }).catch(() => false);
+      if (okDlg) break;
+    }
+  }
+
+  // Vòng lặp chờ dialog Token Generation, tick quyền (nếu có), tick "Tôi hiểu / I understand" và đọc token
+  let token = null;
+  const deadline = Date.now() + 25000;
+  while (Date.now() < deadline && !valid(token)) {
+    if (await passwordVisible(page)) {
+      await askPassword(job, page);
+      continue;
+    }
+
+    // 1. Nếu có dialog chọn quyền (pages_manage_metadata + nút Generate Token)
+    await tickTokenPermissions(page);
+    const permGenBtn = await page
+      .evaluate(() => {
+        const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+        const btn = [...document.querySelectorAll('[role="button"], button')].filter(vis)
+          .find((b) => /^(?:generate token|generate access token|tạo mã truy cập|tạo mã)$/i.test((b.innerText || '').trim()));
+        if (!btn) return null;
+        try { btn.click(); } catch (_) {}
+        const r = btn.getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+      })
+      .catch(() => null);
+    if (permGenBtn) {
+      await page.mouse.click(permGenBtn.x, permGenBtn.y).catch(() => {});
+      await sleep(750);
+    }
+
+    // 2. Tick "Tôi hiểu / I understand" bằng cả DOM click lẫn click chuột thật qua CDP
+    const understandTarget = await page
+      .evaluate(() => {
+        if (!document.body) return null;
+        const vis = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+        const center = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; };
+        const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter(vis);
+        const scope = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
+        if (!scope || typeof scope.querySelectorAll !== 'function') return null;
+
+        // Tìm label hoặc phần tử chứa "Tôi hiểu" / "I understand"
+        const cands = [...scope.querySelectorAll('label, span, div')]
+          .filter((el) => vis(el) && /^(?:tôi hiểu|i understand)$/i.test((el.innerText || '').trim()));
+        for (const el of cands) {
+          const lb = el.closest('label') || el;
+          const input = lb.querySelector('input[type="checkbox"], [role="checkbox"]')
+            || (lb.getAttribute && lb.getAttribute('for') ? document.getElementById(lb.getAttribute('for')) : null)
+            || scope.querySelector('input[type="checkbox"], [role="checkbox"]');
+          const alreadyChecked = input
+            ? (input.checked === true || input.getAttribute('aria-checked') === 'true')
+            : false;
+          if (!alreadyChecked) {
+            try { if (input) input.click(); } catch (_) {}
+            try { lb.click(); } catch (_) {}
+            return { needMouse: true, pos: center(input && vis(input) ? input : lb) };
+          }
+          return { needMouse: false, alreadyChecked: true };
+        }
+        return null;
+      })
+      .catch(() => null);
+
+    if (understandTarget && understandTarget.needMouse && understandTarget.pos) {
+      await page.mouse.click(understandTarget.pos.x, understandTarget.pos.y).catch(() => {});
+      await sleep(350);
+    }
+
+    // 3. Bấm "Sao chép / Copy" nếu đã mở khóa
+    const copyPos = await page
+      .evaluate(() => {
+        if (!document.body) return null;
+        const vis = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+        const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter(vis);
+        const scope = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
+        if (!scope || typeof scope.querySelectorAll !== 'function') return null;
+        const btn = [...scope.querySelectorAll('[role="button"], button')].filter(vis)
+          .find((b) => /^(?:sao chép|copy)$/i.test((b.innerText || '').trim())
+            && !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+        if (!btn) return null;
+        try { btn.click(); } catch (_) {}
+        const r = btn.getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+      })
+      .catch(() => null);
+    if (copyPos) {
+      await page.mouse.click(copyPos.x, copyPos.y).catch(() => {});
+      await sleep(300);
+    }
+
+    // 4. Đọc token từ clipboard hook hoặc trực tiếp từ input/DOM của dialog
     token = await page
       .evaluate(() => {
-        // ưu tiên dialog trên cùng, rồi quét cả trang
-        const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter((x) => x.offsetParent);
-        const scopes = dlgs.length ? [...dlgs.reverse(), document.body] : [document.body];
+        if (window.__capturedToken && /^EA[A-Za-z0-9_-]{30,}$/.test(window.__capturedToken.trim())) {
+          return window.__capturedToken.trim();
+        }
+        const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter((x) => x.offsetParent || x.getClientRects().length > 0);
+        const scopes = (dlgs.length ? [...dlgs.reverse(), document.body] : [document.body]).filter(Boolean);
         for (const scope of scopes) {
           const inputs = [...scope.querySelectorAll('input, textarea')]
             .map((i) => (i.value || '').trim())
@@ -2722,16 +3437,41 @@ async function generatePageToken(job, page, pageId) {
         return null;
       })
       .catch(() => null);
+
+    if (valid(token)) {
+      token = token.trim();
+      break;
+    }
+    await sleep(400);
   }
-  if (valid(token)) token = token.trim();
 
-  // Chụp lại màn hình dialog token để đối chiếu nếu cần debug (tên theo page
-  // vì các tab song song chụp cùng lúc, ghi đè nhau thì mất dấu vết)
-  await page.screenshot({ path: path.join(DATA_DIR, `token-debug-${pageId}.png`) }).catch(() => {});
+  if (!valid(token)) {
+    await page.screenshot({ path: path.join(DEPS.dataDir, `token-debug-${pageId}.png`) }).catch(() => {});
+  }
 
-  // Đóng dialog
-  await clickMatching(page, '^(?:đóng|close|đã hiểu|got it|ok|x|done|xong)$', '[role="button"], button');
-  await sleep(800);
+  // Đóng dialog ("Done / Xong / Đóng / Close")
+  const closePos = await page
+    .evaluate(() => {
+      if (!document.body) return null;
+      const vis = (el) => { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 1 && r.height > 1; };
+      const dlgs = [...document.querySelectorAll('[role="dialog"]')].filter(vis);
+      const scope = dlgs.length ? dlgs[dlgs.length - 1] : document.body;
+      if (!scope || typeof scope.querySelectorAll !== 'function') return null;
+      const btn = [...scope.querySelectorAll('[role="button"], button')].filter(vis)
+        .find((b) => /^(?:done|xong|đóng|close|đã hiểu|got it|ok)$/i.test((b.innerText || '').trim()));
+      if (!btn) return null;
+      try { btn.click(); } catch (_) {}
+      const r = btn.getBoundingClientRect();
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    })
+    .catch(() => null);
+  if (closePos) {
+    await page.mouse.click(closePos.x, closePos.y).catch(() => {});
+  } else {
+    await clickMatching(page, '^(?:đóng|close|đã hiểu|got it|ok|x|done|xong)$', '[role="button"], button');
+  }
+  await sleep(350);
+  log('Kết quả lấy token trang ' + pageId + ': ' + (valid(token) ? 'OK' : 'FAIL'));
   return valid(token) ? token.trim() : null;
 }
 
@@ -2770,24 +3510,26 @@ function startPageSync(uid, appId = null) {
 }
 
 async function runPageSync(job, uid) {
+  const sessionCookies = await ensureAccountCookies(job, uid);
   const browser = await launchAutomationChrome();
   job.browser = browser;
   browser.on('disconnected', () => {
     job.browser = null;
     if (!['success', 'error'].includes(job.status)) failSoft(job, 'Cửa sổ Chrome đã bị đóng.');
   });
-  const page = await browser.newPage();
+  const page = await getPrimaryAutomationPage(browser);
   job.page = page;
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
-  await injectSession(page, { cookies: await ensureAccountCookies(job, uid) });
+  if (sessionCookies.length) {
+    await injectSession(page, { cookies: sessionCookies });
+  }
 
   // Vào messenger_api_settings của app — bảng "Tạo mã truy cập" liệt kê MỌI page
+  const syncSettingsUrl = 'https://developers.facebook.com/apps/' + job.appId + '/messenger/messenger_api_settings/';
   setStatus(job, 'scanning', 'Đang mở Cài đặt API Messenger…');
-  await page.goto('https://developers.facebook.com/apps/' + job.appId + '/messenger/messenger_api_settings/', { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login\.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong Chrome của account rồi chạy lại.');
-  }
+  await page.goto(syncSettingsUrl, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
+  await ensureLoggedInDevelopersPage(job, page, uid, syncSettingsUrl, sessionCookies);
   await sleep(3500);
 
   // Bấm nút "more"/"Xem thêm" mở rộng bảng page
@@ -2934,23 +3676,24 @@ async function scrapeAppCards(page) {
 }
 
 async function runAppsScan(job, uid) {
+  const sessionCookies = await ensureAccountCookies(job, uid);
   const browser = await launchAutomationChrome();
   job.browser = browser;
   browser.on('disconnected', () => {
     job.browser = null;
     if (!['success', 'error'].includes(job.status)) failSoft(job, 'Cửa sổ Chrome đã bị đóng.');
   });
-  const page = await browser.newPage();
+  const page = await getPrimaryAutomationPage(browser);
   job.page = page;
   await page.setUserAgent(UA);
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7' });
-  await injectSession(page, { cookies: await ensureAccountCookies(job, uid) });
+  if (sessionCookies.length) {
+    await injectSession(page, { cookies: sessionCookies });
+  }
 
   setStatus(job, 'loading_apps', 'Đang mở danh sách ứng dụng…');
   await page.goto(APPS_URL, { waitUntil: 'networkidle2', timeout: 90000 }).catch(() => {});
-  if (/log_in|login\.php/.test(page.url() || '')) {
-    throw new Error('Phiên Facebook đã hết hạn — hãy đăng nhập lại trong CRM rồi chạy lại.');
-  }
+  await ensureLoggedInDevelopersPage(job, page, uid, APPS_URL, sessionCookies);
   await page
     .waitForSelector('a[href*="/apps/"]', { timeout: 30000 })
     .catch(() => {});
@@ -2990,4 +3733,4 @@ async function runAppsScan(job, uid) {
   closeBrowser(job);
 }
 
-module.exports = { configurePageSetupAutomation, startPageSync, startAppCreation, startDeleteApp, startPageSetup, startAppsScan, getJob, getActive, cancelSync, submitPassword, resumeSync, resolveRegisterInput, resendRegisterSms };
+module.exports = { configurePageSetupAutomation, startPageSync, startAppCreation, startDeleteApp, startPageSetup, startAppsScan, getJob, getActive, cancelSync, submitPassword, resumeSync, resolveRegisterInput, resendRegisterSms, setAutomationChromeVisible };

@@ -57,6 +57,7 @@ function setupFullTestDb() {
       content TEXT,
       media_type TEXT,
       media_url TEXT,
+      attachment_id TEXT,
       timestamp_ms INTEGER,
       timestamp_source TEXT,
       is_outgoing INTEGER,

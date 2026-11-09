@@ -41,10 +41,14 @@ test('realtime hints update threads without completing or masking the legacy syn
   assert.match(handler, /io\.emit\('THREADS_SYNCED'/);
 });
 
-test('realtime discovery confirms a stable lazy-load tail before cycling to the top', () => {
+test('realtime scan stays anchored at the sidebar top; full scan still steps and stalls at the tail', () => {
   const background = fs.readFileSync('src/extension/background.js', 'utf8');
-  assert.match(background, /if \(isRealtimeInboxScan && !target\.requestSection\) \{[\s\S]+?func: moveMessengerDiscoverySidebar[\s\S]+?args: \['step'\]/);
-  assert.match(background, /realtimeMoveState\.atEnd[\s\S]+?await delay\(1400\)[\s\S]+?stalls >= 3[\s\S]+?args: \['restore'\]/);
+  // merge v1.0.22-26: upstream thay vòng cuộn từng tick của realtime bằng
+  // "giữ nguyên đầu danh sách" — tin mới luôn chèn ở đầu nên không cần cuộn.
+  assert.match(background, /if \(isRealtimeInboxScan && !target\.requestSection\) \{[\s\S]{0,300}?break;/);
+  assert.match(background, /func: moveMessengerDiscoverySidebar[\s\S]{0,80}?args: \['step'\]/);
+  assert.match(background, /moveState\.atEnd && roundsWithoutNew >= 3\) break;/);
+  assert.match(background, /await delay\(moveState\.atEnd \? 1800 : 850\)/);
   assert.match(background, /if \(!isRealtimeScan && !budgetExpired && !cancelled\)/);
 });
 
@@ -58,7 +62,7 @@ test('request polling scans both request buttons in its own lightweight mode', (
   assert.match(background, /MESSAGE_REQUEST_SPAM/);
   assert.match(background, /const verifiedPrimary = primaryVisible\.filter/);
   assert.match(background, /rect\.left < Math\.min\(680, window\.innerWidth \* 0\.55\)/);
-  assert.match(scheduler, /reason === 'scheduler_requests' \? 12000 : 30000/);
+  assert.match(scheduler, /scanMode === 'realtime_requests' \? 30000 : 120000/);
   assert.match(background, /\/messages\/requests\/spam\?crm_tab_role=requests/);
   assert.match(background, /People you may know/);
   assert.match(background, /isRealtimeRequestScan && Boolean\(target\.requestSection\)/);
@@ -69,13 +73,13 @@ test('request polling scans both request buttons in its own lightweight mode', (
   assert.match(background, /e2ee\/requests\/t/);
 });
 
-test('sidebar scroll resolves the semantic left scroller and falls back to a trusted wheel', () => {
+test('sidebar scroll resolves the semantic left scroller', () => {
   const background = fs.readFileSync('src/extension/background.js', 'utf8');
   assert.doesNotMatch(background, /const navContainer = null/);
   assert.match(background, /\[aria-label\*="Hội thoại" i\]/);
   assert.match(background, /scroller\.dataset\.crmDiscoveryScroller = 'true'/);
   assert.match(background, /moved: after !== before/);
-  assert.match(background, /!realtimeMoveState\.moved && !realtimeMoveState\.atEnd/);
-  assert.match(background, /dispatchTrustedHistoryWheel\([\s\S]+?realtimeMoveState\.point/);
-  assert.match(background, /DISCOVERY_REALTIME\] trusted_scroll=/);
+  // Trusted wheel còn dùng cho cuộn lịch sử chat, không còn cho sidebar
+  // realtime (merge v1.0.22-26: realtime giữ đầu danh sách).
+  assert.match(background, /dispatchTrustedHistoryWheel\(tab\.id, wheelPoint, wheelDistance\)/);
 });

@@ -28,6 +28,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
   // Trạng thái job tự động hóa
   const [job, setJob] = useState(null); // {sync_id, status, message, error, kind}
   const [busy, setBusy] = useState(false);
+  const [needsBackendRestart, setNeedsBackendRestart] = useState(false);
 
   // Popup mật khẩu (Facebook re-auth) + popup đăng ký developer
   const [pwd, setPwd] = useState('');
@@ -70,7 +71,6 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
         const pre = new Set();
         (data.pages || []).forEach((p) => { if (p.has_token) pre.add(String(p.page_id)); });
         setSelectedIds(pre);
-        setErrorMsg('');
       } else {
         setErrorMsg(data.error || 'Không thể tải danh sách Fanpage');
       }
@@ -125,13 +125,22 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
 
   const pollStatus = async () => {
     try {
-      const res = await fetch('/api/page-api/sync-status');
+      const curSyncId = jobRef.current?.sync_id || '';
+      const qs = curSyncId ? `?sync_id=${encodeURIComponent(curSyncId)}` : '';
+      const res = await fetch(`/api/page-api/sync-status${qs}`);
       const data = await res.json();
       if (res.ok && data.success) {
         const j = data.job;
         if (!j) { setJob(null); return null; }
-        if (String(j.account_id) !== accountId) { return null; } // job của account khác
+        if (j.account_id && String(j.account_id) !== accountId) { return null; }
         setJob(j);
+        if (['success', 'error'].includes(j.status)) {
+          loadPages();
+          onSourcesChanged?.();
+          if (j.status === 'success') setSuccessMsg(j.message || 'Hoàn tất.');
+          if (j.status === 'error') setErrorMsg(j.error || j.message || 'Lỗi không rõ.');
+          setTimeout(() => setJob(null), 4000);
+        }
         return j;
       }
     } catch (_) {}
@@ -141,6 +150,23 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
   useEffect(() => {
     loadPages();
     loadConfig();
+    fetch('/api/health')
+      .then((r) => r.json())
+      .then((d) => {
+        const rv = String(d?.runtime_version || '').trim();
+        if (!rv) {
+          setNeedsBackendRestart(true);
+          return;
+        }
+        const parts = rv.split('.').map((n) => parseInt(n, 10) || 0);
+        const target = [1, 0, 26];
+        for (let i = 0; i < 3; i++) {
+          if ((parts[i] || 0) > target[i]) { setNeedsBackendRestart(false); return; }
+          if ((parts[i] || 0) < target[i]) { setNeedsBackendRestart(true); return; }
+        }
+        setNeedsBackendRestart(false);
+      })
+      .catch(() => {});
   }, [accountId]);
 
   // Realtime: trạng thái job từ socket.io + fallback poll khi job đang chạy
@@ -196,7 +222,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
       const data = await res.json();
       if (!res.ok || !data.success) throw new Error(data.error || 'Không thể bắt đầu tạo app');
       setShowCreateForm(false);
-      setJob({ sync_id: data.sync_id, status: 'starting', message: 'Đang mở cửa sổ Chrome tự động hóa…' });
+      setJob({ sync_id: data.sync_id, status: 'starting', message: 'Đang mở Chrome tự động hóa…' });
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -521,6 +547,15 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
           </button>
         </div>
 
+        {needsBackendRestart && (
+          <div className="mx-5 mt-3 p-3 bg-amber-500/15 border border-amber-500/40 rounded-xl text-xs text-amber-200 flex items-start gap-2">
+            <AlertCircle size={15} className="text-amber-400 shrink-0 mt-0.5" />
+            <span>
+              <strong>Cần khởi động lại phần mềm 1 lần:</strong> Bản cập nhật mới đã tải xong nhưng nhân hệ thống cũ vẫn đang chạy. Vui lòng <strong>đóng hẳn FB Messenger CRM rồi mở lại</strong> để mở Chrome tạo App &amp; Webhook bình thường.
+            </span>
+          </div>
+        )}
+
         {/* Trạng thái job đang chạy */}
         {jobRunning && (
           <div className="mx-5 mt-3 p-2.5 bg-[var(--color-accent,#0ea5e9)]/10 border border-[var(--color-accent,#0ea5e9)]/30 rounded-xl text-xs text-[var(--color-text-secondary,#cbd5e1)] flex items-center gap-2">
@@ -529,7 +564,7 @@ export default function PageSelectorModal({ account, onClose, onSourcesChanged, 
               <strong className="text-[var(--color-text-primary,#f8fafc)]">Đang chạy:</strong>{' '}
               {job.message || job.status}
             </span>
-            <button onClick={cancelJob} className="text-[10px] px-2 py-1 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors shrink-0">
+            <button type="button" onClick={cancelJob} className="text-[10px] px-2 py-1 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors shrink-0">
               Hủy
             </button>
           </div>
