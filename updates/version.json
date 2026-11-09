@@ -1,8 +1,8 @@
 {
-  "version": "1.0.26",
-  "releasedAt": "2026-11-08T09:51:47.515Z",
-  "notes": "Fix triệt để nhân bản tin nhắn cũ (link card drive.google.com, quote reply, nhãn Đã chỉnh sửa), giải mã chuẩn timestamp gốc từ mid.$ để sắp xếp lịch sử chính xác 100%, cơ chế chống đồng bộ lặp tin đã lưu và lọc sạch bong bóng 'đã gửi 1 ảnh' (v1.0.26)",
-  "requiresRestart": true,
-  "sizeBytes": 3086919,
-  "sha256": "ba74a87283ad53b2f1c6d387fd406d4d5096f858a8e4b30c018fdfc79753be1b"
+  "version": "1.0.27",
+  "releasedAt": "2026-11-09T11:35:13.943Z",
+  "notes": "Chong trung lap tin nhan ca nhan va nhom, hien dung Tra loi tin nhan, chuong loi nhac nhac lai, goi y mau nhanh khi go, banner het han license, xuat Excel toan bo hoi thoai, loc khoang ngay, bat so dien thoai quoc te, nut ho tro Telegram; dong bo anh/video nhieu file, giai ma thoi gian mid tin cu, loc tin 'da gui 1 anh'",
+  "requiresRestart": false,
+  "sizeBytes": 3227053,
+  "sha256": "4c2bd43f6b05994b5ba057fe0c862331f18d9198404927e2dfaebf83703ab699"
 }
