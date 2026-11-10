@@ -10629,8 +10629,68 @@ function startServer() {
           db.prepare('UPDATE messages SET sender_name = ? WHERE id = ?').run(neighbor.sender_name, msr.id);
         }
       }
+      // 0b) Lật lại chiều (is_outgoing = 1) cho các tin của operator bị lưu nhầm là tin khách (is_outgoing = 0)
+      // do nhãn tiếng Việt "Tôi" / "Bạn" hoặc tiêu đề hệ thống "Cuộc trò chuyện có tiêu đề ..." bị gán vào sender_name
+      db.prepare(`
+        UPDATE messages
+        SET is_outgoing = 1,
+            sender_role = 'operator',
+            direction_status = 'confirmed',
+            sender_id = COALESCE((SELECT account_id FROM threads t WHERE t.id = messages.thread_id AND t.account_id IS NOT NULL AND t.account_id != ''), 'SYSTEM'),
+            sender_name = NULL
+        WHERE is_outgoing = 0
+          AND sender_name IS NOT NULL
+          AND (
+            LOWER(TRIM(sender_name)) IN ('tôi', 'bạn', 'you', 'me', '2024, tôi', '2025, tôi', '2026, tôi', '2024, bạn', '2025, bạn', '2026, bạn')
+            OR LOWER(TRIM(sender_name)) LIKE 'cuộc trò chuyện có tiêu đề%'
+            OR LOWER(TRIM(sender_name)) LIKE 'tin nhắn trong cuộc trò chuyện%'
+          )
+      `).run();
+
+      // 0c) Cắt bỏ tiền tố năm bị tách nhầm từ aria-label ("2026, Behai Do" -> "Behai Do")
+      const yearPrefixedRows = db.prepare(`
+        SELECT id, sender_name FROM messages
+        WHERE sender_name IS NOT NULL AND sender_name GLOB '[0-9][0-9][0-9][0-9],*'
+      `).all();
+      for (const ypr of yearPrefixedRows) {
+        const cleanedSender = String(ypr.sender_name || '').replace(/^(?:\d{4}\s*,\s*)+/, '').trim();
+        if (/^(?:tôi|bạn|you|me)$/i.test(cleanedSender)) {
+          db.prepare(`
+            UPDATE messages
+            SET is_outgoing = 1, sender_role = 'operator', direction_status = 'confirmed', sender_name = NULL
+            WHERE id = ?
+          `).run(ypr.id);
+        } else {
+          db.prepare('UPDATE messages SET sender_name = ? WHERE id = ?').run(cleanedSender || null, ypr.id);
+        }
+      }
+
+      // 0d) Xóa caption rác trên tin nhắn ảnh/video bị dính tên người gửi ("Đợi Tôi", "Behai", hoặc trùng sender_name)
+      db.prepare(`
+        UPDATE messages
+        SET content = NULL
+        WHERE media_type IN ('video', 'image')
+          AND content IS NOT NULL AND TRIM(content) != ''
+          AND (
+            (sender_name IS NOT NULL AND LOWER(TRIM(content)) = LOWER(TRIM(sender_name)))
+            OR LOWER(TRIM(content)) IN ('tôi', 'bạn', 'you', 'đợi tôi', 'behai', 'behai do')
+          )
+      `).run();
+
+      // 0e) Làm sạch các tin nhắn cảm xúc/like bị dính tiền tố ngày tháng ("23 Tháng 10, 2025: 👍" -> "👍")
+      const datedReactionRows = db.prepare(`
+        SELECT id, content FROM messages
+        WHERE content LIKE '%Tháng %, 202%:%' AND LENGTH(content) <= 40
+      `).all();
+      for (const dr of datedReactionRows) {
+        const m = String(dr.content || '').trim().match(/^\d{1,2}\s+Tháng\s+\d{1,2},\s+\d{4}:\s*(.+)$/i);
+        if (m && m[1] && m[1].trim().length <= 8) {
+          db.prepare('UPDATE messages SET content = ? WHERE id = ?').run(m[1].trim(), dr.id);
+        }
+      }
+
       // 1) Khôi phục chiều tin nhắn (is_outgoing = 1) cho các tin của operator bị lưu nhầm là tin khách (is_outgoing = 0)
-      // dựa trên sync_cursor.oldest_is_outgoing = 1 hoặc preview sidebar "Bạn: <nội dung>"
+      // dựa trên sync_cursor.oldest_is_outgoing = 1 hoặc preview sidebar "Bạn: <nội dung>" / "Tôi: <nội dung>"
       const cursorThreads = db.prepare("SELECT id, account_id, last_message, sync_cursor FROM threads WHERE sync_cursor IS NOT NULL OR last_message LIKE 'Bạn:%' OR last_message LIKE 'Tôi:%' OR last_message LIKE 'You:%'").all();
       for (const ct of cursorThreads) {
         if (ct.sync_cursor) {

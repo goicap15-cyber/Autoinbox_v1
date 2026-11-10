@@ -9549,20 +9549,26 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               }
               if (hasLeftAv) unit.setAttribute('data-crm-left-avatar', '1');
               const articleRow = unit.closest('div[role="article"], div[role="row"]') || unit;
+              const cleanGroupSenderCandidate = (raw) => {
+                const c = String(raw || '').replace(/^(?:\d{4}\s*,\s*)+/, '').trim();
+                if (!c || /^(?:Bạn|Tôi|You|Me)$/i.test(c) || /^(?:cuộc trò chuyện|tin nhắn trong|đoạn chat|nhóm|group|chat|messages|đã xem|seen by)/i.test(c)) return '';
+                return c;
+              };
               let groupSender = '';
               const unitLabel = String(unit.getAttribute('aria-label') || '');
-              const uMatch = unitLabel.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::|$)/i) || unitLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i) || unitLabel.match(/Message sent by ([^]+?) at/i);
-              if (uMatch && !/^(?:Bạn|You)$/i.test(uMatch[1].trim())) groupSender = uMatch[1].trim();
+              const uMatch = unitLabel.match(/^Lúc\s+(?:[^,:]|,\s*\d{4})+,\s*([^:]+?)(?::|$)/i) || unitLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i) || unitLabel.match(/Message sent by ([^]+?) at/i);
+              if (uMatch) groupSender = cleanGroupSenderCandidate(uMatch[1]);
               if (!groupSender) {
                 for (const sib of articleRow.querySelectorAll('[data-message-id][aria-label], [aria-label^="Lúc "], [aria-label*="Tin nhắn do"]')) {
                   const sLbl = String(sib.getAttribute('aria-label') || '');
-                  const sMatch = sLbl.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::|$)/i) || sLbl.match(/Tin nhắn do ([^]+?) gửi lúc/i) || sLbl.match(/Message sent by ([^]+?) at/i);
-                  if (sMatch && !/^(?:Bạn|You)$/i.test(sMatch[1].trim())) { groupSender = sMatch[1].trim(); break; }
+                  const sMatch = sLbl.match(/^Lúc\s+(?:[^,:]|,\s*\d{4})+,\s*([^:]+?)(?::|$)/i) || sLbl.match(/Tin nhắn do ([^]+?) gửi lúc/i) || sLbl.match(/Message sent by ([^]+?) at/i);
+                  const sCandidate = sMatch ? cleanGroupSenderCandidate(sMatch[1]) : '';
+                  if (sCandidate) { groupSender = sCandidate; break; }
                 }
               }
               if (!groupSender) {
-                const h3Text = String(articleRow.querySelector('h3')?.textContent || '').trim();
-                if (h3Text && h3Text.length <= 60 && !/^(?:Bạn|You)$/i.test(h3Text) && !/đã trả lời|replied to/i.test(h3Text)) groupSender = h3Text;
+                const h3Text = cleanGroupSenderCandidate(articleRow.querySelector('h3')?.textContent || '');
+                if (h3Text && h3Text.length <= 60 && !/đã trả lời|replied to/i.test(h3Text)) groupSender = h3Text;
               }
               if (groupSender) unit.setAttribute('data-crm-group-sender', groupSender);
               for (const avImg of articleRow.querySelectorAll('img[src]')) {
@@ -10349,28 +10355,46 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               }
             }
             if (mediaOutgoing === null) {
-              const labelSaysOutgoing = /do B\u1ea1n g\u1eedi|Tin nh\u1eafn do B\u1ea1n g\u1eedi l\u00fac|B\u1ea1n \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(effectiveLabel);
+              const labelSaysOutgoing = /do (?:B\u1ea1n|T\u00f4i) g\u1eedi|Tin nh\u1eafn do (?:B\u1ea1n|T\u00f4i) g\u1eedi l\u00fac|(?:B\u1ea1n|T\u00f4i) \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(effectiveLabel);
               mediaOutgoing = labelSaysOutgoing ? true : false;
               mediaDirectionEvidence = 'label';
             }
+            const cleanHistorySenderName = (raw) => {
+              const cleaned = String(raw || '').replace(/^(?:\d{4}\s*,\s*)+/, '').trim();
+              if (!cleaned || /^(?:cuộc trò chuyện|tin nhắn trong|đoạn chat|nhóm|group|chat|messages|đã xem|seen by)/i.test(cleaned)) return '';
+              return cleaned;
+            };
+            const isSelfHistorySender = (raw) => /^(?:B\u1ea1n|T\u00f4i|You|Me)$/i.test(String(raw || '').trim());
             const mediaNativeId = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id')
               || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id') || row.getAttribute('data-id') || null;
             const mediaSenderMatch = effectiveLabel.match(/Tin nh\u1eafn do ([^]+?) g\u1eedi l\u00fac/i) || effectiveLabel.match(/Message sent by ([^]+?) at/i) || effectiveLabel.match(/Message sent [^]*? by ([^:]+?):/i);
-            if (mediaSenderMatch && !/^(?:B\u1ea1n|You)$/i.test(mediaSenderMatch[1].trim())) {
-              mediaOutgoing = false;
-              mediaDirectionEvidence = 'label_name';
+            const mediaSenderCandidate = mediaSenderMatch ? cleanHistorySenderName(mediaSenderMatch[1]) : '';
+            if (mediaSenderCandidate) {
+              if (isSelfHistorySender(mediaSenderCandidate)) {
+                mediaOutgoing = true;
+                mediaDirectionEvidence = 'label_you';
+              } else if (!(mediaOutgoing && mediaDirectionEvidence === 'geometry')) {
+                mediaOutgoing = false;
+                mediaDirectionEvidence = 'label_name';
+              }
             }
-            let mediaMemberName = (!mediaOutgoing && mediaSenderMatch
-              && !/^(?:B\u1ea1n|You)$/i.test(mediaSenderMatch[1].trim()))
-              ? mediaSenderMatch[1].trim()
+            let mediaMemberName = (!mediaOutgoing && mediaSenderCandidate && !isSelfHistorySender(mediaSenderCandidate))
+              ? mediaSenderCandidate
               : '';
             const mediaArticleLabel = nativeIdEl?.getAttribute('aria-label')
               || row.getAttribute('aria-label') || '';
-            const mediaArticleSender = mediaArticleLabel.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::\s*([\s\S]*))?$/i);
-            if (mediaArticleSender && !/^(?:Bạn|You)$/i.test(mediaArticleSender[1].trim())) {
-              mediaOutgoing = false;
-              mediaMemberName = mediaArticleSender[1].trim();
-              mediaDirectionEvidence = 'label_name';
+            const mediaArticleSender = mediaArticleLabel.match(/^Lúc\s+(?:[^,:]|,\s*\d{4})+,\s*([^:]+?)(?::\s*([\s\S]*))?$/i);
+            const mediaArticleCandidate = mediaArticleSender ? cleanHistorySenderName(mediaArticleSender[1]) : '';
+            if (mediaArticleCandidate) {
+              if (isSelfHistorySender(mediaArticleCandidate)) {
+                mediaOutgoing = true;
+                mediaMemberName = '';
+                mediaDirectionEvidence = 'label_you';
+              } else if (!(mediaOutgoing && mediaDirectionEvidence === 'geometry')) {
+                mediaOutgoing = false;
+                mediaMemberName = mediaArticleCandidate;
+                mediaDirectionEvidence = 'label_name';
+              }
             }
             const rowMediaList = [];
             for (const pEl of photoElements) {
@@ -10433,58 +10457,67 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             const bubbleLabel = bubbleLabelEl ? (bubbleLabelEl.getAttribute('aria-label') || '') : '';
             const currentLabel = bubbleLabel || effectiveLabel;
 
+            const cleanHistorySenderName = (raw) => {
+              const cleaned = String(raw || '').replace(/^(?:\d{4}\s*,\s*)+/, '').trim();
+              if (!cleaned || /^(?:cuộc trò chuyện|tin nhắn trong|đoạn chat|nhóm|group|chat|messages|đã xem|seen by)/i.test(cleaned)) return '';
+              return cleaned;
+            };
+            const isSelfHistorySender = (raw) => /^(?:B\u1ea1n|T\u00f4i|You|Me)$/i.test(String(raw || '').trim());
+
             let isOutgoing = false;
             let senderName = '';
             let labelSenderName = '';
             let directionMatched = false;
-            if (/do Bạn gửi|Tin nhắn do Bạn gửi lúc|Bạn đã gửi|sent by you|You sent|Message sent by you/i.test(currentLabel)) {
+            if (/do (?:Bạn|Tôi) gửi|Tin nhắn do (?:Bạn|Tôi) gửi lúc|(?:Bạn|Tôi) đã gửi|sent by you|You sent|Message sent by you/i.test(currentLabel)) {
               isOutgoing = true;
               senderName = 'Bạn';
               directionMatched = true;
             } else {
               // Format label mới của FB (2026-11-03): "Message sent 4:03 PM by <tên>: <nội dung>"
               const nameMatch = currentLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i) || currentLabel.match(/Message sent by ([^]+?) at/i) || currentLabel.match(/Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by\s+([^:]+?):/i);
-              if (nameMatch) {
-                const rawSender = nameMatch[1].trim();
-                if (/^(?:Bạn|You)$/i.test(rawSender)) {
+              const matchedSender = nameMatch ? cleanHistorySenderName(nameMatch[1]) : '';
+              if (matchedSender) {
+                if (isSelfHistorySender(matchedSender)) {
                   isOutgoing = true;
                   senderName = 'Bạn';
                 } else {
                   isOutgoing = false;
-                  senderName = rawSender;
-                  labelSenderName = rawSender;
+                  senderName = matchedSender;
+                  labelSenderName = matchedSender;
                 }
                 directionMatched = true;
               } else {
-                const newLabelMatch = currentLabel.match(/^Lúc\s+.+,\s*(.+?):\s*/i);
-                if (newLabelMatch) {
-                  const rawSender = newLabelMatch[1].trim();
-                  if (/^(?:Bạn|You)$/i.test(rawSender)) {
+                const newLabelMatch = currentLabel.match(/^Lúc\s+(?:[^,:]|,\s*\d{4})+,\s*([^:]+?)(?::\s*|$)/i);
+                const newRawSender = newLabelMatch ? cleanHistorySenderName(newLabelMatch[1]) : '';
+                if (newRawSender) {
+                  if (isSelfHistorySender(newRawSender)) {
                     isOutgoing = true;
                     senderName = 'Bạn';
                     directionMatched = true;
                   } else {
                     isOutgoing = false;
-                    senderName = rawSender;
-                    labelSenderName = rawSender;
+                    senderName = newRawSender;
+                    labelSenderName = newRawSender;
                     directionMatched = true;
                   }
                 }
               }
             }
 
-            const robustOutgoing = /do B\u1ea1n g\u1eedi|Tin nh\u1eafn do B\u1ea1n g\u1eedi l\u00fac|B\u1ea1n \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(currentLabel);
+            const robustOutgoing = /do (?:B\u1ea1n|T\u00f4i) g\u1eedi|Tin nh\u1eafn do (?:B\u1ea1n|T\u00f4i) g\u1eedi l\u00fac|(?:B\u1ea1n|T\u00f4i) \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(currentLabel);
             const robustSender = currentLabel.match(/Tin nh\u1eafn do ([^]+?) g\u1eedi l\u00fac/i) || currentLabel.match(/Message sent by ([^]+?) at/i) || currentLabel.match(/Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by\s+([^:]+?):/i);
             if (robustOutgoing) {
               isOutgoing = true;
               senderName = 'Bạn';
               directionMatched = true;
             } else if (robustSender) {
-              const rawSender = robustSender[1].trim();
-              isOutgoing = /^(?:B\u1ea1n|You)$/i.test(rawSender);
-              senderName = isOutgoing ? 'Bạn' : rawSender;
-              if (!isOutgoing) labelSenderName = rawSender;
-              directionMatched = true;
+              const rawSender = cleanHistorySenderName(robustSender[1]);
+              if (rawSender) {
+                isOutgoing = isSelfHistorySender(rawSender);
+                senderName = isOutgoing ? 'Bạn' : rawSender;
+                if (!isOutgoing) labelSenderName = rawSender;
+                directionMatched = true;
+              }
             }
 
             if (!directionMatched) {
@@ -10526,8 +10559,12 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             const bubbleRect = leafBubble.getBoundingClientRect();
             if (directionRect.width > 0 && bubbleRect.width > 0) {
               const relativeCenter = (bubbleRect.left + bubbleRect.width / 2 - directionRect.left) / directionRect.width;
-              if (relativeCenter <= 0.45 || relativeCenter >= 0.55) {
-                isOutgoing = relativeCenter >= 0.55;
+              const leftGap = Math.max(0, bubbleRect.left - directionRect.left);
+              const rightGap = Math.max(0, directionRect.right - bubbleRect.right);
+              const wideRightAligned = bubbleRect.width >= directionRect.width * 0.42 && rightGap <= 48 && leftGap >= 72;
+              const wideLeftAligned = bubbleRect.width >= directionRect.width * 0.42 && leftGap <= 64 && rightGap >= 72;
+              if (relativeCenter <= 0.45 || relativeCenter >= 0.55 || wideRightAligned || wideLeftAligned) {
+                isOutgoing = relativeCenter >= 0.55 || (wideRightAligned && !wideLeftAligned);
                 senderName = isOutgoing ? 'Bạn' : (contactName || 'Khách hàng');
                 directionMatched = true;
                 historyDirectionEvidence = 'geometry';
@@ -10556,10 +10593,15 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               }
             }
             const ownArticleLabel = ownArticleEl ? (ownArticleEl.getAttribute('aria-label') || '') : '';
-            const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::\s*([\s\S]*))?$/i);
+            const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+(?:[^,:]|,\s*\d{4})+,\s*([^:]+?)(?::\s*([\s\S]*))?$/i);
             if (ownSenderMatch) {
-              const ownSender = ownSenderMatch[1].trim();
-              if (!/^(?:Bạn|You)$/i.test(ownSender)) {
+              const ownSender = cleanHistorySenderName(ownSenderMatch[1]);
+              if (isSelfHistorySender(ownSender)) {
+                isOutgoing = true;
+                senderName = 'Bạn';
+                labelSenderName = '';
+                directionMatched = true;
+              } else if (ownSender && !(isOutgoing && historyDirectionEvidence === 'geometry')) {
                 isOutgoing = false;
                 senderName = ownSender;
                 labelSenderName = ownSender;
@@ -10570,17 +10612,18 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // visual override phía trên đổi sender_name thành tên nhóm cho tin
             // trái - khôi phục tên thành viên để member_name không mất.
             if (!isOutgoing && !labelSenderName) {
-              const stampedGroupSender = ownArticleEl?.getAttribute?.('data-crm-group-sender') || row.getAttribute?.('data-crm-group-sender') || '';
-              if (stampedGroupSender && !/^(?:Bạn|You)$/i.test(stampedGroupSender)) {
+              const stampedGroupSender = cleanHistorySenderName(ownArticleEl?.getAttribute?.('data-crm-group-sender') || row.getAttribute?.('data-crm-group-sender') || '');
+              if (stampedGroupSender && !isSelfHistorySender(stampedGroupSender)) {
                 labelSenderName = stampedGroupSender;
                 senderName = stampedGroupSender;
               } else {
                 const outerArt = row.closest?.('div[role="article"], div[role="row"]') || row;
                 for (const sib of outerArt.querySelectorAll?.('[data-message-id][aria-label], [aria-label^="Lúc "], [aria-label*="Tin nhắn do"]') || []) {
                   const sLbl = String(sib.getAttribute('aria-label') || '');
-                  const sMatch = sLbl.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::|$)/i) || sLbl.match(/Tin nhắn do ([^]+?) gửi lúc/i);
-                  if (sMatch && !/^(?:Bạn|You)$/i.test(sMatch[1].trim())) {
-                    labelSenderName = sMatch[1].trim();
+                  const sMatch = sLbl.match(/^Lúc\s+(?:[^,:]|,\s*\d{4})+,\s*([^:]+?)(?::|$)/i) || sLbl.match(/Tin nhắn do ([^]+?) gửi lúc/i);
+                  const sCandidate = sMatch ? cleanHistorySenderName(sMatch[1]) : '';
+                  if (sCandidate && !isSelfHistorySender(sCandidate)) {
+                    labelSenderName = sCandidate;
                     senderName = labelSenderName;
                     break;
                   }

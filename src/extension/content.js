@@ -1331,25 +1331,32 @@
 
     const isMissedCallContent = /nhỡ|bỏ lỡ|missed/i.test(effectiveLabel || (node && node.textContent) || '');
 
+    const isSelfSenderLabel = (name) => /^(?:Bạn|Tôi|You|Me)$/i.test(String(name || '').trim());
+    const cleanExtractedSenderName = (name) => {
+      const cleaned = String(name || '').replace(/^(?:\d{4}\s*,\s*)+/, '').trim();
+      if (!cleaned) return '';
+      if (/^(?:cuộc trò chuyện|tin nhắn trong|đoạn chat|nhóm|group|chat|messages|đã xem|seen by)/i.test(cleaned)) return '';
+      return cleaned;
+    };
+
     if (isMissedCallContent) {
       is_outgoing = false;
       sender_name = contactNameStr || 'Khách hàng';
       direction_evidence = 'call_label';
-    } else if (/do Bạn gửi|Tin nhắn do Bạn gửi lúc|Bạn đã gửi|sent by you|You sent|Message sent by you/i.test(effectiveLabel)) {
+    } else if (/do (?:Bạn|Tôi) gửi|Tin nhắn do (?:Bạn|Tôi) gửi lúc|(?:Bạn|Tôi) đã gửi|sent by you|You sent|Message sent by you/i.test(effectiveLabel)) {
       is_outgoing = true;
       sender_name = 'Bạn';
       direction_evidence = 'label_you';
     } else {
       // Nhãn EN mới của Messenger: "Message sent 12:10 PM by <Tên>: <nội dung>"
-      // (thời gian TRƯỚC "by" — regex cũ "Message sent by X at" không khớp ->
-      // tin khách rơi xuống đoán hình học và bị lật thành outgoing khi cửa sổ
-      // ẩn, reproduce 2026-11-03 12:10).
+      // hoặc nhãn VI mới: "Lúc 12:24, Bạn: ..." / "Lúc 11:49 8 Tháng 10, 2026, Tôi: ..."
       const nameMatch = effectiveLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i)
         || effectiveLabel.match(/Message sent by ([^]+?) at/i)
-        || effectiveLabel.match(/Message sent [^]*? by ([^:]+?):/i);
-      if (nameMatch) {
-        const rawSender = nameMatch[1].trim();
-        if (/^(?:Bạn|You)$/i.test(rawSender)) {
+        || effectiveLabel.match(/Message sent [^]*? by ([^:]+?):/i)
+        || effectiveLabel.match(/^Lúc\s+(?:[^,:]|,\s*\d{4})+,\s*([^:]+?)(?::|$)/i);
+      const rawSender = nameMatch ? cleanExtractedSenderName(nameMatch[1]) : '';
+      if (rawSender) {
+        if (isSelfSenderLabel(rawSender)) {
           is_outgoing = true;
           sender_name = 'Bạn';
           direction_evidence = 'label_you';
@@ -1357,10 +1364,6 @@
           is_outgoing = false;
           sender_name = rawSender;
           direction_evidence = 'label_name';
-          // Tên giải từ aria-label của tin NHÓM - nhánh realtime bên dưới ghi
-          // đè sender_name thành tên nhóm, nhưng bubble nhãn tên trần cạnh
-          // bubble thật vẫn cần tên này để nhận diện (reproduce 2026-10-11:
-          // nhóm Bi-aaaaaaa dính hàng loạt row tên trần "Tiến Quang"/"Linh").
           labelSenderName = rawSender;
         }
       } else {
@@ -1402,7 +1405,7 @@
           sender_name = contactNameStr;
           direction_evidence = 'avatar';
         } else {
-          let targetNode = messageRow || node;
+          let targetNode = finalBubbles[0] || messageRow || node;
           if (isVideoMessage || isPhotoMessage) {
             const mediaEl = mediaItems[0]?.element || messageRow.querySelector?.('video');
             if (mediaEl) {
@@ -1426,6 +1429,10 @@
                   const logCenter = logRect.left + logRect.width * 0.55;
                   is_outgoing = nodeCenter > logCenter;
                 }
+              } else if (rightGap <= 48 && leftGap >= 72) {
+                is_outgoing = true;
+              } else if (leftGap <= 64 && rightGap >= 72) {
+                is_outgoing = false;
               } else {
                 const nodeCenter = nodeRect.left + nodeRect.width / 2;
                 const logCenter = logRect.left + logRect.width * 0.55;
@@ -1461,8 +1468,15 @@
             || /^(?:You sent|Message sent|Tin nhắn do|Enter,)/i.test(leafText);
           if (ariaChrome) continue;
           const relativeCenter = (rect.left + rect.width / 2 - mainRect.left) / mainRect.width;
-          if (relativeCenter <= 0.45) { sawDecisiveLeft = true; decisiveCenters.push(Math.round(relativeCenter * 100) / 100); }
-          else if (relativeCenter >= 0.55) { sawDecisiveRight = true; decisiveCenters.push(Math.round(relativeCenter * 100) / 100); }
+          const leftGap = Math.max(0, rect.left - mainRect.left);
+          const rightGap = Math.max(0, mainRect.right - rect.right);
+          if (relativeCenter <= 0.45 || (rect.width >= mainRect.width * 0.42 && leftGap <= 64 && rightGap >= 72)) {
+            sawDecisiveLeft = true;
+            decisiveCenters.push(Math.round(relativeCenter * 100) / 100);
+          } else if (relativeCenter >= 0.55 || (rect.width >= mainRect.width * 0.42 && rightGap <= 48 && leftGap >= 72)) {
+            sawDecisiveRight = true;
+            decisiveCenters.push(Math.round(relativeCenter * 100) / 100);
+          }
         }
         if (sawDecisiveLeft && !sawDecisiveRight) {
           is_outgoing = false;
@@ -1483,12 +1497,20 @@
     if (!effectiveLabel && ownArticleLabel) effectiveLabel = ownArticleLabel;
     const rowNativeIdForTs = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null;
     const rowMidTs = extractMidTimestampMs(rowNativeIdForTs);
-    const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::\s*([\s\S]*))?$/i);
-    if (ownSenderMatch && !/^(?:Bạn|You)$/i.test(ownSenderMatch[1].trim())) {
-      is_outgoing = false;
-      sender_name = ownSenderMatch[1].trim();
-      labelSenderName = ownSenderMatch[1].trim();
-      direction_evidence = 'label_name';
+    const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+(?:[^,:]|,\s*\d{4})+,\s*([^:]+?)(?::\s*([\s\S]*))?$/i);
+    if (ownSenderMatch) {
+      const ownSender = cleanExtractedSenderName(ownSenderMatch[1]);
+      if (isSelfSenderLabel(ownSender)) {
+        is_outgoing = true;
+        sender_name = 'Bạn';
+        labelSenderName = '';
+        direction_evidence = 'label_you';
+      } else if (ownSender && !(is_outgoing && direction_evidence === 'geometry')) {
+        is_outgoing = false;
+        sender_name = ownSender;
+        labelSenderName = ownSender;
+        direction_evidence = 'label_name';
+      }
     }
 
     // Tên thành viên thật trong tin NHÓM: chỉ nhận từ aria-label của tin
@@ -1499,16 +1521,17 @@
       const outerArt = messageRow.closest?.('div[role="article"], div[role="row"]') || messageRow;
       for (const sib of outerArt.querySelectorAll?.('[data-message-id][aria-label], [aria-label^="Lúc "], [aria-label*="Tin nhắn do"]') || []) {
         const sLbl = String(sib.getAttribute('aria-label') || '');
-        const sMatch = sLbl.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::|$)/i) || sLbl.match(/Tin nhắn do ([^]+?) gửi lúc/i);
-        if (sMatch && !/^(?:Bạn|You)$/i.test(sMatch[1].trim())) {
-          labelSenderName = sMatch[1].trim();
+        const sMatch = sLbl.match(/^Lúc\s+(?:[^,:]|,\s*\d{4})+,\s*([^:]+?)(?::|$)/i) || sLbl.match(/Tin nhắn do ([^]+?) gửi lúc/i);
+        const sSender = sMatch ? cleanExtractedSenderName(sMatch[1]) : '';
+        if (sSender && !isSelfSenderLabel(sSender)) {
+          labelSenderName = sSender;
           sender_name = labelSenderName;
           break;
         }
       }
       if (!labelSenderName) {
-        const h3Text = String(outerArt.querySelector?.('h3')?.textContent || '').trim();
-        if (h3Text && h3Text.length <= 60 && !/^(?:Bạn|You)$/i.test(h3Text) && !/đã trả lời|replied to/i.test(h3Text)) {
+        const h3Text = cleanExtractedSenderName(outerArt.querySelector?.('h3')?.textContent || '');
+        if (h3Text && h3Text.length <= 60 && !isSelfSenderLabel(h3Text) && !/đã trả lời|replied to/i.test(h3Text)) {
           labelSenderName = h3Text;
           sender_name = h3Text;
         }

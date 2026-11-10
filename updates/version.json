@@ -1,8 +1,8 @@
 {
-  "version": "1.0.34",
-  "releasedAt": "2026-11-10T09:22:50.997Z",
-  "notes": "v1.0.34: Sửa chuẩn chiều tin nhắn gửi đi (Bạn), chống lẫn tin nhắn khi chuyển luồng, tối ưu tốc độ tải Chrome và tự động sửa dữ liệu cũ",
+  "version": "1.0.35",
+  "releasedAt": "2026-11-10T09:42:09.153Z",
+  "notes": "Fix v1.0.35: Chuan hoa chieu tin nhan Tôi/Bạn, bong bong rong, ten nguoi gui dinh nam 2026 va tu dong sua data cu",
   "requiresRestart": false,
-  "sizeBytes": 3330028,
-  "sha256": "fc63456d21cbb5d5651ac50b2363e0fd23bc6246496f8c3618345db53dcbc7f5"
+  "sizeBytes": 3331094,
+  "sha256": "5ce40a328685d3e595b41c5456e1cdd347eaaf485542e477b82bc4f8ecbea71c"
 }

@@ -652,15 +652,22 @@ class ConversationRepository {
       }
       const pendingBubbleMerges = new Map();
       for (const msg of msgs) {
-        const isOutgoing = msg.is_outgoing === true || msg.is_outgoing === 1 ? 1 : 0;
+        const rawMemberOrSender = String(msg.member_name || msg.sender_name || '').replace(/^(?:\d{4}\s*,\s*)+/, '').trim();
+        const isSelfLabeledSender = /^(?:bạn|tôi|you|me)$/i.test(rawMemberOrSender);
+        const isOutgoing = (msg.is_outgoing === true || msg.is_outgoing === 1 || isSelfLabeledSender) ? 1 : 0;
         const directionStatus = msg.direction_status === 'pending' || msg.directionStatus === 'pending'
           ? 'pending'
           : 'confirmed';
         const senderId = msg.sender_id || msg.sender || (isOutgoing ? String(msg.account_id || 'SYSTEM') : 'CONTACT');
         // Tên thành viên thật trong hội thoại NHÓM - extension chỉ điền
         // member_name khi giải được từ aria-label tin (không bao giờ là tên nhóm).
-        const memberName = (!isOutgoing && msg.member_name)
-          ? String(msg.member_name).trim() || null
+        const cleanedMemberCandidate = (!isOutgoing && msg.member_name)
+          ? String(msg.member_name).replace(/^(?:\d{4}\s*,\s*)+/, '').trim()
+          : '';
+        const memberName = (cleanedMemberCandidate
+          && !/^(?:bạn|tôi|you|me|khách hàng)$/i.test(cleanedMemberCandidate)
+          && !/^(?:cuộc trò chuyện|tin nhắn trong|đoạn chat|nhóm|group)/i.test(cleanedMemberCandidate))
+          ? cleanedMemberCandidate
           : null;
         const senderRole = isOutgoing ? 'operator' : 'customer';
         const observedSequence = Number.isFinite(Number(msg.sequence_order ?? msg.dom_order))
@@ -1097,12 +1104,12 @@ class ConversationRepository {
           // chiều ngược của guard hasMatchingOutgoingText phía trên
           // (reproduce 2026-11-03: heal xong bị crawler đọc sớm lật lại).
           const guardRow = database.prepare('SELECT sender_id, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
-          const hasAuthoritativeOutgoingEvidence = msg.direction_evidence === 'geometry';
+          const hasAuthoritativeOutgoingEvidence = msg.direction_evidence === 'geometry' || msg.direction_evidence === 'label_you' || isSelfLabeledSender;
           const namedIncomingFlipBlocked = isHistoryObservation
             && isOutgoing === 1
             && Number(existing.is_outgoing) === 0
             && !hasAuthoritativeOutgoingEvidence
-            && Boolean(guardRow && guardRow.sender_name && !/^(?:bạn|tôi|you|khách hàng)$/i.test(String(guardRow.sender_name).trim()));
+            && Boolean(guardRow && guardRow.sender_name && !/^(?:bạn|tôi|you|me|khách hàng)$/i.test(String(guardRow.sender_name).replace(/^(?:\d{4}\s*,\s*)+/, '').trim()) && !/^(?:cuộc trò chuyện|tin nhắn trong)/i.test(String(guardRow.sender_name).trim()));
           let upsertIsOutgoing = isOutgoing;
           let upsertSenderRole = senderRole;
           let upsertDirectionStatus = directionStatus;
