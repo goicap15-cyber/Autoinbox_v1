@@ -277,6 +277,40 @@ function cleanStaleInstalledExtension(profileDir) {
   } catch (_) {}
 }
 
+// Dọn các thư mục cache tạm thời của Chrome (Cache, Code Cache, GPUCache,
+// Service Worker CacheStorage/ScriptCache) trước khi mở trình duyệt để tránh
+// đầy bộ nhớ gây cảnh báo "Free up space to continue" của Facebook và làm
+// Chrome bị treo/lag, trong khi giữ nguyên Cookies, Local Storage, IndexedDB.
+function cleanTransientProfileCache(profileDir) {
+  if (!profileDir || !fs.existsSync(profileDir)) return;
+  const cacheSubpaths = [
+    path.join('Default', 'Cache'),
+    path.join('Default', 'Code Cache'),
+    path.join('Default', 'GPUCache'),
+    path.join('Default', 'DawnCache'),
+    path.join('Default', 'Service Worker', 'CacheStorage'),
+    path.join('Default', 'Service Worker', 'ScriptCache'),
+    'ShaderCache',
+    'GrShaderCache',
+    'GraphiteDawnCache'
+  ];
+  let cleanedCount = 0;
+  for (const rel of cacheSubpaths) {
+    try {
+      const target = path.join(profileDir, rel);
+      if (fs.existsSync(target)) {
+        fs.rmSync(target, { recursive: true, force: true, maxRetries: 1, retryDelay: 100 });
+        cleanedCount += 1;
+      }
+    } catch (_) {
+      // Nếu Chrome đang chạy và giữ lock thư mục cache thì bỏ qua an toàn
+    }
+  }
+  if (cleanedCount > 0) {
+    console.log(`[ProcessManager] Đã dọn ${cleanedCount} thư mục cache tạm trong ${profileDir}`);
+  }
+}
+
 // Chrome bị kill (taskkill/restart app) ghi exit_type='Crashed' -> lần mở sau
 // hiện popup "Restore pages?" (cửa sổ phụ gây màn hình đen thứ 2). Đặt lại
 // exit_type='Normal' + exited_cleanly=true + launch kèm flag chặn bubble
@@ -412,7 +446,7 @@ class ProcessManager {
       '--disable-popup-blocking',
       '--disable-notifications',
       '--unlimited-storage',
-      '--disk-cache-size=104857600',
+      '--disk-cache-size=536870912',
       '--autoplay-policy=no-user-gesture-required'
     ];
   }
@@ -765,6 +799,7 @@ class ProcessManager {
     }
     ensureProfilePermissions(profileDir);
     cleanStaleInstalledExtension(profileDir);
+    cleanTransientProfileCache(profileDir);
 
     const chromeExecutable = this.getInteractiveSetupChromeExecutable();
     const absExtPath = path.resolve(this.extensionPath).replace(/\\/g, '/');
@@ -1078,6 +1113,7 @@ class ProcessManager {
     }
     ensureProfilePermissions(profileDir);
     cleanStaleInstalledExtension(profileDir);
+    cleanTransientProfileCache(profileDir);
 
     const chromeExecutable = this.getInteractiveSetupChromeExecutable();
     const absExtPath = path.resolve(this.extensionPath).replace(/\\/g, '/');

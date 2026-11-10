@@ -1,8 +1,8 @@
 {
-  "version": "1.0.35",
-  "releasedAt": "2026-11-10T09:42:09.153Z",
-  "notes": "Fix v1.0.35: Chuan hoa chieu tin nhan Tôi/Bạn, bong bong rong, ten nguoi gui dinh nam 2026 va tu dong sua data cu",
+  "version": "1.0.36",
+  "releasedAt": "2026-11-10T10:13:12.485Z",
+  "notes": "Fix wrong-recipient send on slow Chrome, speed up incoming photo/video sync, and optimize Chrome cache/tabs",
   "requiresRestart": false,
-  "sizeBytes": 3331094,
-  "sha256": "5ce40a328685d3e595b41c5456e1cdd347eaaf485542e477b82bc4f8ecbea71c"
+  "sizeBytes": 3333117,
+  "sha256": "6f0f5b2957cf8b54f776e4e579e9d5782f9c3a54d3f25eeabe16c6b97d3a40a7"
 }

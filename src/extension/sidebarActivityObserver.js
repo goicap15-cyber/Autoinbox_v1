@@ -182,7 +182,7 @@
         last_message: lastMessage,
         is_unread: unread,
         user_read_on_fb: userReadOnFb,
-        preview_is_outgoing: /^(?:Bạn|Tôi|You)\s*:/iu.test(lastMessage) || /^(?:Bạn đã gửi|You sent)/iu.test(lastMessage),
+        preview_is_outgoing: /^(?:Bạn|Tôi|You)\s*:/iu.test(lastMessage) || /^(?:(?:Bạn|Tôi) đã gửi|You (?:sent|shared))/iu.test(lastMessage),
         row_time_text: timeLine.slice(0, 24),
         thread_url: (() => { try { return new URL(href, location.origin).toString(); } catch (_) { return href; } })(),
         is_e2ee: /\/messages\/(?:e2ee\/)?t\//i.test(href)

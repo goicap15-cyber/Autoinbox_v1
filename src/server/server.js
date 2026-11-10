@@ -3076,6 +3076,37 @@ wss.on('connection', (ws, req) => {
             console.log(`[WS] ℹ️ Backend Guard: Bỏ qua thông báo hệ thống Meta lặp lại từ thread ${threadId}`);
             break;
           }
+          if (!hasMediaPayload && isNetworkObserverRow && (m.media_type === 'image' || m.media_type === 'video') && !cleanedContent) {
+            const mediaPreviewLabel = m.media_type === 'video' ? '[Video]' : '[Ảnh]';
+            const netAccount = targetAccountId || threadAccountId || m.account_id || ws.accountId || null;
+            if (!m.is_outgoing && canonicalThreadId) {
+              const nowIso = new Date().toISOString();
+              db.prepare('UPDATE threads SET last_message = ?, last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?')
+                .run(mediaPreviewLabel, String(canonicalThreadId));
+              io.emit('THREAD_UNREAD_CHANGED', {
+                thread_id: String(canonicalThreadId),
+                is_unread: 1,
+                unread_manual: 1,
+                last_activity: nowIso
+              });
+              io.emit('THREAD_LIST_UPDATED', { thread_id: String(canonicalThreadId), account_id: netAccount });
+              if (netAccount) {
+                InboxSyncScheduler.enqueueThreadSync({
+                  account_id: netAccount,
+                  thread_id: String(canonicalThreadId),
+                  external_thread_id: String(threadId),
+                  reason: 'sidebar_incoming',
+                  allow_navigation: true,
+                  priority: 'high',
+                  sync_mode: 'incremental'
+                });
+              }
+            }
+            if (msg.outbox_id && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'BACKEND_OUTBOX_ACK', data: { outbox_id: String(msg.outbox_id) } }));
+            }
+            break;
+          }
           if (!hasMediaPayload && (!cleanedContent || isSystemOrMetadataText(cleanedContent))) {
             console.log(`[WS] ℹ️ Backend Guard: Bỏ qua tin nhắn rác/hệ thống: "${sanitizeLog(m.content, 40)}" từ thread ${threadId}`);
             break;
@@ -4207,9 +4238,12 @@ wss.on('connection', (ws, req) => {
                 io.emit('THREAD_SEEN', { thread_id: String(canonicalThreadId), last_seen_message_id: String(lastOut.id) });
               }
             }
+            const fallbackMediaLabel = (!m.content && (m.media_type === 'image' || m.media_type === 'video'))
+              ? (m.media_type === 'video' ? '[Video]' : '[Ảnh]')
+              : (m.content || null);
             if (isOutgoing) {
-              if (isNewestInThread && m.content) {
-                db.prepare('UPDATE threads SET last_message = ?, is_unread = 0, unread_manual = -1 WHERE id = ?').run(m.content, String(canonicalThreadId));
+              if (isNewestInThread && fallbackMediaLabel) {
+                db.prepare('UPDATE threads SET last_message = ?, is_unread = 0, unread_manual = -1 WHERE id = ?').run(fallbackMediaLabel, String(canonicalThreadId));
               } else {
                 db.prepare('UPDATE threads SET is_unread = 0, unread_manual = -1 WHERE id = ?').run(String(canonicalThreadId));
               }
@@ -4221,10 +4255,10 @@ wss.on('connection', (ws, req) => {
               if (isNewestInThread && isFreshIncoming && !justReadByOperator) {
                 const activityIso = new Date(incomingAt).toISOString();
                 db.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = ?, is_unread = 1, unread_manual = 1 WHERE id = ?')
-                  .run(m.content || null, activityIso, String(canonicalThreadId));
+                  .run(fallbackMediaLabel, activityIso, String(canonicalThreadId));
                 io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: activityIso });
-              } else if (isNewestInThread && m.content) {
-                db.prepare('UPDATE threads SET last_message = ? WHERE id = ?').run(m.content, String(canonicalThreadId));
+              } else if (isNewestInThread && fallbackMediaLabel) {
+                db.prepare('UPDATE threads SET last_message = ? WHERE id = ?').run(fallbackMediaLabel, String(canonicalThreadId));
               }
             }
           }
@@ -4606,30 +4640,21 @@ wss.on('connection', (ws, req) => {
             LEFT JOIN contacts c ON c.thread_id = t.id
             WHERE t.id = ?
           `).get(persistedMessage?.thread_id || canonicalThreadId || m.thread_id);
-          if (realtimeMessageEmittedEarly) {
-            // The durable row was already published immediately after insert.
-            // Keep the later enrichment/automation path from emitting it twice.
-            if (msg.outbox_id && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({
-                type: 'BACKEND_OUTBOX_ACK',
-                data: { outbox_id: String(msg.outbox_id) }
-              }));
-            }
-            break;
+          if (!realtimeMessageEmittedEarly) {
+            const msgPayload = {
+              ...m,
+              ...(persistedMessage || {}),
+              account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null,
+              timestamp_ms: tsMs,
+              timestamp_source: tsSource,
+              created_at: createdAt,
+              is_outgoing: !!isOutgoing,
+              direction_status: directionStatus,
+              thread_summary: realtimeThread || null
+            };
+            console.log(`[WS] Emitting NEW_MESSAGE to Socket.io clients:`, JSON.stringify(msgPayload).substring(0, 200));
+            io.emit('NEW_MESSAGE', msgPayload);
           }
-          const msgPayload = {
-            ...m,
-            ...(persistedMessage || {}),
-            account_id: targetAccountId || threadAccountId || m.account_id || ws.accountId || null,
-            timestamp_ms: tsMs,
-            timestamp_source: tsSource,
-            created_at: createdAt,
-            is_outgoing: !!isOutgoing,
-            direction_status: directionStatus,
-            thread_summary: realtimeThread || null
-          };
-          console.log(`[WS] Emitting NEW_MESSAGE to Socket.io clients:`, JSON.stringify(msgPayload).substring(0, 200));
-          io.emit('NEW_MESSAGE', msgPayload);
 
           if (persistedMessage?.id && persistedMessage.media_url &&
               persistedMessage.media_type && persistedMessage.media_type !== 'text' &&
@@ -5113,7 +5138,7 @@ wss.on('connection', (ws, req) => {
                   && t.preview_is_outgoing !== true
                   && (Number(t.is_unread) === 1 || t.is_like === true || isActivitySummary)
                   && (unreadFlippedToIncoming || rowFresh || isActivitySummary)
-                  && Date.now() - mediaHintLastAt > 10 * 1000) {
+                  && Date.now() - mediaHintLastAt > 3 * 1000) {
                   const recentRealIncoming = db.prepare(`
                     SELECT 1 FROM messages
                     WHERE thread_id = ? AND is_outgoing = 0
@@ -5121,9 +5146,12 @@ wss.on('connection', (ws, req) => {
                       AND fb_message_id NOT LIKE 'sidebar_preview_%'
                       AND timestamp_ms >= ?
                     LIMIT 1
-                  `).get(existingInternalThreadId, Date.now() - 12 * 1000);
+                  `).get(existingInternalThreadId, Date.now() - 8 * 1000);
                   if (!recentRealIncoming) {
                     mediaHintLastSeen.set(mediaHintKey, Date.now());
+                    const mediaPlaceholder = /\bvideo\b/i.test(String(t.last_message || ''))
+                      ? '[Video]'
+                      : (/\b(?:ảnh|photo|image|hình)\b/i.test(String(t.last_message || '')) ? '[Ảnh]' : null);
                     changedUnreadThreads.push({
                       account_id,
                       thread_id: canonicalThreadId,
@@ -5134,6 +5162,8 @@ wss.on('connection', (ws, req) => {
                       preview_content: '',
                       preview_is_like: t.is_like === true,
                       media_only_hint: true,
+                      media_placeholder: mediaPlaceholder,
+                      is_activity_summary: isActivitySummary,
                       row_time_text: t.row_time_text || null,
                       row_fresh: rowFresh,
                       unread_flipped: unreadFlippedToIncoming
@@ -5190,10 +5220,11 @@ wss.on('connection', (ws, req) => {
                   unreadFlipped: changed.unread_flipped,
                   isSystemNotice: changed.system_notice
                 });
-                if (allowMediaBump) {
+                if (allowMediaBump || changed.row_fresh || changed.is_activity_summary) {
                   const bumpedAtIso = new Date().toISOString();
-                  db.prepare('UPDATE threads SET last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(String(canonicalThreadId));
-                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: bumpedAtIso });
+                  db.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(changed.media_placeholder || null, String(canonicalThreadId));
+                  io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: bumpedAtIso, last_message: changed.media_placeholder || undefined });
+                  io.emit('THREAD_LIST_UPDATED', { account_id: changed.account_id, thread_id: String(canonicalThreadId) });
                   syncDebug('MEDIA_HINT', { thread: String(canonicalThreadId).substring(0, 24), status: sync_status || null });
                 } else {
                   syncDebug('UNREAD_GUARD_SKIP', { stage: 'MEDIA_HINT', thread: String(canonicalThreadId).substring(0, 24), manual: mediaGuardRow?.unread_manual });

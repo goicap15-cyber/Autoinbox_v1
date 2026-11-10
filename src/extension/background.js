@@ -1746,7 +1746,7 @@ function connectWebSocket() {
                 console.log(`[FB Engine] [PAGE_NAV_LOCK] Business Suite tab for page=${pid} locked to thread=${tid}`);
               } else if (String(message.data?.reason || '') === 'crm_navigation') {
                 userNavigationLockThreadId = String(message.data?.thread_id || '');
-                userNavigationLockUntil = Date.now() + 8000;
+                userNavigationLockUntil = Date.now() + 3500;
                 if (bulkHistorySyncInFlight) {
                   bulkHistorySyncAbortRequested = true;
                   console.log('[FB Engine] [BULK_HISTORY] Abort requested by user-click navigation.');
@@ -1757,6 +1757,7 @@ function connectWebSocket() {
             const laneKey = message.data?.page_id
               ? `page:${message.data.page_id}`
               : `${message.data?.account_id || user_id}:history`;
+            const incomingBoost = String(message.data?.reason || '').startsWith('sidebar_incoming');
             if (!message.data?.page_id && !isUserClick
               && userNavigationLockThreadId
               && Date.now() < userNavigationLockUntil
@@ -1777,7 +1778,6 @@ function connectWebSocket() {
               setPersonalSyncBusy(65000);
               dispatchPersonalGraphqlFastFetch(message.data?.thread_id);
             }
-            const incomingBoost = String(message.data?.reason || '').startsWith('sidebar_incoming');
             runPersonalHistorySerialized(
               laneKey,
               () => runPersonalHistoryWithDeadline(laneKey, message.data, () => handleSyncThreadMessages(message.data)),
@@ -3365,24 +3365,74 @@ async function handleSendPersonalMessageWithAttachment({ thread_id, recipient_th
       await prepareCampaignRecipientComposer(tab.id, recipientPsid);
     }
 
-    const visibleContactName = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => {
-        const main = document.querySelector('div[role="main"]') || document;
-        const heading = main.querySelector('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"]');
-        const headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
-        if (headingName) return headingName;
-        const composer = [...main.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
-          .find((element) => /^(?:Viết cho|Write to)\s+/i.test(element.getAttribute('aria-label') || ''));
-        const composerLabel = (composer?.getAttribute('aria-label') || '').trim();
-        if (composerLabel) return composerLabel.replace(/^(?:Viết cho|Write to)\s+/i, '').trim() || null;
-        const conversation = main.querySelector('[aria-label^="Tin nhắn trong cuộc trò chuyện với "], [aria-label^="Messages in conversation with "]');
-        return (conversation?.getAttribute('aria-label') || '')
-          .replace(/^(?:Tin nhắn trong cuộc trò chuyện với|Messages in conversation with)\s+/i, '')
-          .trim() || null;
-      }
-    }).then((rows) => rows?.[0]?.result || null).catch(() => null);
-    const isGenericContactName = (n) => !n || /^(khách hàng|chưa có liên hệ|khach hang|default|customer|user)$/i.test(String(n).trim());
+    const isGenericContactName = (n) => !n || /^(khách hàng|chưa có liên hệ|khach hang|default|customer|user|tin nhắn|soạn tin nhắn|message|aa|đoạn chat|chats|messenger|facebook|người dùng facebook)$/i.test(String(n).trim());
+    const identityMatches = (expected, visible) => {
+      const normExpected = String(expected || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+      const normVisible = String(visible || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
+      return normExpected === normVisible || normExpected.includes(normVisible) || normVisible.includes(normExpected);
+    };
+    const identityAvailable = Boolean(expected_contact_name && !isGenericContactName(expected_contact_name));
+    const attachmentReadyDeadline = Date.now() + 10000;
+    let attachmentSurface = null;
+    while (Date.now() < attachmentReadyDeadline) {
+      attachmentSurface = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (targetThreadId) => {
+          const routeMatch = location.href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/) ||
+            location.href.match(/[?&](?:selected_item_id|thread_id)=([^&#]+)/);
+          const currentThreadId = routeMatch ? decodeURIComponent(routeMatch[1]) : null;
+          const activeSidebarLink = document.querySelector('a[aria-current="page"][href*="/messages/t/"], a[aria-current="page"][href*="/messages/e2ee/t/"]');
+          const activeSidebarMatch = (activeSidebarLink?.getAttribute('href') || activeSidebarLink?.href || '').match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/i);
+          const activeSidebarThreadId = activeSidebarMatch ? decodeURIComponent(activeSidebarMatch[1]) : null;
+          const sidebarMismatch = Boolean(activeSidebarThreadId && String(activeSidebarThreadId) !== String(targetThreadId));
+          const main = document.querySelector('div[role="main"]') || document;
+          const composer = [...main.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
+            .find((element) => {
+              const rect = element.getBoundingClientRect();
+              const label = (element.getAttribute('aria-label') || '').toLowerCase();
+              return rect.width > 0 && rect.height > 0 && !label.includes('search') && !label.includes('tìm kiếm');
+            });
+          const composerStaleThread = composer?.getAttribute('data-crm-stale-thread') || null;
+          const composerStale = Boolean(composerStaleThread && String(composerStaleThread) !== String(targetThreadId));
+          const heading = main.querySelector('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"]');
+          const headingStaleThread = heading?.getAttribute('data-crm-stale-thread') || null;
+          const headingStale = Boolean(headingStaleThread && String(headingStaleThread) !== String(targetThreadId));
+          const headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
+          const composerLabel = (composer?.getAttribute('aria-label') || '').trim();
+          const composerContactName = /^(?:Viết cho|Write to|Nhắn tin cho|Message to)\s+/i.test(composerLabel)
+            ? composerLabel.replace(/^(?:Viết cho|Write to|Nhắn tin cho|Message to)\s+/i, '').trim()
+            : '';
+          const conversation = main.querySelector('[aria-label^="Tin nhắn trong cuộc trò chuyện với "], [aria-label^="Messages in conversation with "]');
+          const conversationName = (conversation?.getAttribute('aria-label') || '')
+            .replace(/^(?:Tin nhắn trong cuộc trò chuyện với|Messages in conversation with)\s+/i, '')
+            .trim();
+          return {
+            current_thread_id: currentThreadId,
+            route_ready: String(currentThreadId || '') === String(targetThreadId || '') && !sidebarMismatch,
+            composer_ready: Boolean(composer) && !composerStale,
+            heading_stale: headingStale,
+            visible_contact_name: headingName || composerContactName || conversationName || null
+          };
+        },
+        args: [recipientPsid]
+      }).then((rows) => rows?.[0]?.result || null).catch(() => null);
+      const identityOk = !identityAvailable || !attachmentSurface?.visible_contact_name
+        || isGenericContactName(attachmentSurface.visible_contact_name)
+        || identityMatches(expected_contact_name, attachmentSurface.visible_contact_name);
+      if (attachmentSurface?.route_ready && attachmentSurface?.composer_ready && !attachmentSurface?.heading_stale && identityOk) break;
+      await delay(200);
+    }
+    if (!attachmentSurface?.route_ready || !attachmentSurface?.composer_ready || attachmentSurface?.heading_stale) {
+      sendToBackend('SEND_MESSAGE_RESULT', {
+        thread_id,
+        client_message_id,
+        success: false,
+        error: 'Khung chat Messenger chưa chuyển xong sang người nhận mục tiêu; chặn gửi đính kèm để tránh nhầm user',
+        error_code: 'THREAD_ROUTE_MISMATCH'
+      });
+      return;
+    }
+    const visibleContactName = attachmentSurface?.visible_contact_name || null;
     const normalizedExpectedName = String(expected_contact_name || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
     const normalizedVisibleName = String(visibleContactName || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
     assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_ATTACHMENT_IDENTITY', true);
@@ -3839,6 +3889,10 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
           const routeMatch = location.href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/) ||
             location.href.match(/[?&](?:selected_item_id|thread_id)=([^&#]+)/);
           const currentThreadId = routeMatch ? decodeURIComponent(routeMatch[1]) : null;
+          const activeSidebarLink = document.querySelector('a[aria-current="page"][href*="/messages/t/"], a[aria-current="page"][href*="/messages/e2ee/t/"]');
+          const activeSidebarMatch = (activeSidebarLink?.getAttribute('href') || activeSidebarLink?.href || '').match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/i);
+          const activeSidebarThreadId = activeSidebarMatch ? decodeURIComponent(activeSidebarMatch[1]) : null;
+          const sidebarMismatch = Boolean(activeSidebarThreadId && String(activeSidebarThreadId) !== String(targetThreadId));
           const main = document.querySelector('div[role="main"]');
           const composer = main && [...main.querySelectorAll('[contenteditable="true"], [role="textbox"]')]
             .find((element) => {
@@ -3846,7 +3900,11 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
               const label = (element.getAttribute('aria-label') || '').toLowerCase();
               return rect.width > 0 && rect.height > 0 && !label.includes('search') && !label.includes('tìm kiếm');
             });
+          const composerStaleThread = composer?.getAttribute('data-crm-stale-thread') || null;
+          const composerStale = Boolean(composerStaleThread && String(composerStaleThread) !== String(targetThreadId));
           const heading = main?.querySelector('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], header span[dir="auto"], [role="banner"] span[dir="auto"]');
+          const headingStaleThread = heading?.getAttribute('data-crm-stale-thread') || null;
+          const headingStale = Boolean(headingStaleThread && String(headingStaleThread) !== String(targetThreadId));
           const headingName = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
           const composerLabel = (composer?.getAttribute('aria-label') || '').trim();
           const composerContactName = /^(?:Viết cho|Write to|Nhắn tin cho|Message to)\s+/i.test(composerLabel)
@@ -3858,9 +3916,10 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
             .trim();
           return {
             current_thread_id: currentThreadId,
-            composer_ready: Boolean(composer),
+            composer_ready: Boolean(composer) && !composerStale,
+            heading_stale: headingStale,
             visible_contact_name: headingName || composerContactName || conversationName || null,
-            route_ready: String(currentThreadId || '') === String(targetThreadId || '')
+            route_ready: String(currentThreadId || '') === String(targetThreadId || '') && !sidebarMismatch
           };
         },
         args: [recipientThreadId]
@@ -3868,16 +3927,17 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
       const identityOk = !identityAvailable || !interactionState?.visible_contact_name
         || isGenericContactName(interactionState.visible_contact_name)
         || identityMatches(expected_contact_name, interactionState.visible_contact_name);
-      if (interactionState?.route_ready && interactionState?.composer_ready && (!strict_recipient_identity || identityOk)) break;
+      if (interactionState?.route_ready && interactionState?.composer_ready && !interactionState?.heading_stale && identityOk) break;
       await delay(200);
     }
     const verifiedThreadId = interactionState?.current_thread_id || await getCurrentThreadIdInTab(tab.id);
-    if (!onRecipientThread || !interactionState?.route_ready || !interactionState?.composer_ready || String(verifiedThreadId || '') !== recipientThreadId) {
+    if (!onRecipientThread || !interactionState?.route_ready || !interactionState?.composer_ready || interactionState?.heading_stale || String(verifiedThreadId || '') !== recipientThreadId) {
       trace('THREAD_ROUTE_REJECTED', {
         tab_id: tab.id,
         requested_thread_id: recipientThreadId,
         actual_thread_id: verifiedThreadId || null,
-        composer_ready: Boolean(interactionState?.composer_ready)
+        composer_ready: Boolean(interactionState?.composer_ready),
+        heading_stale: Boolean(interactionState?.heading_stale)
       });
       sendToBackend('SEND_MESSAGE_RESULT', {
         thread_id,
@@ -3895,7 +3955,7 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
     }
     const visibleContactName = interactionState.visible_contact_name;
     assertCampaignRecipientIdentity(expected_contact_name, visibleContactName, strict_recipient_identity, 'PERSONAL_TEXT_IDENTITY', true);
-    if (strict_recipient_identity && identityAvailable && visibleContactName && !isGenericContactName(visibleContactName) && !identityMatches(expected_contact_name, visibleContactName) && String(verifiedThreadId || '') !== String(recipientThreadId)) {
+    if (identityAvailable && visibleContactName && !isGenericContactName(visibleContactName) && !identityMatches(expected_contact_name, visibleContactName)) {
       trace('RECIPIENT_IDENTITY_REJECTED', { tab_id: tab.id, expected: expected_contact_name, visible: visibleContactName });
       sendToBackend('SEND_MESSAGE_RESULT', {
         thread_id,
@@ -3977,7 +4037,7 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
       // response JSON private API.
       const composerPrepResult = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: (msgTxt, expectedCampaignThreadId) => {
+        func: (msgTxt, expectedThreadId) => {
           const normalizeComposerText = (text) => {
             if (!text) return '';
             let norm = String(text).replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\u00A0/g, ' ');
@@ -3996,13 +4056,13 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
           const routeMatch = location.href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/) ||
             location.href.match(/[?&](?:selected_item_id|thread_id)=([^&#]+)/);
           const currentThreadId = routeMatch ? decodeURIComponent(routeMatch[1]) : null;
-          if (expectedCampaignThreadId && String(currentThreadId || '') !== String(expectedCampaignThreadId)) {
-            return { success: false, error: 'Campaign route changed before text insert', error_code: 'THREAD_ROUTE_MISMATCH', current_thread_id: currentThreadId };
+          if (expectedThreadId && String(currentThreadId || '') !== String(expectedThreadId)) {
+            return { success: false, error: 'Route changed before text insert', error_code: 'THREAD_ROUTE_MISMATCH', current_thread_id: currentThreadId };
           }
-          const boundBox = expectedCampaignThreadId
-            ? candidates.find((el) => el.getAttribute('data-crm-campaign-recipient-thread') === String(expectedCampaignThreadId))
+          const boundBox = expectedThreadId
+            ? candidates.find((el) => el.getAttribute('data-crm-campaign-recipient-thread') === String(expectedThreadId))
             : null;
-          const freshCampaignBox = expectedCampaignThreadId
+          const freshCampaignBox = expectedThreadId
             ? [...candidates].sort((left, right) => {
                 const leftRect = left.getBoundingClientRect();
                 const rightRect = right.getBoundingClientRect();
@@ -4013,8 +4073,12 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
           // the newly mounted empty composer only after rechecking the durable
           // thread route; never fall back across a route mismatch.
           const box = boundBox || freshCampaignBox || candidates[candidates.length - 1];
-          if (expectedCampaignThreadId && box) {
-            box.setAttribute('data-crm-campaign-recipient-thread', String(expectedCampaignThreadId));
+          const staleBoxThread = box?.getAttribute('data-crm-stale-thread') || null;
+          if (staleBoxThread && expectedThreadId && String(staleBoxThread) !== String(expectedThreadId)) {
+            return { success: false, error: 'Composer vẫn thuộc hội thoại trước (DOM chưa kịp unmount)', error_code: 'THREAD_ROUTE_MISMATCH', stale_thread_id: staleBoxThread };
+          }
+          if (expectedThreadId && box) {
+            box.setAttribute('data-crm-campaign-recipient-thread', String(expectedThreadId));
           }
           if (!box) return { success: false, error: 'Không tìm thấy ô soạn Messenger', error_code: 'COMPOSER_NOT_FOUND', candidates: candidates.length };
           box.focus();
@@ -4034,7 +4098,7 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
           }
           return { success: true, method: 'composer-ready' };
         },
-        args: [messageText, strict_recipient_identity ? recipientThreadId : null]
+        args: [messageText, recipientThreadId]
       });
       let composer = composerPrepResult?.[0]?.result;
 
@@ -4124,10 +4188,24 @@ async function handleSendMessage({ thread_id, recipient_thread_id = null, thread
                   })[0]
                 : null;
               const box = boundBox || freshCampaignBox || candidates[candidates.length - 1];
+              if (!box) return { success: false, error: 'Không tìm thấy ô soạn Messenger sau khi insert', error_code: 'COMPOSER_NOT_FOUND', candidates: candidates.length };
+              const staleBoxThread = box.getAttribute('data-crm-stale-thread') || null;
+              const activeSidebarLink = document.querySelector('a[aria-current="page"][href*="/messages/t/"], a[aria-current="page"][href*="/messages/e2ee/t/"]');
+              const activeSidebarMatch = (activeSidebarLink?.getAttribute('href') || activeSidebarLink?.href || '').match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/i);
+              const activeSidebarThreadId = activeSidebarMatch ? decodeURIComponent(activeSidebarMatch[1]) : null;
+              if ((staleBoxThread && expectedThreadId && String(staleBoxThread) !== String(expectedThreadId))
+                || (activeSidebarThreadId && expectedThreadId && String(activeSidebarThreadId) !== String(expectedThreadId))) {
+                cleanupComposer(box);
+                return {
+                  success: false,
+                  error: 'Composer hoặc sidebar vẫn thuộc hội thoại trước; hủy gửi để tránh nhầm người nhận',
+                  error_code: 'THREAD_ROUTE_MISMATCH',
+                  current_thread_id: activeSidebarThreadId || staleBoxThread
+                };
+              }
               if (requireCampaignBinding && box && !boundBox) {
                 box.setAttribute('data-crm-campaign-recipient-thread', String(expectedThreadId));
               }
-              if (!box) return { success: false, error: 'Không tìm thấy ô soạn Messenger sau khi insert', error_code: 'COMPOSER_NOT_FOUND', candidates: candidates.length };
 
               const normalizedMsgTxt = normalizeComposerText(expectText ?? msgTxt);
               // FB biến chip mention sau Enter với độ trễ ~100-300ms — poll chờ
@@ -7480,7 +7558,7 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
                 /\/messages\/(?:(?:e2ee\/)?(?:requests|spam)|(?:requests|spam)\/e2ee)(?:\/|\?)/i.test(String(urlStr || ''));
               const isOutgoingPreview = (text) =>
                 /^(?:Bạn|Tôi|You)\s*:/iu.test(String(text || '').trim())
-                || /^(?:Bạn đã gửi|You sent)/iu.test(String(text || '').trim());
+                || /^(?:(?:Bạn|Tôi) đã gửi|You (?:sent|shared))/iu.test(String(text || '').trim());
               const scopedFallback = (fallbackResults?.[0]?.result || []).filter((thread) =>
                 isExplicitRequestUrl(thread?.thread_url)
                 && !isOutgoingPreview(thread?.last_message)
@@ -7733,16 +7811,18 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
       const [nextAccountKey, nextScan] = nextEntry.value;
       pendingDiscoveryScans.delete(nextAccountKey);
       setTimeout(() => handleSync100Threads(nextScan).catch(() => {}), 0);
-    } else if (!isRealtimeScan && account_id) {
-      // Đóng tab discovery tạm sau khi hoàn tất quét full để tránh tích tụ nhiều tab Messenger
-      const discRole = FbCrmMessengerTabRoles.roleKey(account_id, 'discovery');
-      getRegisteredTab(discRole).then(async (discTab) => {
-        const chatTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'chat'));
-        await unregisterTab(discRole);
-        if (discTab?.id && discTab.id !== chatTab?.id) {
-          await chrome.tabs.remove(discTab.id).catch(() => {});
-        }
-      }).catch(() => {});
+    } else if ((!isRealtimeScan || isRealtimeRequestScan) && account_id) {
+      // Đóng tab discovery/requests tạm sau khi hoàn tất quét để tránh tích tụ nhiều tab Messenger gây khóa IndexedDB
+      for (const tempRoleName of ['discovery', 'requests']) {
+        const tempRole = FbCrmMessengerTabRoles.roleKey(account_id, tempRoleName);
+        getRegisteredTab(tempRole).then(async (tempTab) => {
+          const chatTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'chat'));
+          await unregisterTab(tempRole);
+          if (tempTab?.id && tempTab.id !== chatTab?.id) {
+            await chrome.tabs.remove(tempTab.id).catch(() => {});
+          }
+        }).catch(() => {});
+      }
     }
   }
 }
@@ -8190,7 +8270,7 @@ function scrapeFacebookSidebar() {
       // Hidden/background Messenger tabs may mark the open conversation read
       // before CRM sees it. Direction is therefore more reliable than unread:
       // Facebook prefixes our own sidebar previews with Bạn:/You:.
-      const preview_is_outgoing = /^(?:Bạn|Tôi|You)\s*:/iu.test(String(last_message || '').trim()) || /^(?:Bạn đã gửi|You sent)/iu.test(String(last_message || '').trim());
+      const preview_is_outgoing = /^(?:Bạn|Tôi|You)\s*:/iu.test(String(last_message || '').trim()) || /^(?:(?:Bạn|Tôi) đã gửi|You (?:sent|shared))/iu.test(String(last_message || '').trim());
       // 5. Lấy Avatar chuẩn phạm vi row (thẻ img, SVG image, background-image)
       let avatar_url = null;
       let avatar_base64 = null;
@@ -8668,6 +8748,12 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
               for (const oldRow of mainEl.querySelectorAll('div[role="row"], div[role="article"], [data-message-id]')) {
                 if (!oldRow.dataset.crmThreadId) oldRow.dataset.crmThreadId = staleTag;
               }
+              for (const oldComposer of mainEl.querySelectorAll('[contenteditable="true"], [role="textbox"]')) {
+                oldComposer.setAttribute('data-crm-stale-thread', staleTag);
+              }
+              for (const oldHeading of mainEl.querySelectorAll('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"], header span[dir="auto"], [role="banner"] span[dir="auto"]')) {
+                oldHeading.setAttribute('data-crm-stale-thread', staleTag);
+              }
             }
           }
           const links = Array.from(document.querySelectorAll('a[href*="/messages/t/"], a[href*="/messages/e2ee/t/"]'));
@@ -8680,7 +8766,7 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
           if (link) {
             if (typeof link.click === 'function') link.click();
             else link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-            return { ok: true, type: 'dom_sidebar_click' };
+            return { ok: true, type: 'dom_sidebar_click', switched: prevThreadId !== String(tid) };
           }
 
           const targetPath = reqUrl
@@ -8698,24 +8784,52 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
             donor.setAttribute('href', targetPath);
             donor.click();
             setTimeout(() => { try { donor.setAttribute('href', savedHref); } catch (_) {} }, 300);
-            return { ok: true, type: 'href_spoof_click' };
+            return { ok: true, type: 'href_spoof_click', switched: prevThreadId !== String(tid) };
           }
 
           window.location.href = targetPath;
-          return { ok: true, type: 'location_assign' };
+          return { ok: true, type: 'location_assign', switched: prevThreadId !== String(tid) };
         },
         args: [targetId, trustedRequestedThreadUrl]
       });
 
       if (clicked?.[0]?.result?.ok) {
-        const deadline = Date.now() + 4000;
+        const deadline = Date.now() + 5000;
         let navOk = false;
         let lastSeenId = null;
         while (Date.now() < deadline) {
           if (!isPersonalNavigationCurrent(navigationToken)) return false;
-          await delay(200);
-          lastSeenId = await getCurrentThreadIdInTab(tab.id);
-          if (String(lastSeenId) === targetId) { navOk = true; break; }
+          await delay(180);
+          const checkState = await executeScriptWithTimeout({
+            target: { tabId: tab.id },
+            func: (tid, wasSwitched) => {
+              const m = location.href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/i);
+              const urlId = m ? decodeURIComponent(m[1]) : null;
+              if (String(urlId || '') !== String(tid)) return { urlId, ready: false };
+              if (!wasSwitched) return { urlId, ready: true };
+              const mainEl = document.querySelector('div[role="main"]');
+              if (!mainEl) return { urlId, ready: false };
+              const composer = [...mainEl.querySelectorAll('[contenteditable="true"], [role="textbox"]')].find((el) => {
+                const r = el.getBoundingClientRect();
+                const lbl = (el.getAttribute('aria-label') || '').toLowerCase();
+                return r.width > 0 && r.height > 0 && !lbl.includes('search') && !lbl.includes('tìm kiếm');
+              });
+              const heading = mainEl.querySelector('header h1, header h2, h1, h2, span[aria-level="1"], span[aria-level="2"]');
+              const composerStale = composer ? (composer.getAttribute('data-crm-stale-thread') && composer.getAttribute('data-crm-stale-thread') !== String(tid)) : false;
+              const headingStale = heading ? (heading.getAttribute('data-crm-stale-thread') && heading.getAttribute('data-crm-stale-thread') !== String(tid)) : false;
+              const freshRows = [...mainEl.querySelectorAll('div[role="row"], div[role="article"], [data-message-id]')].some((row) => !row.dataset.crmThreadId || row.dataset.crmThreadId === String(tid));
+              return {
+                urlId,
+                ready: !composerStale && !headingStale && (Boolean(composer) || Boolean(heading) || freshRows)
+              };
+            },
+            args: [targetId, Boolean(clicked?.[0]?.result?.switched)]
+          }, 1500).then((r) => r?.[0]?.result || null).catch(() => null);
+          lastSeenId = checkState?.urlId || await getCurrentThreadIdInTab(tab.id);
+          if (checkState?.ready) { navOk = true; break; }
+        }
+        if (!navOk && String(lastSeenId) === targetId) {
+          navOk = true;
         }
         bgDebug({ stage: 'SPA_NAV', type: clicked[0].result.type, ok: navOk, current: String(lastSeenId || '').substring(0, 24), target: String(targetId).substring(0, 24) });
         if (navOk) {
@@ -8951,7 +9065,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   if (page_id) lastPageSyncAt.set(String(page_id), Date.now());
   const navigationThreadId = extractBareThreadId(external_thread_id || thread_id);
   const usesVisibleCrmTab = !page_id && !_history_tab_id
-    && ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].includes(baseReason);
+    && ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport', 'sidebar_incoming'].includes(baseReason);
   const navigationToken = (page_id || _history_tab_id)
     ? null
     : beginPersonalNavigation(`${targetAcc}:history`);

@@ -29,10 +29,9 @@ class InboxSyncScheduler {
     sidebarIntervalMs = 2000,
     sidebarCooldownMs = 1200,
     // Requests/Spam live on a separate Messenger surface with its own tab.
-    // 2026-10-16: user muốn tin nhắn chờ về liên tục như hội thoại - lịch 30s
-    // chạy trong chế độ always-on (trước đây chỉ chạy trong cửa sổ 120s sau
-    // khi bấm icon sync).
-    requestsIntervalMs = 30000,
+    // Quét nền mỗi 3 phút (hoặc ngay lập tức khi bấm tab Tin nhắn chờ / nút Đồng bộ)
+    // để tránh mở tab /messages/requests mỗi 30s gây nghẽn IndexedDB của Chrome.
+    requestsIntervalMs = 180000,
     // Sidebar work is bounded so a stalled Facebook lazy surface cannot hold
     // the extension command lane for minutes.
     sidebarTimeoutMs = 45000,
@@ -386,9 +385,7 @@ class InboxSyncScheduler {
     if (state.inFlight && !force) {
       if (scanMode === 'realtime' && state.activeScanMode === 'realtime_requests'
         && state.activeScanReason === 'scheduler_requests'
-        // 20s: đủ cho 1 vòng quét requests (possible + spam, có navigate) chạy
-        // trọn; nếu scan treo quá ngưỡng thì realtime vẫn giành lane lại.
-        && now - Number(state.lastSidebarSyncAt || 0) >= 20000
+        && now - Number(state.lastSidebarSyncAt || 0) >= 4000
         && now - Number(state.lastRealtimePreemptAt || 0) >= 1000) {
         const priorityWs = this.getConnection(accId);
         if (priorityWs?.readyState === 1) {
@@ -843,8 +840,18 @@ class InboxSyncScheduler {
     this.threadJobsInFlight.delete(key);
 
     const isLoopTerminator = resultReason === 'reached_top' || resultReason === 'duplicate';
-    const isNoReplay = NO_REPLAY_REASONS.has(resultReason);
-    if (isNoReplay) {
+    const isLockedIncoming = (resultReason === 'navigation_locked_by_user_selection' || resultReason === 'page_locked_by_user_action')
+      && job
+      && String(job.reason || '').startsWith('sidebar_incoming')
+      && (Number(job.lock_retry_count) || 0) < 4;
+    const isNoReplay = NO_REPLAY_REASONS.has(resultReason) && !isLockedIncoming;
+    if (isLockedIncoming) {
+      const nextRetry = (Number(job.lock_retry_count) || 0) + 1;
+      this.pendingThreadSyncs.set(key, { ...job, lock_retry_count: nextRetry });
+      this.threadCooldownUntil.set(key, Date.now() + 2500);
+      const retryTimer = setTimeout(() => this.replayPendingThread(key), 2600);
+      if (typeof retryTimer.unref === 'function') retryTimer.unref();
+    } else if (isNoReplay) {
       this.pendingThreadSyncs.delete(key);
       this.pendingThreadSyncs.delete(`${accId}:${threadId}`);
     }
