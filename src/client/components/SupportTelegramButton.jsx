@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 
-const QR_URL = '/images/telegram-support-qr.png';
+const QR_URL = '/images/telegram-support-qr-clean.png?v=1.0.33';
 
 export default function SupportTelegramButton() {
   const [open, setOpen] = useState(false);

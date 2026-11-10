@@ -1,8 +1,8 @@
 {
-  "version": "1.0.32",
-  "releasedAt": "2026-11-10T07:26:00.471Z",
-  "notes": "Ẩn số điện thoại trên hộp thoại mã QR hỗ trợ Telegram (v1.0.32)",
+  "version": "1.0.33",
+  "releasedAt": "2026-11-10T07:32:14.687Z",
+  "notes": "Làm mới cache ảnh mã QR Telegram đã xóa số điện thoại (v1.0.33)",
   "requiresRestart": false,
-  "sizeBytes": 3212367,
-  "sha256": "45adab388bd9cfe06c063a83f7a9b0f0aadf1849379cc14af35d0adfe9ab0eb4"
+  "sizeBytes": 3327377,
+  "sha256": "756115e4b2a39bcf98897da2e2abf76d45e67fc244a78fce1dc38301fd8630fb"
 }
