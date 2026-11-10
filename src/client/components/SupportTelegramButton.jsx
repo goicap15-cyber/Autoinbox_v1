@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-const SUPPORT_HOTLINE = '+84976347697';
+
 const QR_URL = '/images/telegram-support-qr.png';
 
 export default function SupportTelegramButton() {
@@ -83,11 +83,11 @@ export default function SupportTelegramButton() {
             </div>
             <img
               src={QR_URL}
-              alt={'Mã QR Telegram hỗ trợ ' + SUPPORT_HOTLINE}
+              alt="Mã QR Telegram hỗ trợ AdsupCRM"
               className="aspect-[4/5] w-full rounded-xl border border-black/5 object-cover dark:border-white/10"
             />
             <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">Mở app Telegram và quét mã để được hỗ trợ</p>
-            <p className="mt-0.5 text-sm font-semibold tracking-wide text-slate-800 dark:text-slate-100">{SUPPORT_HOTLINE}</p>
+
           </div>
         </React.Fragment>
       )}

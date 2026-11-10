@@ -1,8 +1,8 @@
 {
-  "version": "1.0.31",
-  "releasedAt": "2026-11-10T07:16:14.127Z",
-  "notes": "Thêm nút hỗ trợ Telegram kèm hiệu ứng sóng lan tỏa ở góc phải dưới màn hình (v1.0.31)",
+  "version": "1.0.32",
+  "releasedAt": "2026-11-10T07:26:00.471Z",
+  "notes": "Ẩn số điện thoại trên hộp thoại mã QR hỗ trợ Telegram (v1.0.32)",
   "requiresRestart": false,
-  "sizeBytes": 3221797,
-  "sha256": "3ca9e27140e41776a2db9425dddb450e4be8781229cc170b78337c1213e37b33"
+  "sizeBytes": 3212367,
+  "sha256": "45adab388bd9cfe06c063a83f7a9b0f0aadf1849379cc14af35d0adfe9ab0eb4"
 }
