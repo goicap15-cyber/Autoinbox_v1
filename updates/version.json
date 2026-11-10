@@ -1,8 +1,8 @@
 {
-  "version": "1.0.30",
-  "releasedAt": "2026-11-10T04:46:47.096Z",
-  "notes": "Sửa lỗi mất tên và avatar thành viên nhóm trên tin nhắn icon Like (👍), ảnh/video và tin nhiều dòng (v1.0.30)",
+  "version": "1.0.31",
+  "releasedAt": "2026-11-10T07:16:14.127Z",
+  "notes": "Thêm nút hỗ trợ Telegram kèm hiệu ứng sóng lan tỏa ở góc phải dưới màn hình (v1.0.31)",
   "requiresRestart": false,
-  "sizeBytes": 3096057,
-  "sha256": "d569ede0db191ab92445a1323db68c3cd963e167ec43f68c84b22b4bf4bf7fcd"
+  "sizeBytes": 3221797,
+  "sha256": "3ca9e27140e41776a2db9425dddb450e4be8781229cc170b78337c1213e37b33"
 }

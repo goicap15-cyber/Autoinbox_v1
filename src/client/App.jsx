@@ -22,6 +22,7 @@ import PaymentModal from './components/PaymentModal.jsx';
 import LicenseManagerModal from './components/LicenseManagerModal.jsx';
 import LicenseLockScreen from './components/LicenseLockScreen.jsx';
 import LicenseExpiryBanner, { computeLicenseDaysLeft, formatLicenseExpiryDate } from './components/LicenseExpiryBanner.jsx';
+import SupportTelegramButton from './components/SupportTelegramButton.jsx';
 import AuthScreen from './components/AuthScreen.jsx';
 import EmployeeManagementModal from './components/EmployeeManagementModal.jsx';
 import AppUpdateModal from './components/AppUpdateModal.jsx';
@@ -2387,6 +2388,7 @@ export default function App() {
           onDismiss={() => setLicenseBannerDismissed(true)}
         />
       )}
+      <SupportTelegramButton />
       {/* Column 1: Sidebar Navigation - 48px */}
       <AppSidebar
         activeView={activeView}
