@@ -2934,7 +2934,11 @@ async function ensureFacebookMessagesTab(accountId, reason = 'background_sync') 
 }
 
 async function ensureRoleMessengerTab(accountId, role, { freshOnly = false } = {}) {
-  if (role === 'interaction' || role === 'chat') {
+  // Kiến trúc cố định 3 Tab cho mỗi tài khoản:
+  // - Tab 1 ('chat'): Nhắn tin + Đồng bộ danh sách hội thoại (INBOX sidebar)
+  // - Tab 2 ('history'): Đồng bộ tin nhắn bên trong hội thoại
+  // - Tab 3 ('requests'): Đồng bộ tin nhắn chờ
+  if (role === 'interaction' || role === 'chat' || role === 'discovery' || role === 'campaign' || role === 'request_action') {
     const interaction = await ensureFacebookMessagesTab(accountId, 'interaction');
     if (interaction?.id) {
       await registerTab(FbCrmMessengerTabRoles.roleKey(accountId, 'chat'), interaction.id);
@@ -2944,7 +2948,7 @@ async function ensureRoleMessengerTab(accountId, role, { freshOnly = false } = {
     return interaction;
   }
 
-  const normalizedRole = role;
+  const normalizedRole = role === 'requests' ? 'requests' : 'history';
   const roleKey = FbCrmMessengerTabRoles.roleKey(accountId, normalizedRole);
   const allowedAliases = new Set(normalizedRole === 'chat' ? [
     roleKey,
@@ -7189,18 +7193,12 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
   // exact tab it came from even when a Personal Messenger tab is also open.
   // Discovery must never scroll the operator's interaction/chat tab.
   let personalTab = null;
-  if (isRealtimeInboxScan) {
-    // Quét nhẹ 2s đọc sidebar NGAY trên tab chat cá nhân (tab nhà do
-    // recoverRealtimeReceiver giữ sống) - KHÔNG mở/giữ tab discovery riêng
-    // (2026-10-01: user không muốn tab "Đồng bộ hội thoại" tồn tại khi chưa
-    // bấm icon). Tab discovery chỉ phục vụ quét sâu 'full' trong cửa sổ icon.
+  if (!isRealtimeRequestScan) {
+    // Tab 1 ('chat') phục vụ cả nhắn tin và đồng bộ danh sách hội thoại INBOX
     personalTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'chat'))
       || await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'interaction'))
       || await getFacebookTab(account_id)
       || await ensureRoleMessengerTab(account_id, 'chat');
-  } else if (!isRealtimeRequestScan) {
-    personalTab = await ensureRoleMessengerTab(account_id, 'discovery')
-      || await getFacebookTab(account_id);
   }
   const recoveryDialogOpen = personalTab?.id ? await chrome.scripting.executeScript({
     target: { tabId: personalTab.id },
@@ -7235,9 +7233,7 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
   const scrapeTargets = [];
   let inboxTarget = null;
   if (personalTab?.id) {
-    const inboxUrl = isRealtimeInboxScan
-      ? 'https://www.facebook.com/messages'
-      : 'https://www.facebook.com/messages?crm_tab_role=discovery';
+    const inboxUrl = 'https://www.facebook.com/messages';
     const currentUrl = String(personalTab.url || '');
     // Facebook Messenger luôn tự chuyển hướng /messages vào hội thoại gần nhất
     // (/messages/t/<id> hoặc /messages/e2ee/t/<id>) và cột danh sách hội thoại
@@ -7811,18 +7807,16 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
       const [nextAccountKey, nextScan] = nextEntry.value;
       pendingDiscoveryScans.delete(nextAccountKey);
       setTimeout(() => handleSync100Threads(nextScan).catch(() => {}), 0);
-    } else if ((!isRealtimeScan || isRealtimeRequestScan) && account_id) {
-      // Đóng tab discovery/requests tạm sau khi hoàn tất quét để tránh tích tụ nhiều tab Messenger gây khóa IndexedDB
-      for (const tempRoleName of ['discovery', 'requests']) {
-        const tempRole = FbCrmMessengerTabRoles.roleKey(account_id, tempRoleName);
-        getRegisteredTab(tempRole).then(async (tempTab) => {
-          const chatTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'chat'));
-          await unregisterTab(tempRole);
-          if (tempTab?.id && tempTab.id !== chatTab?.id) {
-            await chrome.tabs.remove(tempTab.id).catch(() => {});
-          }
-        }).catch(() => {});
-      }
+    } else if (!isRealtimeScan && account_id) {
+      // Giữ cố định 3 tab (chat, history, requests); chỉ đóng tab discovery dư thừa nếu có
+      const discRole = FbCrmMessengerTabRoles.roleKey(account_id, 'discovery');
+      getRegisteredTab(discRole).then(async (discTab) => {
+        const chatTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'chat'));
+        await unregisterTab(discRole);
+        if (discTab?.id && discTab.id !== chatTab?.id) {
+          await chrome.tabs.remove(discTab.id).catch(() => {});
+        }
+      }).catch(() => {});
     }
   }
 }
@@ -8996,13 +8990,9 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   if (!thread_id) return;
   bgDebug({ stage: 'SYNC_THREAD_START', thread: String(thread_id || '').substring(0, 24), mode, reason: reason || null, allow_nav: allow_navigation === true });
   const allowedReasons = new Set(['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport', 'initial_sweep', 'manual_resync', 'history_retry', 'sidebar_incoming']);
-  // 2026-10-03: tab history CÁ NHÂN chỉ di chuyển theo thao tác operator
-  // (click hội thoại / kéo lên đầu / resync) và retry của các job đó.
-  // sidebar_incoming + initial_sweep chỉ còn hợp lệ cho thread Page - lane
-  // Page dùng tab Business Suite riêng. Preview + bump tin khách đã chạy ở
-  // server; nội dung đầy đủ sync khi operator click/kéo hoặc khi hội thoại
-  // đang mở sẵn ở tab chat (observer bắt trực tiếp).
-  const pageOnlyReasons = new Set(['initial_sweep']);
+  // Tab 2 ('history') chuyên trách toàn bộ việc đồng bộ tin nhắn bên trong hội thoại,
+  // tách biệt hoàn toàn với Tab 1 ('chat') phục vụ nhắn tin và đồng bộ hội thoại.
+  const pageOnlyReasons = new Set();
   const baseReason = FbCrmMessengerTabRoles.stripSyncReasonSuffix(reason);
   if (!_history_tab_id && (allow_navigation !== true || !allowedReasons.has(baseReason)
     || (!page_id && pageOnlyReasons.has(baseReason)))) {
@@ -9017,15 +9007,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     });
     return;
   }
-  // If user has explicitly clicked a thread, the history tab is locked to it.
-  // Background sync for any OTHER thread must not navigate the history tab —
-  // but only during the 30s click window, otherwise threads the operator never
-  // clicks would never sync their messages (images/videos included).
-  const isUserDrivenReason = ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport'].includes(baseReason);
-  // 2026-10-02: sidebar_incoming KHONG bypass khoa nua - job bat ky thread
-  // khac se skip (server retry sau khi lock het han). Tin chu van vao DB qua
-  // duong preview, chi media doi. Neu cho bypass nhu build40 thi tab history
-  // nhay sang thread khach ngay khi operator vua click user khac.
+  const isUserDrivenReason = ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport', 'sidebar_incoming'].includes(baseReason);
   if (!_history_tab_id && !page_id && !isUserDrivenReason
     && userNavigationLockThreadId
     && Date.now() < userNavigationLockUntil
@@ -9064,40 +9046,17 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
   const targetAcc = account_id || user_id;
   if (page_id) lastPageSyncAt.set(String(page_id), Date.now());
   const navigationThreadId = extractBareThreadId(external_thread_id || thread_id);
-  const usesVisibleCrmTab = !page_id && !_history_tab_id
-    && ['crm_navigation', 'crm_scroll_older', 'crm_scroll_viewport', 'sidebar_incoming'].includes(baseReason);
   const navigationToken = (page_id || _history_tab_id)
     ? null
     : beginPersonalNavigation(`${targetAcc}:history`);
 
-  // Page threads use the exact Business Suite asset. Personal threads always
-  // go through ensureFacebookMessagesTab, which validates c_user/account_id;
-  // never trust an arbitrary active Messenger tab.
+  // Tab 2 ('history') luôn chịu trách nhiệm đồng bộ tin nhắn bên trong hội thoại cá nhân,
+  // giữ nguyên Tab 1 ('chat') cho việc nhắn tin & đồng bộ danh sách hội thoại.
   let tab = _history_tab_id
     ? await chrome.tabs.get(_history_tab_id).catch(() => null)
     : page_id
       ? await getBusinessSuiteTab(page_id)
-      : usesVisibleCrmTab
-        ? await ensureRoleMessengerTab(targetAcc, 'chat')
-        : await ensureRoleMessengerTab(targetAcc, 'history');
-  if (!page_id && !_history_tab_id && !usesVisibleCrmTab && targetAcc) {
-    if (!globalThis.__CRM_HISTORY_IDLE_TIMERS__) globalThis.__CRM_HISTORY_IDLE_TIMERS__ = new Map();
-    const prevTimer = globalThis.__CRM_HISTORY_IDLE_TIMERS__.get(String(targetAcc));
-    if (prevTimer) clearTimeout(prevTimer);
-    globalThis.__CRM_HISTORY_IDLE_TIMERS__.set(String(targetAcc), setTimeout(async () => {
-      globalThis.__CRM_HISTORY_IDLE_TIMERS__.delete(String(targetAcc));
-      if (bulkHistorySyncInFlight) return;
-      try {
-        const histRole = FbCrmMessengerTabRoles.roleKey(targetAcc, 'history');
-        const histTab = await getRegisteredTab(histRole);
-        const chatTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(targetAcc, 'chat'));
-        await unregisterTab(histRole);
-        if (histTab?.id && histTab.id !== chatTab?.id) {
-          await chrome.tabs.remove(histTab.id).catch(() => {});
-        }
-      } catch (_) {}
-    }, 30000));
-  }
+      : await ensureRoleMessengerTab(targetAcc, 'history');
 
   if (!tab && page_id) {
     // 2026-09-30 (Phase 2): ngân sách tab page - trước khi tạo tab mới, đuổi
@@ -9635,37 +9594,55 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           for (const unit of units) {
             const mid = String(unit.getAttribute('data-message-id') || '').trim();
             if (!mid) continue;
+            const articleRow = unit.closest('div[role="article"], div[role="row"]') || unit;
             if (dirRect.width > 0) {
               for (const b of unit.querySelectorAll('div[dir="auto"], span[dir="auto"]')) {
                 const br = b.getBoundingClientRect();
                 if (br && br.width > 0) {
                   const rel = (br.left + br.width / 2 - dirRect.left) / dirRect.width;
                   b.setAttribute('data-crm-rel-center', rel.toFixed(4));
+                  const leftGap = Math.max(0, br.left - dirRect.left);
+                  const rightGap = Math.max(0, dirRect.right - br.right);
+                  if (leftGap <= 96 && leftGap < rightGap) b.setAttribute('data-crm-bubble-side', 'left');
+                  else if (rightGap <= 96 && rightGap < leftGap) b.setAttribute('data-crm-bubble-side', 'right');
                 }
               }
               let hasLeftAv = false;
-              for (const img of unit.querySelectorAll('img[src]')) {
+              let avatarSenderAlt = '';
+              for (const img of articleRow.querySelectorAll('img[src]')) {
                 const ir = img.getBoundingClientRect();
                 const w = Math.round(ir.width || img.naturalWidth || 0);
                 const h = Math.round(ir.height || img.naturalHeight || 0);
                 if (w > 0) img.setAttribute('data-crm-img-w', String(w));
                 if (h > 0) img.setAttribute('data-crm-img-h', String(h));
                 const alt = String(img.getAttribute('alt') || '').trim();
-                if (!/^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i.test(alt) && ir.width >= 18 && ir.width <= 64 && ir.height >= 18 && ir.height <= 64) {
+                if (!/^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i.test(alt) && !/đã xem|seen by/i.test(alt) && ir.width >= 18 && ir.width <= 68 && ir.height >= 18 && ir.height <= 68) {
                   const leftGap = ir.left - dirRect.left;
                   const rightGap = dirRect.right - ir.right;
-                  if (leftGap >= -8 && leftGap <= 96 && leftGap < rightGap) hasLeftAv = true;
+                  if (leftGap >= -8 && leftGap <= 96 && leftGap < rightGap) {
+                    hasLeftAv = true;
+                    if (alt && !avatarSenderAlt) avatarSenderAlt = alt;
+                  }
                 }
-                if (w >= 72 && h >= 72 && ir.width > 0) {
-                  const rel = (ir.left + ir.width / 2 - dirRect.left) / dirRect.width;
-                  img.setAttribute('data-crm-media-rel-center', rel.toFixed(4));
+              }
+              for (const mediaEl of unit.querySelectorAll('img[src], video, [role="img"]')) {
+                const mr = mediaEl.getBoundingClientRect();
+                const mw = Math.round(mr.width || mediaEl.naturalWidth || mediaEl.videoWidth || 0);
+                const mh = Math.round(mr.height || mediaEl.naturalHeight || mediaEl.videoHeight || 0);
+                if (mw >= 72 && mh >= 72 && mr.width > 0) {
+                  const rel = (mr.left + mr.width / 2 - dirRect.left) / dirRect.width;
+                  mediaEl.setAttribute('data-crm-media-rel-center', rel.toFixed(4));
+                  const leftGap = Math.max(0, mr.left - dirRect.left);
+                  const rightGap = Math.max(0, dirRect.right - mr.right);
+                  if (leftGap <= 96 && leftGap < rightGap) mediaEl.setAttribute('data-crm-media-side', 'left');
+                  else if (rightGap <= Math.max(96, dirRect.width * 0.22) && rightGap < leftGap) mediaEl.setAttribute('data-crm-media-side', 'right');
                 }
               }
               if (hasLeftAv) unit.setAttribute('data-crm-left-avatar', '1');
-              const articleRow = unit.closest('div[role="article"], div[role="row"]') || unit;
+              if (avatarSenderAlt) unit.setAttribute('data-crm-avatar-sender', avatarSenderAlt);
               const cleanGroupSenderCandidate = (raw) => {
                 const c = String(raw || '').replace(/^(?:\d{4}\s*,\s*)+/, '').trim();
-                if (!c || /^(?:Bạn|Tôi|You|Me)$/i.test(c) || /^(?:cuộc trò chuyện|tin nhắn trong|đoạn chat|nhóm|group|chat|messages|đã xem|seen by)/i.test(c)) return '';
+                if (!c || /^(?:Bạn|You)$/i.test(c) || /^(?:cuộc trò chuyện|tin nhắn trong|đoạn chat|nhóm|group|chat|messages|đã xem|seen by)/i.test(c)) return '';
                 return c;
               };
               let groupSender = '';
@@ -10425,21 +10402,32 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             let mediaDirectionEvidence = 'geometry';
             const directionBoxEl = messageLog || historyDirectionContainer;
             const directionRect = directionBoxEl.getBoundingClientRect();
-            const hasLeftAvatarInRow = directionRect.width > 0 && Array.from(row.querySelectorAll('img[src]')).some((img) => {
+            const rowArticleForAvatar = row.closest?.('div[role="article"], div[role="row"]') || row;
+            const hasLeftAvatarInRow = directionRect.width > 0 && Array.from(rowArticleForAvatar.querySelectorAll('img[src]')).some((img) => {
               if (img.closest(COMPOSER_EXCLUDE)) return false;
               const alt = String(img.getAttribute('alt') || '').trim();
-              if (/^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i.test(alt)) return false;
+              if (/^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i.test(alt) || /đã xem|seen by/i.test(alt)) return false;
               const r = img.getBoundingClientRect();
-              if (!r || r.width < 18 || r.width > 64 || r.height < 18 || r.height > 64) return false;
+              if (!r || r.width < 18 || r.width > 68 || r.height < 18 || r.height > 68) return false;
               const leftGap = r.left - directionRect.left;
               const rightGap = directionRect.right - r.right;
               return leftGap >= -8 && leftGap <= 96 && leftGap < rightGap;
             });
-            if (hasLeftAvatarInRow || row.getAttribute('data-crm-left-avatar') === '1' || nativeIdEl?.getAttribute('data-crm-left-avatar') === '1') {
+            if (hasLeftAvatarInRow || row.getAttribute('data-crm-left-avatar') === '1' || nativeIdEl?.getAttribute('data-crm-left-avatar') === '1' || rowArticleForAvatar?.getAttribute?.('data-crm-left-avatar') === '1') {
               mediaOutgoing = false;
               mediaDirectionEvidence = 'avatar';
             }
             const measuredMediaEl = mediaElement || mediaAnchor || semanticVideoElement || null;
+            if (mediaOutgoing === null && measuredMediaEl) {
+              const stampedSide = measuredMediaEl.getAttribute?.('data-crm-media-side');
+              if (stampedSide === 'left') {
+                mediaOutgoing = false;
+                mediaDirectionEvidence = 'geometry';
+              } else if (stampedSide === 'right') {
+                mediaOutgoing = true;
+                mediaDirectionEvidence = 'geometry';
+              }
+            }
             if (mediaOutgoing === null && measuredMediaEl) {
               const mediaRect = measuredMediaEl.getBoundingClientRect();
               if (directionRect.width > 0 && mediaRect.width > 0) {
@@ -10469,7 +10457,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               }
             }
             if (mediaOutgoing === null) {
-              const labelSaysOutgoing = /do (?:B\u1ea1n|T\u00f4i) g\u1eedi|Tin nh\u1eafn do (?:B\u1ea1n|T\u00f4i) g\u1eedi l\u00fac|(?:B\u1ea1n|T\u00f4i) \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(effectiveLabel);
+              const labelSaysOutgoing = /do B\u1ea1n g\u1eedi|Tin nh\u1eafn do B\u1ea1n g\u1eedi l\u00fac|B\u1ea1n \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(effectiveLabel);
               mediaOutgoing = labelSaysOutgoing ? true : false;
               mediaDirectionEvidence = 'label';
             }
@@ -10478,13 +10466,13 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               if (!cleaned || /^(?:cuộc trò chuyện|tin nhắn trong|đoạn chat|nhóm|group|chat|messages|đã xem|seen by)/i.test(cleaned)) return '';
               return cleaned;
             };
-            const isSelfHistorySender = (raw) => /^(?:B\u1ea1n|T\u00f4i|You|Me)$/i.test(String(raw || '').trim());
+            const isSelfHistorySender = (raw) => /^(?:B\u1ea1n|You)$/i.test(String(raw || '').trim());
             const mediaNativeId = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id')
               || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id') || row.getAttribute('data-id') || null;
             const mediaSenderMatch = effectiveLabel.match(/Tin nh\u1eafn do ([^]+?) g\u1eedi l\u00fac/i) || effectiveLabel.match(/Message sent by ([^]+?) at/i) || effectiveLabel.match(/Message sent [^]*? by ([^:]+?):/i);
             const mediaSenderCandidate = mediaSenderMatch ? cleanHistorySenderName(mediaSenderMatch[1]) : '';
             if (mediaSenderCandidate) {
-              if (isSelfHistorySender(mediaSenderCandidate)) {
+              if (isSelfHistorySender(mediaSenderCandidate) && mediaDirectionEvidence !== 'avatar' && !(mediaOutgoing === false && mediaDirectionEvidence === 'geometry')) {
                 mediaOutgoing = true;
                 mediaDirectionEvidence = 'label_you';
               } else if (!(mediaOutgoing && mediaDirectionEvidence === 'geometry')) {
@@ -10500,7 +10488,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             const mediaArticleSender = mediaArticleLabel.match(/^Lúc\s+(?:[^,:]|,\s*\d{4})+,\s*([^:]+?)(?::\s*([\s\S]*))?$/i);
             const mediaArticleCandidate = mediaArticleSender ? cleanHistorySenderName(mediaArticleSender[1]) : '';
             if (mediaArticleCandidate) {
-              if (isSelfHistorySender(mediaArticleCandidate)) {
+              if (isSelfHistorySender(mediaArticleCandidate) && mediaDirectionEvidence !== 'avatar' && !(mediaOutgoing === false && mediaDirectionEvidence === 'geometry')) {
                 mediaOutgoing = true;
                 mediaMemberName = '';
                 mediaDirectionEvidence = 'label_you';
@@ -10508,6 +10496,18 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                 mediaOutgoing = false;
                 mediaMemberName = mediaArticleCandidate;
                 mediaDirectionEvidence = 'label_name';
+              }
+            }
+            if (!mediaOutgoing && !mediaMemberName) {
+              const fallbackGroupSender = cleanHistorySenderName(
+                nativeIdEl?.getAttribute?.('data-crm-group-sender')
+                || row.getAttribute?.('data-crm-group-sender')
+                || nativeIdEl?.getAttribute?.('data-crm-avatar-sender')
+                || row.getAttribute?.('data-crm-avatar-sender')
+                || ''
+              );
+              if (fallbackGroupSender && !isSelfHistorySender(fallbackGroupSender)) {
+                mediaMemberName = fallbackGroupSender;
               }
             }
             const rowMediaList = [];
@@ -10576,13 +10576,13 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               if (!cleaned || /^(?:cuộc trò chuyện|tin nhắn trong|đoạn chat|nhóm|group|chat|messages|đã xem|seen by)/i.test(cleaned)) return '';
               return cleaned;
             };
-            const isSelfHistorySender = (raw) => /^(?:B\u1ea1n|T\u00f4i|You|Me)$/i.test(String(raw || '').trim());
+            const isSelfHistorySender = (raw) => /^(?:B\u1ea1n|You)$/i.test(String(raw || '').trim());
 
             let isOutgoing = false;
             let senderName = '';
             let labelSenderName = '';
             let directionMatched = false;
-            if (/do (?:Bạn|Tôi) gửi|Tin nhắn do (?:Bạn|Tôi) gửi lúc|(?:Bạn|Tôi) đã gửi|sent by you|You sent|Message sent by you/i.test(currentLabel)) {
+            if (/do Bạn gửi|Tin nhắn do Bạn gửi lúc|Bạn đã gửi|sent by you|You sent|Message sent by you/i.test(currentLabel)) {
               isOutgoing = true;
               senderName = 'Bạn';
               directionMatched = true;
@@ -10618,7 +10618,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               }
             }
 
-            const robustOutgoing = /do (?:B\u1ea1n|T\u00f4i) g\u1eedi|Tin nh\u1eafn do (?:B\u1ea1n|T\u00f4i) g\u1eedi l\u00fac|(?:B\u1ea1n|T\u00f4i) \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(currentLabel);
+            const robustOutgoing = /do B\u1ea1n g\u1eedi|Tin nh\u1eafn do B\u1ea1n g\u1eedi l\u00fac|B\u1ea1n \u0111\u00e3 g\u1eedi|sent by you|You sent|Message sent by you/i.test(currentLabel);
             const robustSender = currentLabel.match(/Tin nh\u1eafn do ([^]+?) g\u1eedi l\u00fac/i) || currentLabel.match(/Message sent by ([^]+?) at/i) || currentLabel.match(/Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by\s+([^:]+?):/i);
             if (robustOutgoing) {
               isOutgoing = true;
@@ -10692,9 +10692,15 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // member_name rỗng + header tên <h3> chảy qua thành tin rác
             // (reproduce 2026-10-11 nhóm Bi-aaaaaaa).
             const ownArticleEl = leafBubble.closest('[data-message-id]') || (leafBubble.matches?.('[data-message-id]') ? leafBubble : null) || leafBubble.querySelector?.('[data-message-id]') || nativeIdEl;
+            const stampedBubbleSide = leafBubble.getAttribute('data-crm-bubble-side');
             if (historyDirectionEvidence !== 'geometry') {
               const stampedRel = Number(leafBubble.getAttribute('data-crm-rel-center'));
-              if (Number.isFinite(stampedRel) && (stampedRel <= 0.45 || stampedRel >= 0.55)) {
+              if (stampedBubbleSide === 'left' || stampedBubbleSide === 'right') {
+                isOutgoing = stampedBubbleSide === 'right';
+                senderName = isOutgoing ? 'Bạn' : (contactName || 'Khách hàng');
+                directionMatched = true;
+                historyDirectionEvidence = 'geometry';
+              } else if (Number.isFinite(stampedRel) && (stampedRel <= 0.45 || stampedRel >= 0.55)) {
                 isOutgoing = stampedRel >= 0.55;
                 senderName = isOutgoing ? 'Bạn' : (contactName || 'Khách hàng');
                 directionMatched = true;
@@ -10710,7 +10716,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+(?:[^,:]|,\s*\d{4})+,\s*([^:]+?)(?::\s*([\s\S]*))?$/i);
             if (ownSenderMatch) {
               const ownSender = cleanHistorySenderName(ownSenderMatch[1]);
-              if (isSelfHistorySender(ownSender)) {
+              if (isSelfHistorySender(ownSender) && !(isOutgoing === false && historyDirectionEvidence === 'geometry')) {
                 isOutgoing = true;
                 senderName = 'Bạn';
                 labelSenderName = '';
@@ -10726,7 +10732,13 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // visual override phía trên đổi sender_name thành tên nhóm cho tin
             // trái - khôi phục tên thành viên để member_name không mất.
             if (!isOutgoing && !labelSenderName) {
-              const stampedGroupSender = cleanHistorySenderName(ownArticleEl?.getAttribute?.('data-crm-group-sender') || row.getAttribute?.('data-crm-group-sender') || '');
+              const stampedGroupSender = cleanHistorySenderName(
+                ownArticleEl?.getAttribute?.('data-crm-group-sender')
+                || row.getAttribute?.('data-crm-group-sender')
+                || ownArticleEl?.getAttribute?.('data-crm-avatar-sender')
+                || row.getAttribute?.('data-crm-avatar-sender')
+                || ''
+              );
               if (stampedGroupSender && !isSelfHistorySender(stampedGroupSender)) {
                 labelSenderName = stampedGroupSender;
                 senderName = stampedGroupSender;
@@ -10762,11 +10774,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (/^(?:Tôi|Bạn|You|Bệnh viện|Gọi lại|Call again|Call back|Bạn đã mở đoạn chat này thông qua quảng cáo\.?)$/i.test(cleaned.trim())) { bubble_idx++; continue; }
             if (senderName && cleaned.replace(/\s+/g, ' ').trim().toLowerCase() === senderName.replace(/\s+/g, ' ').trim().toLowerCase()) { bubble_idx++; continue; }
             if ((mediaUrl || isVideoMessage || photoElements.length > 0) && !/https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(cleaned) && (cleaned.length <= 40 && !/[?!.,:;]/.test(cleaned))) { bubble_idx++; continue; }
-            // Header <h3> trong article = tên người gửi / "Bạn đã trả lời X" —
-            // không bao giờ là nội dung tin nhắn. Cắt ở đây thay vì chỉ so
-            // khớp labelSenderName vì fragment có thể đi cùng article của tin
-            // thật (cùng mid) mà label chưa được giải.
-            if (leafBubble.closest('h3')) { bubble_idx++; continue; }
+            if (leafBubble.closest('h3, h4')) { bubble_idx++; continue; }
             // Header reply "X đã trả lời Y" render bằng div ở một số pass
             // hydration -> lọt thành tin ma song song tin reply thật (nhóm
             // Cfggh 2026-10-15). Đồng bộ REPLY_HEADER_BUBBLE_RE trong
@@ -11530,14 +11538,13 @@ function recoverRealtimeReceiver() {
   realtimeReceiverRecovery = (async () => {
     await checkFacebookCookiesAndRegister();
     if (!user_id) return false;
+    // Giữ đúng 3 tab cố định: Tab 1 (chat), Tab 2 (history), Tab 3 (requests)
     const tab = await ensureRoleMessengerTab(user_id, 'chat');
     const observerReady = await ensureRealtimeObserver(tab?.id);
     if (observerReady) await flushBackendOutbox();
-    // 2026-10-02: tao truoc tab history (tab messenger ca nhan thu 2) thay vi
-    // de job sync dau tien tao - truoc day tab nay xuat hien muot hon cac tab
-    // Page duoc server mo truc tiep qua puppeteer, user thay "2 tab messenger
-    // ca nhan mo cham". active:false nen khong gianh focus.
-    ensureRoleMessengerTab(user_id, 'history').catch(() => {});
+    await ensureRoleMessengerTab(user_id, 'history').catch(() => {});
+    await ensureRoleMessengerTab(user_id, 'requests', { freshOnly: true }).catch(() => {});
+    await runTabAudit().catch(() => {});
     return observerReady;
   })().catch((error) => {
     console.warn('[FB Engine] Realtime receiver recovery failed:', error?.message || error);
@@ -11624,7 +11631,7 @@ async function closeLeftoverTransientTabs() {
     let closed = 0;
     for (const t of tabs) {
       const u = String(t.url || '');
-      const isTransient = /\/messages\/requests(?:\/|$|\?)/i.test(u) || /[?&]crm_tab_role=(?:discovery|requests)/i.test(u);
+      const isTransient = /[?&]crm_tab_role=discovery/i.test(u);
       if (!isTransient) continue;
       for (const [role, tabId] of [...tabRegistry.entries()]) {
         if (tabId === t.id) {

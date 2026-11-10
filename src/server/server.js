@@ -5136,8 +5136,8 @@ wss.on('connection', (ws, req) => {
                 if (!incomingPreviewChanged
                   && (!rawSidebarPreview || isActivitySummary || (isSystemOrMetadataText(rawSidebarPreview) && !systemNotice))
                   && t.preview_is_outgoing !== true
-                  && (Number(t.is_unread) === 1 || t.is_like === true || isActivitySummary)
-                  && (unreadFlippedToIncoming || rowFresh || isActivitySummary)
+                  && (Number(t.is_unread) === 1 || t.is_like === true || rowFresh)
+                  && (unreadFlippedToIncoming || rowFresh)
                   && Date.now() - mediaHintLastAt > 3 * 1000) {
                   const recentRealIncoming = db.prepare(`
                     SELECT 1 FROM messages
@@ -5220,7 +5220,7 @@ wss.on('connection', (ws, req) => {
                   unreadFlipped: changed.unread_flipped,
                   isSystemNotice: changed.system_notice
                 });
-                if (allowMediaBump || changed.row_fresh || changed.is_activity_summary) {
+                if (allowMediaBump || changed.row_fresh) {
                   const bumpedAtIso = new Date().toISOString();
                   db.prepare('UPDATE threads SET last_message = COALESCE(?, last_message), last_activity = CURRENT_TIMESTAMP, is_unread = 1, unread_manual = 1 WHERE id = ?').run(changed.media_placeholder || null, String(canonicalThreadId));
                   io.emit('THREAD_UNREAD_CHANGED', { thread_id: String(canonicalThreadId), is_unread: 1, unread_manual: 1, last_activity: bumpedAtIso, last_message: changed.media_placeholder || undefined });
@@ -10652,7 +10652,7 @@ function startServer() {
             AND id != ?
             AND is_outgoing = 0
             AND sender_name IS NOT NULL AND TRIM(sender_name) != ''
-            AND ABS(COALESCE(timestamp_ms, 0) - ?) <= 90000
+            AND ABS(COALESCE(timestamp_ms, 0) - ?) <= 1500
           ORDER BY ABS(COALESCE(timestamp_ms, 0) - ?) ASC, id ASC
           LIMIT 1
         `).get(msr.thread_id, msr.id, Number(msr.timestamp_ms), Number(msr.timestamp_ms));
@@ -10661,7 +10661,7 @@ function startServer() {
         }
       }
       // 0b) Lật lại chiều (is_outgoing = 1) cho các tin của operator bị lưu nhầm là tin khách (is_outgoing = 0)
-      // do nhãn tiếng Việt "Tôi" / "Bạn" hoặc tiêu đề hệ thống "Cuộc trò chuyện có tiêu đề ..." bị gán vào sender_name
+      // Lưu ý: Trên Messenger tiếng Việt, tin của chính mình luôn là "Bạn" (không phải "Tôi" - "Tôi" là tên rút gọn của thành viên "Đợi Tôi" trong nhóm).
       db.prepare(`
         UPDATE messages
         SET is_outgoing = 1,
@@ -10672,7 +10672,7 @@ function startServer() {
         WHERE is_outgoing = 0
           AND sender_name IS NOT NULL
           AND (
-            LOWER(TRIM(sender_name)) IN ('tôi', 'bạn', 'you', 'me', '2024, tôi', '2025, tôi', '2026, tôi', '2024, bạn', '2025, bạn', '2026, bạn')
+            LOWER(TRIM(sender_name)) IN ('bạn', 'you', '2024, bạn', '2025, bạn', '2026, bạn')
             OR LOWER(TRIM(sender_name)) LIKE 'cuộc trò chuyện có tiêu đề%'
             OR LOWER(TRIM(sender_name)) LIKE 'tin nhắn trong cuộc trò chuyện%'
           )
@@ -10685,7 +10685,7 @@ function startServer() {
       `).all();
       for (const ypr of yearPrefixedRows) {
         const cleanedSender = String(ypr.sender_name || '').replace(/^(?:\d{4}\s*,\s*)+/, '').trim();
-        if (/^(?:tôi|bạn|you|me)$/i.test(cleanedSender)) {
+        if (/^(?:bạn|you)$/i.test(cleanedSender)) {
           db.prepare(`
             UPDATE messages
             SET is_outgoing = 1, sender_role = 'operator', direction_status = 'confirmed', sender_name = NULL
@@ -10693,6 +10693,71 @@ function startServer() {
           `).run(ypr.id);
         } else {
           db.prepare('UPDATE messages SET sender_name = ? WHERE id = ?').run(cleanedSender || null, ypr.id);
+        }
+      }
+
+      // 0c2) Khôi phục các tin nhắn nhóm của thành viên "Đợi Tôi" ("Tôi") và ảnh báo cáo Mạnh Thiện
+      // bị lật nhầm sang outgoing hoặc gán nhầm người gửi trong nhóm 000. ORDER TIỀN QC HÀNG NGÀY
+      db.prepare(`
+        UPDATE messages
+        SET is_outgoing = 0,
+            sender_role = 'customer',
+            sender_id = 'CONTACT',
+            sender_name = 'Mạnh Thiện',
+            direction_status = 'confirmed'
+        WHERE thread_id = '8365553496863843'
+          AND fb_message_id = '1582068632376581@g.us.7525590529287987609'
+      `).run();
+      db.prepare(`
+        UPDATE messages
+        SET is_outgoing = 0,
+            sender_role = 'customer',
+            sender_id = 'CONTACT',
+            sender_name = 'Tôi',
+            direction_status = 'confirmed'
+        WHERE thread_id = '8365553496863843'
+          AND fb_message_id IN (
+            '1582068632376581@g.us.7525244540022700496',
+            '1582068632376581@g.us.7525590528709167390',
+            '1582068632376581@g.us.7525590611731261013'
+          )
+      `).run();
+
+      // 0c3) Xóa các dòng media trùng lặp do hậu tố ::<account>:<thread> khi đã có dòng mid.$ gốc cùng thread
+      db.prepare(`
+        DELETE FROM messages
+        WHERE fb_message_id LIKE 'mid.$%::%'
+          AND EXISTS (
+            SELECT 1 FROM messages base
+            WHERE base.thread_id = messages.thread_id
+              AND base.id != messages.id
+              AND base.fb_message_id = SUBSTR(messages.fb_message_id, 1, INSTR(messages.fb_message_id, '::') - 1)
+          )
+      `).run();
+
+      // 0c4) Khôi phục đúng thứ tự thời gian (last_activity) và tắt unread giả cho các hội thoại cũ
+      // bị đẩy nhầm lên đầu danh sách do summary '[Ảnh]' / '[Video]'
+      const allThreadsForOrderFix = db.prepare(`
+        SELECT t.id, t.last_message, t.last_activity, t.is_unread, t.unread_manual,
+               (SELECT MAX(m.timestamp_ms) FROM messages m WHERE m.thread_id = t.id AND m.timestamp_ms > 0) AS max_ts,
+               (SELECT m2.content FROM messages m2 WHERE m2.thread_id = t.id ORDER BY COALESCE(m2.timestamp_ms, 0) DESC, m2.id DESC LIMIT 1) AS newest_content,
+               (SELECT m2.media_type FROM messages m2 WHERE m2.thread_id = t.id ORDER BY COALESCE(m2.timestamp_ms, 0) DESC, m2.id DESC LIMIT 1) AS newest_media_type
+        FROM threads t
+      `).all();
+      for (const tf of allThreadsForOrderFix) {
+        if (tf.max_ts && Number(tf.max_ts) > 1577836800000) {
+          const trueIso = new Date(Number(tf.max_ts)).toISOString();
+          const ageMs = Date.now() - Number(tf.max_ts);
+          const cleanLastMsg = tf.newest_content && String(tf.newest_content).trim()
+            ? String(tf.newest_content).trim()
+            : (tf.newest_media_type === 'video' ? '[Video]' : (tf.newest_media_type === 'image' ? '[Ảnh]' : tf.last_message));
+          if (ageMs > 2 * 3600 * 1000 && Number(tf.is_unread) === 1 && Number(tf.unread_manual) === 1) {
+            db.prepare('UPDATE threads SET last_activity = ?, last_message = COALESCE(?, last_message), is_unread = 0, unread_manual = 0 WHERE id = ?')
+              .run(trueIso, cleanLastMsg, tf.id);
+          } else if (ageMs > 1800 * 1000) {
+            db.prepare('UPDATE threads SET last_activity = ?, last_message = COALESCE(?, last_message) WHERE id = ?')
+              .run(trueIso, cleanLastMsg, tf.id);
+          }
         }
       }
 
