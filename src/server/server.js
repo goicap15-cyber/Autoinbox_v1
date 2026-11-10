@@ -10490,6 +10490,35 @@ function startServer() {
             )
           )
       `).run();
+      // Khôi phục các tin nhắn icon Like (👍) bị lưu nhầm thành mảnh số phút (ví dụ "17", "04", "47", "38")
+      const minuteFragCandidates = db.prepare(`
+        SELECT id, thread_id, fb_message_id, content, timestamp_ms, is_outgoing
+        FROM messages
+        WHERE (media_type IS NULL OR media_type = 'text')
+          AND media_url IS NULL
+          AND timestamp_ms > 0
+          AND (TRIM(COALESCE(content, '')) GLOB '[0-9][0-9]' OR TRIM(COALESCE(content, '')) GLOB '[0-9][0-9]*')
+      `).all();
+      for (const mf of minuteFragCandidates) {
+        const mMatch = String(mf.content || '').trim().replace(/\s+/g, '').match(/^(\d{2})(?:sáng|chiều|tối|am|pm|sa|ch)?$/i);
+        if (!mMatch) continue;
+        const valNum = Number(mMatch[1]);
+        const msgMin = new Date(Number(mf.timestamp_ms)).getMinutes();
+        if (valNum !== msgMin) continue;
+        const hasCompanionMedia = db.prepare(`
+          SELECT 1 FROM messages m2
+          WHERE m2.thread_id = ?
+            AND m2.id != ?
+            AND m2.media_type IN ('image', 'video')
+            AND (m2.fb_message_id = ? || '_media' OR ABS(COALESCE(m2.timestamp_ms, 0) - ?) <= 5000)
+          LIMIT 1
+        `).get(mf.thread_id, mf.id, String(mf.fb_message_id || ''), Number(mf.timestamp_ms));
+        if (hasCompanionMedia) {
+          db.prepare('DELETE FROM messages WHERE id = ?').run(mf.id);
+        } else {
+          db.prepare("UPDATE messages SET content = '👍' WHERE id = ?").run(mf.id);
+        }
+      }
     } catch (cleanErr) {
       console.warn('[DB Self-Heal 4l] Cleanup warning:', cleanErr.message);
     }

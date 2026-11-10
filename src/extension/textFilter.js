@@ -244,8 +244,8 @@ function isBareVietnamMobileText(text) {
     if (!text) return '';
 
     // 1. Strip accessibility prefix (handling 'Tin nhắn do X gửi lúc Thứ Năm 18:00ch:', 'Tin nhắn do X gửi lúc 18:00:', etc.)
-    text = text.replace(/^(?:Nhập,\s*)?Tin nhắn do [\s\S]+? gửi lúc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm))?:|\b\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm))?\s+)\s*/i, '').trim();
-    text = text.replace(/^(?:Nhập,\s*)?Message sent by [\s\S]+? at [^\n]*?(?::|\b\d{1,2}:\d{2}(?:\s*(?:[ap]m))?:|\b\d{1,2}:\d{2}(?:\s*(?:[ap]m))?\s+)\s*/i, '').trim();
+    text = text.replace(/^(?:Nhập,\s*)?Tin nhắn do [\s\S]+? gửi lúc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm))?(?:[:\s]+|$))\s*/i, '').trim();
+    text = text.replace(/^(?:Nhập,\s*)?Message sent by [\s\S]+? at [^\n]*?(?::|\b\d{1,2}:\d{2}(?:\s*(?:[ap]m))?(?:[:\s]+|$))\s*/i, '').trim();
     // Nhãn trợ năng dạng "Enter, Message sent 13:58 by Khang: <payload>" -
     // bubble icon-only/text của Messenger E2EE để nguyên nhãn này trong DOM
     // text; strip prefix giữ lại payload (emoji HOẶC text - bản cũ chỉ giữ

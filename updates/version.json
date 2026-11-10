@@ -1,8 +1,8 @@
 {
-  "version": "1.0.28",
-  "releasedAt": "2026-11-10T03:27:54.276Z",
-  "notes": "Đồng bộ chuẩn 100% nhóm E2EE (@g.us), giải mã đúng mốc thời gian Snowflake, chặn cắt chữ trước dấu hai chấm và tự động làm sạch triệt để tin nhắn lặp (v1.0.28)",
+  "version": "1.0.29",
+  "releasedAt": "2026-11-10T04:04:47.330Z",
+  "notes": "Sửa triệt để lỗi icon Like (👍) bị hiển thị thành số phút (17, 04, 38, 47) và tự động khôi phục lại icon Like trong lịch sử chat (v1.0.29)",
   "requiresRestart": true,
-  "sizeBytes": 3093213,
-  "sha256": "2ad4c928fb8ed5d39fade41dce14fb188b85f7a2f9fac18e55661ef242537cd9"
+  "sizeBytes": 3094107,
+  "sha256": "036031f2c09d4a1be1a7e7152e8c76a4b11ffef3e861969cbe2dd98e44517242"
 }

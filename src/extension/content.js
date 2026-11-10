@@ -948,7 +948,7 @@
     if (filter?.cleanMessageText) {
       cleanText = filter.cleanMessageText(cleanText);
     } else {
-      cleanText = cleanText.replace(/^(?:Nhập,\s*)?Tin nhắn do [\s\S]+? gửi lúc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:ch)?:|\b\d{1,2}:\d{2}(?:ch)?\s+)\s*/i, '').trim();
+      cleanText = cleanText.replace(/^(?:Nhập,\s*)?Tin nhắn do [\s\S]+? gửi lúc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm))?(?:[:\s]+|$))\s*/i, '').trim();
       cleanText = cleanText.replace(/^Nhập,\s*/i, '').trim();
       cleanText = cleanText.replace(/^[:\s]+/, '').trim();
       const sentEmojiMatch = cleanText.match(/^[^,\n]{1,80}\s+(?:đã gửi|sent),\s*(.+)$/i);
@@ -979,7 +979,8 @@
     for (const element of candidates) {
       if (visited.has(element)) continue;
       visited.add(element);
-      const exactReceivedLikeTitle = element.tagName === 'TITLE'
+      const isTitleTag = String(element.tagName || '').toUpperCase() === 'TITLE';
+      const exactReceivedLikeTitle = isTitleTag
         && /^(?:k\u00fd hi\u1ec7u gi\u01a1 ng\u00f3n tay c\u00e1i|thumbs up symbol)$/i.test(String(element.textContent || '').trim());
       if (exactReceivedLikeTitle) { found.push('\u{1F44D}'); continue; }
       // Controls for Like/reaction are UI, not message content.
@@ -988,7 +989,7 @@
       // a child <title>, e.g. <title>KÃƒÂ½ hiÃ¡Â»â€¡u giÃ†Â¡ ngÃƒÂ³n tay cÃƒÂ¡i</title>.
       const value = String(
         element.getAttribute('alt') || element.getAttribute('aria-label') || element.getAttribute('title')
-        || (element.tagName === 'TITLE' ? element.textContent : '') || ''
+        || (isTitleTag ? element.textContent : '') || ''
       ).trim();
       if (!value) continue;
       // Only match when the attribute value IS itself an emoji character
@@ -999,7 +1000,8 @@
       // Match the exact SVG <title> used by Messenger's received Like.
       // Never match generic "like" / "thích" labels on action/reaction chrome.
       if (/(?:k\u00fd hi\u1ec7u gi\u01a1 ng\u00f3n tay c\u00e1i|thumbs?\s*up\s*symbol)/i.test(value)
-        && (element.matches?.('title') || element.closest?.('svg'))) { found.push('\u{1F44D}'); }
+        && (isTitleTag || element.matches?.('title') || element.closest?.('svg') || /^Lúc\s+.+:\s*(?:k\u00fd hi\u1ec7u gi\u01a1 ng\u00f3n tay c\u00e1i|thumbs?\s*up\s*symbol)$/i.test(value))) { found.push('\u{1F44D}'); }
+      if (/^Lúc\s+.+:\s*(\u{1F44D})$/u.test(value)) { found.push('\u{1F44D}'); }
     }
     // Fallback: textContent of container itself is a single pictographic character
     if (!found.length) {
@@ -1014,7 +1016,7 @@
   }
 
 
-  function isClockMinuteFragment(value, label) {
+  function isClockMinuteFragment(value, label, midTs = 0) {
     if (!value || typeof value !== 'string') return false;
     const normalized = value.trim();
     if (/^\d{1,2}(?::\d{2})?\s*(?:ch|sa|am|pm|chiều|sáng|tối)$/i.test(normalized)) return true;
@@ -1031,6 +1033,11 @@
       }
       const hourMatch = String(label).match(/\b(\d{1,2})\s*(?:ch|sa|am|pm|chiều|sáng|tối)\b/i);
       if (hourMatch && Number(fragment[1]) === Number(hourMatch[1])) return true;
+    }
+    if (midTs > 0) {
+      const d = new Date(midTs);
+      const valNum = Number(fragment[1]);
+      if (valNum === d.getMinutes() || valNum === d.getHours() || valNum === (d.getHours() % 12 || 12)) return true;
     }
     return false;
   }
@@ -1237,10 +1244,10 @@
     }
 
     const rowAriaLabel = messageRow.getAttribute?.('aria-label') || '';
-    const childMsgEl = !rowAriaLabel ? messageRow.querySelector?.('[aria-label*="Tin nhắn do"], [aria-label*="Message sent"]') : null;
-    const effectiveLabel = rowAriaLabel || (childMsgEl?.getAttribute?.('aria-label') || '');
+    const childMsgEl = !rowAriaLabel ? (messageRow.querySelector?.('[data-scope="messages_table"][aria-label], [aria-roledescription="tin nhắn"][aria-label], [data-message-id][aria-label]') || messageRow.querySelector?.('[aria-label*="Tin nhắn do"], [aria-label*="Message sent"], [aria-label^="Lúc "]')) : null;
+    let effectiveLabel = rowAriaLabel || (childMsgEl?.getAttribute?.('aria-label') || '');
 
-    const hasMessageLabel = /Tin nhắn do .+ gửi lúc|Message sent by|Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by/i.test(effectiveLabel);
+    const hasMessageLabel = /Tin nhắn do .+ gửi lúc|Message sent by|Message sent \d{1,2}:\d{2}(?:\s*(?:AM|PM|SA|CH))?\s+by|^Lúc\s+.+?,\s*.+?:|You sent|Bạn đã gửi/i.test(effectiveLabel);
     // [data-message-id] checked first: live DOM inspection (spec 043) found it's
     // the reliable current-structure marker, set on the row at insertion time -
     // unlike the aria-label above, which React hydrates a beat later. Checking
@@ -1461,6 +1468,9 @@
       || messageRow?.querySelector?.('[data-message-id]')
       || null;
     const ownArticleLabel = bubbleArticleEl?.getAttribute?.('aria-label') || '';
+    if (!effectiveLabel && ownArticleLabel) effectiveLabel = ownArticleLabel;
+    const rowNativeIdForTs = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null;
+    const rowMidTs = extractMidTimestampMs(rowNativeIdForTs);
     const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+.*,\s*([^:]+?):\s+(.+)$/);
     if (ownSenderMatch && !/^(?:Bạn|You)$/i.test(ownSenderMatch[1].trim())) {
       is_outgoing = false;
@@ -1503,7 +1513,15 @@
     // beside its SVG. That fragment is timestamp chrome, not message text.
     const hasOnlyClockFragments = finalBubbles.length > 0 && finalBubbles.every((bubble) => {
       const bubbleText = cleanBubbleText(bubble.textContent);
-      return !bubbleText || isClockMinuteFragment(bubbleText, effectiveLabel);
+      if (bubble.closest('h3')) return true;
+      if (!bubbleText) return true;
+      if (/^(?:Tôi|Bạn|You)$/i.test(bubbleText.trim())) return true;
+      const lower = bubbleText.replace(/\s+/g, ' ').trim().toLowerCase();
+      if (labelSenderName && lower === labelSenderName.replace(/\s+/g, ' ').trim().toLowerCase()) return true;
+      if (sender_name && lower === sender_name.replace(/\s+/g, ' ').trim().toLowerCase()) return true;
+      if (contactNameStr && lower === contactNameStr.replace(/\s+/g, ' ').trim().toLowerCase()) return true;
+      if (rowEmojiContent && /^\d{1,2}(?:\s*(?:sáng|chiều|tối|am|pm|sa|ch))?$/i.test(bubbleText.trim())) return true;
+      return isClockMinuteFragment(bubbleText, effectiveLabel || ownArticleLabel, rowMidTs);
     });
     if (rowEmojiContent && (finalBubbles.length === 0 || hasOnlyClockFragments) && !isPhotoMessage && !isVideoMessage) {
       // Messenger gộp NHIỀU like/sticker giống nhau gửi liên tiếp vào MỘT
@@ -1548,7 +1566,7 @@
       }
         const cleaned = cleanBubbleText(bubble.textContent);
         if (!cleaned || cleaned.length > 1000) continue;
-        if (isClockMinuteFragment(cleaned, effectiveLabel)) continue;
+        if (isClockMinuteFragment(cleaned, effectiveLabel || ownArticleLabel, rowMidTs)) continue;
         if (MEDIA_PLACEHOLDER_RE.test(cleaned)) continue;
         if (filter?.isSystemOrMetadataText && filter.isSystemOrMetadataText(cleaned)) continue;
         if (!is_outgoing && labelSenderName
@@ -1631,11 +1649,16 @@
       }
       const textContent = cleanBubbleText(bubble.textContent);
       // Keep icon ownership scoped to this exact bubble.
-      const emojiContent = extractBubbleEmoji(bubble);
-      let cleanText = emojiContent && (!textContent || isClockMinuteFragment(textContent, effectiveLabel))
+      const isMinFrag = isClockMinuteFragment(textContent, effectiveLabel || ownArticleLabel, rowMidTs);
+      const emojiContent = extractBubbleEmoji(bubble) || (isMinFrag ? rowEmojiContent : '');
+      let cleanText = emojiContent && (!textContent || isMinFrag)
         ? emojiContent
         : textContent;
 
+      if (!emojiContent && isClockMinuteFragment(cleanText, effectiveLabel || ownArticleLabel, rowMidTs)) {
+        bubble_idx++;
+        continue;
+      }
       if (!cleanText || cleanText.length < 1 || cleanText.length > 1000) {
         bubble_idx++;
         continue;

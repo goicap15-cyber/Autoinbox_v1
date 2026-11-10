@@ -9842,8 +9842,8 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           if (!raw) return '';
           let t = raw.trim();
           if (!t) return '';
-          t = t.replace(/^(?:Nhập,\s*)?Tin nhắn do [\s\S]+? gửi lúc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm))?:|\b\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm))?\s+)\s*/i, '').trim();
-          t = t.replace(/^(?:Nhập,\s*)?Message sent by [\s\S]+? at [^\n]*?(?::|\b\d{1,2}:\d{2}(?:\s*(?:[ap]m))?:|\b\d{1,2}:\d{2}(?:\s*(?:[ap]m))?\s+)\s*/i, '').trim();
+          t = t.replace(/^(?:Nhập,\s*)?Tin nhắn do [\s\S]+? gửi lúc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm))?(?:[:\s]+|$))\s*/i, '').trim();
+          t = t.replace(/^(?:Nhập,\s*)?Message sent by [\s\S]+? at [^\n]*?(?::|\b\d{1,2}:\d{2}(?:\s*(?:[ap]m))?(?:[:\s]+|$))\s*/i, '').trim();
           t = t.replace(/^Enter,\s*Message sent\b[^:\n]*(?::\d{2}[^:\n]*)?:\s*/iu, '').trim();
           t = t.replace(/^Nhập,\s*/i, '').trim();
           t = t.replace(/^[:\s]+/, '').trim();
@@ -9859,12 +9859,18 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           return t;
         }
 
-        function isClockMinuteFragment(value, label) {
+        function isClockMinuteFragment(value, label, midTs = 0) {
           const normalized = String(value || '').trim().replace(/\s+/g, '');
           const fragment = normalized.match(/^(\d{1,2})(?:sáng|chiều|tối|am|pm|sa|ch)?$/i);
           if (!fragment) return false;
-          const match = String(label || '').match(/\b\d{1,2}:(\d{2})\b/);
-          return !!match && Number(fragment[1]) === Number(match[1]);
+          const valNum = Number(fragment[1]);
+          const match = String(label || '').match(/\b(\d{1,2}):(\d{2})\b/);
+          if (match && (valNum === Number(match[1]) || valNum === Number(match[2]))) return true;
+          if (midTs > 0) {
+            const d = new Date(midTs);
+            if (valNum === d.getMinutes() || valNum === d.getHours() || valNum === (d.getHours() % 12 || 12)) return true;
+          }
+          return false;
         }
 
         function isSenderLabelFragment(value) {
@@ -10002,16 +10008,18 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           if (!container?.querySelectorAll) return '';
           const candidates = container.querySelectorAll('img[alt], [aria-label], [title], svg title');
           for (const element of candidates) {
-            const exactReceivedLikeTitle = element.tagName === 'TITLE'
+            const isTitleTag = String(element.tagName || '').toUpperCase() === 'TITLE';
+            const exactReceivedLikeTitle = isTitleTag
               && /^(?:k\u00fd hi\u1ec7u gi\u01a1 ng\u00f3n tay c\u00e1i|thumbs up symbol)$/i.test(String(element.textContent || '').trim());
             if (exactReceivedLikeTitle) return '👍';
             if (element.matches?.('[role="button"], button') || element.closest?.('[role="button"], button')) continue;
             const value = String(element.getAttribute('alt') || element.getAttribute('aria-label') || element.getAttribute('title')
-              || (element.tagName === 'TITLE' ? element.textContent : '') || '').trim();
+              || (isTitleTag ? element.textContent : '') || '').trim();
             if (!value) continue;
             if (value.length <= 16 && /^\p{Extended_Pictographic}[\p{Extended_Pictographic}\uFE0F\u20D0-\u20FF]*$/u.test(value)) return value;
             if (/(?:k\u00fd hi\u1ec7u gi\u01a1 ng\u00f3n tay c\u00e1i|thumbs?\s*up\s*symbol)/i.test(value)
-              && (element.matches?.('title') || element.closest?.('svg'))) return '👍';
+              && (isTitleTag || element.matches?.('title') || element.closest?.('svg') || /^Lúc\s+.+:\s*(?:k\u00fd hi\u1ec7u gi\u01a1 ng\u00f3n tay c\u00e1i|thumbs?\s*up\s*symbol)$/i.test(value))) return '👍';
+            if (/^Lúc\s+.+:\s*(\u{1F44D})$/u.test(value)) return '👍';
           }
           const directText = String(container.textContent || '').trim();
           return directText.length <= 4 && /^\p{Extended_Pictographic}+$/u.test(directText) ? directText : '';
@@ -10173,9 +10181,18 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             || /\.mp4(?:\?|$)|video/i.test(String(mediaUrl || ''));
           const mediaType = isVideoMessage ? 'video' : (mediaUrl ? 'image' : null);
 
+          const rowMidTs = extractMidTimestampMs(nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id'));
           const hasOnlyClockFragments = leafBubbles.length > 0 && leafBubbles.every((bubble) => {
+            if (bubble.closest('h3')) return true;
             const bubbleText = cleanText(bubble.textContent || '');
-            return !bubbleText || isClockMinuteFragment(bubbleText, effectiveLabel);
+            if (!bubbleText) return true;
+            if (/^(?:Tôi|Bạn|You)$/i.test(bubbleText.trim())) return true;
+            if (rowEmojiContent && /^\d{1,2}(?:\s*(?:sáng|chiều|tối|am|pm|sa|ch))?$/i.test(bubbleText.trim())) return true;
+            const ownArt = bubble.closest('[data-message-id]');
+            const ownLbl = ownArt?.getAttribute('aria-label') || '';
+            const ownSender = ownLbl.match(/^Lúc\s+.*,\s*([^:]+?):\s+(.+)$/);
+            if (ownSender && bubbleText.replace(/\s+/g, ' ').trim().toLowerCase() === ownSender[1].replace(/\s+/g, ' ').trim().toLowerCase()) return true;
+            return isClockMinuteFragment(bubbleText, effectiveLabel || ownLbl, rowMidTs);
           });
           if (rowEmojiContent && (leafBubbles.length === 0 || hasOnlyClockFragments) && !mediaUrl && !isVideoMessage && photoElements.length === 0) leafBubbles = [row];
           if (leafBubbles.length === 0 && !mediaUrl && !isVideoMessage && photoElements.length === 0) return;
@@ -10195,7 +10212,6 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (['AM', 'SA', 'SÁNG'].includes(clockSuffix) && clockHour === 12) clockHour = 0;
             clockMinutes = clockHour * 60 + Number(clockMatch[2]);
           }
-          const rowMidTs = extractMidTimestampMs(nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || row.getAttribute('data-message-id'));
           const timestampHasExplicitDate = Boolean(rowMidTs > 0) || /(?:hôm qua|yesterday|thứ\s+(?:hai|ba|tư|năm|sáu|bảy)|chủ nhật|\bT[2-7]\b|\bCN\b|\d{1,2}\s*tháng\s*\d{1,2}|\b\d{1,2}[\/-]\d{1,2}(?:[\/-]\d{2,4})?|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\b)/i.test(timestampLabel);
           let tsMs = rowMidTs > 0
             ? rowMidTs
@@ -10472,8 +10488,8 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (!isOutgoing && labelSenderName) senderName = labelSenderName;
 
             let textContent = rawBubbleText;
-            const minuteFragment = isClockMinuteFragment(textContent, currentLabel || timestampLabel);
-            const emojiContent = rawEmojiContent;
+            const minuteFragment = isClockMinuteFragment(textContent, currentLabel || timestampLabel || ownArticleLabel, rowMidTs);
+            const emojiContent = rawEmojiContent || (minuteFragment ? rowEmojiContent : '');
             if (emojiContent && (!textContent || minuteFragment)) textContent = emojiContent;
             if (!textContent) { bubble_idx++; continue; }
             const cleaned = cleanText(textContent);
@@ -10481,7 +10497,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if ((mediaUrl || isVideoMessage) && /^\d{2}$/.test(cleaned)
               && Number.isFinite(Number(clockMinutes))
               && Number(cleaned) === (Number(clockMinutes) % 60)) { bubble_idx++; continue; }
-            if (isClockMinuteFragment(cleaned, currentLabel || timestampLabel)) { bubble_idx++; continue; }
+            if (isClockMinuteFragment(cleaned, currentLabel || timestampLabel || ownArticleLabel, rowMidTs)) { bubble_idx++; continue; }
             if (isSenderLabelFragment(cleaned)) { bubble_idx++; continue; }
             if (contactName && cleaned.toLowerCase() === String(contactName).trim().toLowerCase()) { bubble_idx++; continue; }
             if (/^(?:Tôi|Bạn|You|Bệnh viện|Gọi lại|Call again|Call back|Bạn đã mở đoạn chat này thông qua quảng cáo\.?)$/i.test(cleaned.trim())) { bubble_idx++; continue; }
