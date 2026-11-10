@@ -9464,12 +9464,63 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           return collectMessageRows(container).map((row) => historyRowIdentity(row)).filter(Boolean).join('||');
         }
 
+        const harvestedUnitsByMid = new Map();
+        function harvestMountedRows(container) {
+          if (!container) return;
+          try { window.postMessage({ type: 'CRM_STAMP_FIBER_MESSAGES' }, '*'); } catch (_) {}
+          const dirBox = container.querySelector('[role="log"]') || findHistoryScroller(container) || container;
+          const dirRect = dirBox?.getBoundingClientRect?.() || { left: 0, right: 0, width: 0 };
+          const units = Array.from(container.querySelectorAll('[data-message-id]')).filter((unit) => {
+            if (unit.closest(COMPOSER_EXCLUDE)) return false;
+            const parentUnit = unit.parentElement?.closest('[data-message-id]');
+            return !parentUnit || !container.contains(parentUnit);
+          });
+          for (const unit of units) {
+            const mid = String(unit.getAttribute('data-message-id') || '').trim();
+            if (!mid) continue;
+            if (dirRect.width > 0) {
+              for (const b of unit.querySelectorAll('div[dir="auto"], span[dir="auto"]')) {
+                const br = b.getBoundingClientRect();
+                if (br && br.width > 0) {
+                  const rel = (br.left + br.width / 2 - dirRect.left) / dirRect.width;
+                  b.setAttribute('data-crm-rel-center', rel.toFixed(4));
+                }
+              }
+              let hasLeftAv = false;
+              for (const img of unit.querySelectorAll('img[src]')) {
+                const ir = img.getBoundingClientRect();
+                const w = Math.round(ir.width || img.naturalWidth || 0);
+                const h = Math.round(ir.height || img.naturalHeight || 0);
+                if (w > 0) img.setAttribute('data-crm-img-w', String(w));
+                if (h > 0) img.setAttribute('data-crm-img-h', String(h));
+                const alt = String(img.getAttribute('alt') || '').trim();
+                if (!/^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i.test(alt) && ir.width >= 18 && ir.width <= 64 && ir.height >= 18 && ir.height <= 64) {
+                  const leftGap = ir.left - dirRect.left;
+                  const rightGap = dirRect.right - ir.right;
+                  if (leftGap >= -8 && leftGap <= 96 && leftGap < rightGap) hasLeftAv = true;
+                }
+                if (w >= 72 && h >= 72 && ir.width > 0) {
+                  const rel = (ir.left + ir.width / 2 - dirRect.left) / dirRect.width;
+                  img.setAttribute('data-crm-media-rel-center', rel.toFixed(4));
+                }
+              }
+              if (hasLeftAv) unit.setAttribute('data-crm-left-avatar', '1');
+            }
+            const cloned = unit.cloneNode(true);
+            const prev = harvestedUnitsByMid.get(mid);
+            if (!prev || String(cloned.textContent || '').length >= String(prev.textContent || '').length || cloned.hasAttribute('data-crm-fiber-text')) {
+              harvestedUnitsByMid.set(mid, cloned);
+            }
+          }
+        }
+
         async function forceLoadOlder(container) {
           const scroller = findHistoryScroller(container);
           if (!scroller) return { moved: false, reason: 'no_scroll_container' };
           const beforeTop = scroller.scrollTop;
           const beforeHeight = scroller.scrollHeight;
           const beforeFirst = historyRowIdentity(collectMessageRows(container)[0]);
+          harvestMountedRows(container);
           scroller.focus?.({ preventScroll: true });
           const pageDistance = Math.max(600, scroller.clientHeight);
           // Move in visible-sized stages so Messenger has time to mount the
@@ -9480,6 +9531,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             scroller.scrollBy?.({ top: -stepDistance, behavior: 'auto' });
             scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
             await new Promise((resolve) => setTimeout(resolve, 250));
+            harvestMountedRows(container);
           }
           // Reach the mounted page's top to trigger Messenger's lazy loader,
           // then wait below until both row identity and height settle.
@@ -9491,6 +9543,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           let changed = false;
           for (let waitRound = 0; waitRound < 24; waitRound++) {
             await new Promise((resolve) => setTimeout(resolve, 250));
+            harvestMountedRows(container);
             const afterFirst = historyRowIdentity(collectMessageRows(container)[0]);
             const afterHeight = scroller.scrollHeight;
             const spinnerVisible = !!container.querySelector('svg[aria-label="Loading"], div[role="progressbar"]');
@@ -9516,12 +9569,13 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           // from producing a visually imperceptible crawl.
           const scaledDelta = Math.sign(rawDelta) * Math.max(
             Math.abs(rawDelta) * 9,
-            Math.min(2700, Math.max(1260, scroller.clientHeight * 2.55))
+            Math.min(1400, Math.max(700, scroller.clientHeight * 1.35))
           );
           const delta = Math.max(-7200, Math.min(7200, scaledDelta));
           if (!delta) return { moved: false, reason: 'zero_delta' };
           const beforeTop = scroller.scrollTop;
           const beforeViewportIdentity = historyViewportIdentity(container);
+          harvestMountedRows(container);
           scroller.focus?.({ preventScroll: true });
           // One CRM gesture intentionally advances Messenger by three wheel
           // steps. Yield between them so Facebook can mount the intermediate
@@ -9532,12 +9586,14 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             scroller.scrollBy?.({ top: stepDelta, behavior: 'auto' });
             scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
             await new Promise((resolve) => setTimeout(resolve, 160));
+            harvestMountedRows(container);
           }
           let stableRounds = 0;
           let lastViewportIdentity = beforeViewportIdentity;
           let lastTop = beforeTop;
           for (let round = 0; round < 24; round++) {
             await new Promise((resolve) => setTimeout(resolve, 100));
+            harvestMountedRows(container);
             const afterViewportIdentity = historyViewportIdentity(container);
             const pageChanged = afterViewportIdentity !== beforeViewportIdentity;
             const top = scroller.scrollTop;
@@ -9562,6 +9618,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           let roundsWithoutIncrease = 0;
           for (let i = 0; i < maxRounds; i++) {
             const rowsForBoundary = collectMessageRows(container);
+            harvestMountedRows(container);
             if (!resumeMarkerReached && (resumeMarkerId || resumeMarkerContent)) {
               resumeMarkerReached = rowsForBoundary.some((row) => {
                 const marker = row.querySelector('[data-message-id], [data-id], [id^="mid."]') || row;
@@ -9996,13 +10053,33 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         // verified main container is the only safe complete scan boundary.
         const messageLog = mainContainer.querySelector('[role="log"]') || mainContainer;
         const historyDirectionContainer = findHistoryScroller(mainContainer) || messageLog || mainContainer;
-        const allRows = collectMessageRows(messageLog).flatMap((row) => {
+        harvestMountedRows(messageLog);
+        const liveRows = collectMessageRows(messageLog).flatMap((row) => {
           const nativeUnits = Array.from(row.querySelectorAll('[data-message-id]'))
             .filter((unit) => {
               const parentUnit = unit.parentElement?.closest('[data-message-id]');
               return !parentUnit || !row.contains(parentUnit);
             });
           return nativeUnits.length > 1 ? nativeUnits : [row];
+        });
+        const liveMids = new Set();
+        for (const r of liveRows) {
+          const midEl = r.matches?.('[data-message-id]') ? r : r.querySelector?.('[data-message-id]');
+          const midVal = midEl?.getAttribute?.('data-message-id');
+          if (midVal) liveMids.add(midVal);
+        }
+        const unmountedHarvested = [];
+        for (const [midKey, clonedUnit] of harvestedUnitsByMid.entries()) {
+          if (!liveMids.has(midKey)) unmountedHarvested.push(clonedUnit);
+        }
+        const allRows = [...unmountedHarvested, ...liveRows];
+        allRows.sort((a, b) => {
+          const elA = a.matches?.('[data-message-id]') ? a : a.querySelector?.('[data-message-id]');
+          const elB = b.matches?.('[data-message-id]') ? b : b.querySelector?.('[data-message-id]');
+          const tsA = extractMidTimestampMs(elA?.getAttribute?.('data-message-id'));
+          const tsB = extractMidTimestampMs(elB?.getAttribute?.('data-message-id'));
+          if (tsA > 0 && tsB > 0 && tsA !== tsB) return tsA - tsB;
+          return 0;
         });
 
         let dom_order = 0;
@@ -10064,14 +10141,15 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           const semanticVideoElement = Array.from(row.querySelectorAll('[role=img]')).find((element) => {
             if (element.closest(COMPOSER_EXCLUDE)) return false;
             const label = String(element.getAttribute('aria-label') || element.getAttribute('title') || '').trim();
-            return /(?:ph\u00e1t|m\u1edf|xem|play|open|watch)?\s*video/i.test(label)
+            return /^(?:ph\u00e1t|m\u1edf|xem|play|open|watch)\s+video\b/i.test(label)
               && !/(?:cu\u1ed9c g\u1ecdi|video call|call video)/i.test(label);
           }) || null;
           const photoElements = Array.from(row.querySelectorAll('img[src]')).filter((element) => {
             if (element.closest(COMPOSER_EXCLUDE)) return false;
             const rect = element.getBoundingClientRect();
-            const width = rect.width || element.naturalWidth || element.videoWidth || 0;
-            const height = rect.height || element.naturalHeight || element.videoHeight || 0;
+            const width = rect.width || Number(element.getAttribute('data-crm-img-w') || 0) || element.naturalWidth || element.videoWidth || 0;
+            const height = rect.height || Number(element.getAttribute('data-crm-img-h') || 0) || element.naturalHeight || element.videoHeight || 0;
+            if (element.closest('a[href*="l.facebook.com"], a[href*="drive.google.com"], a[href*="docs.google.com"], a[href*="youtube.com"], a[href*="youtu.be"]')) return false;
             const alt = String(element.getAttribute('alt') || element.getAttribute('aria-label') || '').trim();
             if (/^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i.test(alt)) return true;
             const altLower = alt.toLowerCase();
@@ -10146,7 +10224,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               const rightGap = directionRect.right - r.right;
               return leftGap >= -8 && leftGap <= 96 && leftGap < rightGap;
             });
-            if (hasLeftAvatarInRow) {
+            if (hasLeftAvatarInRow || row.getAttribute('data-crm-left-avatar') === '1' || nativeIdEl?.getAttribute('data-crm-left-avatar') === '1') {
               mediaOutgoing = false;
               mediaDirectionEvidence = 'avatar';
             }
@@ -10165,6 +10243,18 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                   if (relativeCenter >= 0.55) mediaOutgoing = true;
                   else if (relativeCenter <= 0.45) mediaOutgoing = false;
                 }
+              }
+            }
+            if (mediaOutgoing === null && (nativeIdEl?.hasAttribute('data-crm-fiber-outgoing') || row.hasAttribute('data-crm-fiber-outgoing'))) {
+              const fiberOut = nativeIdEl?.getAttribute('data-crm-fiber-outgoing') ?? row.getAttribute('data-crm-fiber-outgoing');
+              mediaOutgoing = fiberOut === '1';
+              mediaDirectionEvidence = 'geometry';
+            }
+            if (mediaOutgoing === null && measuredMediaEl?.hasAttribute?.('data-crm-media-rel-center')) {
+              const stampedRel = Number(measuredMediaEl.getAttribute('data-crm-media-rel-center'));
+              if (Number.isFinite(stampedRel) && (stampedRel <= 0.45 || stampedRel >= 0.55)) {
+                mediaOutgoing = stampedRel >= 0.55;
+                mediaDirectionEvidence = 'geometry';
               }
             }
             if (mediaOutgoing === null) {
@@ -10349,6 +10439,20 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // member_name rỗng + header tên <h3> chảy qua thành tin rác
             // (reproduce 2026-10-11 nhóm Bi-aaaaaaa).
             const ownArticleEl = leafBubble.closest('[data-message-id]');
+            if (historyDirectionEvidence !== 'geometry') {
+              const stampedRel = Number(leafBubble.getAttribute('data-crm-rel-center'));
+              if (Number.isFinite(stampedRel) && (stampedRel <= 0.45 || stampedRel >= 0.55)) {
+                isOutgoing = stampedRel >= 0.55;
+                senderName = isOutgoing ? 'Bạn' : (contactName || 'Khách hàng');
+                directionMatched = true;
+                historyDirectionEvidence = 'geometry';
+              } else if (ownArticleEl?.hasAttribute('data-crm-fiber-outgoing')) {
+                isOutgoing = ownArticleEl.getAttribute('data-crm-fiber-outgoing') === '1';
+                senderName = isOutgoing ? 'Bạn' : (ownArticleEl.getAttribute('data-crm-fiber-sender') || contactName || 'Khách hàng');
+                directionMatched = true;
+                historyDirectionEvidence = 'geometry';
+              }
+            }
             const ownArticleLabel = ownArticleEl ? (ownArticleEl.getAttribute('aria-label') || '') : '';
             const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+.*,\s*([^:]+?):\s+(.+)$/);
             if (ownSenderMatch) {
@@ -10378,6 +10482,9 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (isClockMinuteFragment(cleaned, currentLabel || timestampLabel)) { bubble_idx++; continue; }
             if (isSenderLabelFragment(cleaned)) { bubble_idx++; continue; }
             if (contactName && cleaned.toLowerCase() === String(contactName).trim().toLowerCase()) { bubble_idx++; continue; }
+            if (/^(?:Tôi|Bạn|You|Bệnh viện|Gọi lại|Call again|Call back|Bạn đã mở đoạn chat này thông qua quảng cáo\.?)$/i.test(cleaned.trim())) { bubble_idx++; continue; }
+            if (senderName && cleaned.replace(/\s+/g, ' ').trim().toLowerCase() === senderName.replace(/\s+/g, ' ').trim().toLowerCase()) { bubble_idx++; continue; }
+            if ((mediaUrl || isVideoMessage || photoElements.length > 0) && !/https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(cleaned) && (cleaned.length <= 40 && !/[?!.,:;]/.test(cleaned))) { bubble_idx++; continue; }
             // Header <h3> trong article = tên người gửi / "Bạn đã trả lời X" —
             // không bao giờ là nội dung tin nhắn. Cắt ở đây thay vì chỉ so
             // khớp labelSenderName vì fragment có thể đi cùng article của tin
@@ -10427,15 +10534,33 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (nativeId) {
               const nativeOcc = nativeIdCounts.get(nativeId) || 0;
               nativeIdCounts.set(nativeId, nativeOcc + 1);
-              deterministicId = nativeOcc === 0 ? nativeId : `${nativeId}__bubble_${nativeOcc}`;
+              deterministicId = /^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(nativeId))
+                ? String(nativeId).replace(/__bubble_\d+$/, '')
+                : (nativeOcc === 0 ? nativeId : `${nativeId}__bubble_${nativeOcc}`);
             } else {
               deterministicId = `dom_${targetThreadId}_hash_${textHash}_${labelHash}_${dirKey}_occ_${occIndex}`;
             }
 
-            if (!messages.some(m => m.fb_message_id === deterministicId)) {
+            const fiberTextForBubble = cleanText(
+              bubbleNativeEl?.getAttribute?.('data-crm-fiber-text')
+              || ownArticleEl?.getAttribute?.('data-crm-fiber-text')
+              || ''
+            );
+            const effectiveBubbleContent = (fiberTextForBubble && fiberTextForBubble.length >= cleaned.length)
+              ? fiberTextForBubble
+              : cleaned;
+            const existingMsgInPass = messages.find(m => m.fb_message_id === deterministicId);
+            if (existingMsgInPass && /^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(deterministicId))) {
+              const prevTxt = String(existingMsgInPass.content || '');
+              const prevHasUrl = /https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(prevTxt);
+              const nextHasUrl = /https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(effectiveBubbleContent);
+              if ((nextHasUrl && !prevHasUrl) || (effectiveBubbleContent.length > prevTxt.length && (!prevHasUrl || nextHasUrl))) {
+                existingMsgInPass.content = effectiveBubbleContent;
+              }
+            } else if (!existingMsgInPass) {
               const bubbleMidTs = extractMidTimestampMs(nativeId) || tsMs;
               const finalTsMs = bubbleMidTs ? bubbleMidTs + dom_order : 0;
-              let replyQuoteText = null;
+              let replyQuoteText = ownArticleEl?.getAttribute?.('data-crm-fiber-reply') || null;
               const quoteRootEl = ownArticleEl || row;
               const quoteEls = quoteRootEl?.querySelectorAll?.('[aria-label]') || [];
               for (const qEl of quoteEls) {
@@ -10454,7 +10579,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                 sender_name: senderName,
                 member_name: (!isOutgoing && labelSenderName) ? labelSenderName : null,
                 member_avatar: (!isOutgoing && labelSenderName) ? extractHistoryMemberAvatar(row, labelSenderName) : null,
-                content: cleaned,
+                content: effectiveBubbleContent,
                 reply_to_text: replyQuoteText,
                 is_outgoing: isOutgoing ? 1 : 0,
                 direction_evidence: historyDirectionEvidence,
@@ -10514,7 +10639,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // này đẩy +1ms cả loạt xuống cuối thread (reproduce 2026-11-03).
             currentTimestamp = previousDomTimestamp > 0 ? previousDomTimestamp + 1 : 0;
             message.timestamp_source = 'dom_order';
-          } else if (previousDomTimestamp > 0 && currentTimestamp <= previousDomTimestamp) {
+          } else if (previousDomTimestamp > 0 && currentTimestamp <= previousDomTimestamp && message.timestamp_source !== 'facebook_payload') {
             currentTimestamp = previousDomTimestamp + 1;
             message.timestamp_source = 'dom_order';
           }

@@ -800,7 +800,10 @@ class ConversationRepository {
             if (handledByFamily === 'skip') continue;
           }
         }
-        if (/^mid\.\$/.test(String(stableId)) && /__bubble_\d+$/.test(String(stableId))) {
+        if (/^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(stableId)) && /__bubble_\d+$/.test(String(stableId))) {
+          stableId = String(stableId).replace(/__bubble_\d+$/, '');
+        }
+        if (false && /^mid\.\$/.test(String(stableId)) && /__bubble_\d+$/.test(String(stableId))) {
           const bubbleFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
           const bubbleFamilyBase = bubbleFamilyId.length >= 12
             ? database.prepare(`
@@ -865,7 +868,7 @@ class ConversationRepository {
             const existingSender = String(existing.sender_name || senderName || '').trim();
             const isExistingSenderHeader = existingSender && existingText.toLowerCase() === existingSender.toLowerCase();
             if (existingText && newText && existingText !== newText && !isExistingSenderHeader
-              && !/^sidebar_preview_|^pending_/.test(String(stableId))) {
+              && !/^sidebar_preview_|^pending_|^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(stableId))) {
               const baseFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
               const likeEsc = baseFamilyId.replace(/[_%]/g, (c) => `\\${c}`);
               const sameTextInFamily = database.prepare(`
@@ -1142,6 +1145,26 @@ class ConversationRepository {
           // member_name (row cũ chưa từng có) phải tính là thay đổi, nếu không
           // nhánh no-change nuốt luôn.
           const senderNameChanged = Boolean(memberName) && existing.sender_name !== memberName;
+          if (/^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(stableId)) && existing.content && content && existing.content !== content) {
+            const exTxt = String(existing.content || '').trim();
+            const inTxt = String(content || '').trim();
+            const exSender = String(existing.sender_name || memberName || senderName || '').trim();
+            const exIsHeaderOrFile = (exSender && exTxt.toLowerCase() === exSender.toLowerCase())
+              || /^(?:tôi|bạn|you|bệnh viện|bạn đã mở đoạn chat này thông qua quảng cáo\.?)$/i.test(exTxt)
+              || /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(exTxt);
+            const inHasUrl = /https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(inTxt);
+            const exHasUrl = /https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(exTxt);
+            if (!exIsHeaderOrFile && !(inHasUrl && !exHasUrl)) {
+              content = existing.content;
+            }
+          }
+          if (/^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(stableId)) && existing.media_url && mediaUrl && existing.media_url !== mediaUrl) {
+            const exIsVideoUrl = /\.mp4(?:\?|$)|video/i.test(String(existing.media_url));
+            const inIsVideoUrl = /\.mp4(?:\?|$)|video/i.test(String(mediaUrl));
+            if (!(inIsVideoUrl && !exIsVideoUrl)) {
+              mediaUrl = existing.media_url;
+            }
+          }
           const mediaChanged = (mediaUrl && existing.media_url !== mediaUrl) || (mediaType !== 'text' && existing.media_type !== mediaType);
           const changed = existing.content !== content || mediaChanged || timestampChanged || directionChanged || sequenceChanged || roleChanged || senderNameChanged;
           if (!changed) {

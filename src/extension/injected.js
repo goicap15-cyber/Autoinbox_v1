@@ -1177,6 +1177,92 @@
     document.addEventListener('DOMContentLoaded', setupBizSidebarObserver);
   }
 
+  function extractMessagePropsFromFiber(msgEl) {
+    if (!msgEl) return null;
+    try {
+      const uid = getCurrentUserId();
+      const candidates = [msgEl, ...Array.from(msgEl.querySelectorAll('div[dir="auto"], span[dir="auto"]')).slice(0, 6)];
+      for (const el of candidates) {
+        const reactKey = Object.keys(el).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactProps$') || k.startsWith('__reactInternalInstance$'));
+        if (!reactKey) continue;
+        let curr = el[reactKey];
+        let depth = 0;
+        let foundText = null;
+        let foundTs = 0;
+        let foundSenderId = null;
+        let foundSenderName = null;
+        let foundOutgoing = null;
+        let foundReplyText = null;
+        while (curr && depth < 35) {
+          depth++;
+          const props = curr.memoizedProps || curr.props || (depth === 1 ? curr : null);
+          if (props && typeof props === 'object') {
+            const msgObj = props.message || props.msg || props.messageData || props.data?.message || (props.messageId || props.offlineThreadingId ? props : null);
+            if (msgObj && typeof msgObj === 'object') {
+              if (foundText === null) {
+                if (typeof msgObj.text === 'string' && msgObj.text.trim()) foundText = msgObj.text.trim();
+                else if (typeof msgObj.body === 'string' && msgObj.body.trim()) foundText = msgObj.body.trim();
+                else if (msgObj.text && typeof msgObj.text.text === 'string' && msgObj.text.text.trim()) foundText = msgObj.text.text.trim();
+              }
+              if (!foundTs) {
+                const rawTs = Number(msgObj.timestampMs || msgObj.timestampPrecise || msgObj.timestamp || msgObj.messageMetadata?.timestamp || 0);
+                if (rawTs > 1577836800000 && rawTs <= Date.now() + 86400000) foundTs = rawTs;
+              }
+              if (!foundSenderId) {
+                const sid = msgObj.senderId || msgObj.actorFbId || msgObj.author || msgObj.sender?.id || msgObj.messageSender?.id || msgObj.messageMetadata?.actorFbId;
+                if (sid && (typeof sid === 'string' || typeof sid === 'number')) foundSenderId = String(sid);
+              }
+              if (!foundSenderName) {
+                const sname = msgObj.senderName || msgObj.authorName || msgObj.sender?.name || msgObj.messageSender?.name;
+                if (typeof sname === 'string' && sname.trim()) foundSenderName = sname.trim();
+              }
+              if (foundOutgoing === null) {
+                if (typeof msgObj.isAuthor === 'boolean') foundOutgoing = msgObj.isAuthor;
+                else if (typeof msgObj.outgoing === 'boolean') foundOutgoing = msgObj.outgoing;
+                else if (typeof msgObj.isOutgoing === 'boolean') foundOutgoing = msgObj.isOutgoing;
+                else if (uid && foundSenderId) foundOutgoing = String(foundSenderId) === String(uid);
+              }
+              const rep = msgObj.repliedToMessage || msgObj.replyToMessage || props.repliedToMessage;
+              if (!foundReplyText && rep && typeof rep === 'object') {
+                const rt = rep.text || rep.body || rep.snippet || rep.message?.text;
+                if (typeof rt === 'string' && rt.trim()) foundReplyText = rt.trim();
+              }
+            }
+          }
+          if (foundText !== null && foundTs > 0 && foundOutgoing !== null) break;
+          curr = curr.return;
+        }
+        if (foundText !== null || foundTs > 0 || foundOutgoing !== null || foundSenderName) {
+          return { text: foundText, ts: foundTs, senderId: foundSenderId, senderName: foundSenderName, isOutgoing: foundOutgoing, replyText: foundReplyText };
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function scanAndStampMessageFibers() {
+    try {
+      const nodes = document.querySelectorAll('[data-message-id]');
+      for (const node of nodes) {
+        if (node.hasAttribute('data-crm-fiber-stamped')) continue;
+        const info = extractMessagePropsFromFiber(node);
+        node.setAttribute('data-crm-fiber-stamped', '1');
+        if (!info) continue;
+        if (info.text) node.setAttribute('data-crm-fiber-text', info.text);
+        if (info.ts > 0) node.setAttribute('data-crm-fiber-ts', String(info.ts));
+        if (info.isOutgoing !== null) node.setAttribute('data-crm-fiber-outgoing', info.isOutgoing ? '1' : '0');
+        if (info.senderName) node.setAttribute('data-crm-fiber-sender', info.senderName);
+        if (info.replyText) node.setAttribute('data-crm-fiber-reply', info.replyText.slice(0, 500));
+      }
+    } catch (_) {}
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.data?.type === 'CRM_STAMP_FIBER_MESSAGES') {
+      scanAndStampMessageFibers();
+    }
+  });
+  setInterval(scanAndStampMessageFibers, 600);
   setInterval(scanAndStampMountedVideos, 1000);
   setInterval(scanAndStampBizSidebarRows, 1500);
 })();

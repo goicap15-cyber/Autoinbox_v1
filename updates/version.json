@@ -1,8 +1,8 @@
 {
-  "version": "1.0.26",
-  "releasedAt": "2026-11-08T09:51:47.515Z",
-  "notes": "Fix triệt để nhân bản tin nhắn cũ (link card drive.google.com, quote reply, nhãn Đã chỉnh sửa), giải mã chuẩn timestamp gốc từ mid.$ để sắp xếp lịch sử chính xác 100%, cơ chế chống đồng bộ lặp tin đã lưu và lọc sạch bong bóng 'đã gửi 1 ảnh' (v1.0.26)",
+  "version": "1.0.27",
+  "releasedAt": "2026-11-10T02:39:56.554Z",
+  "notes": "Đồng bộ lịch sử chuẩn 100% qua React Fiber & chụp từng nhịp cuộn không sót tin, khóa cứng 1 mid.$ = 1 tin nhắn không nhân bản và tự động sửa sạch data cũ khi cập nhật (v1.0.27)",
   "requiresRestart": true,
-  "sizeBytes": 3086919,
-  "sha256": "ba74a87283ad53b2f1c6d387fd406d4d5096f858a8e4b30c018fdfc79753be1b"
+  "sizeBytes": 3091951,
+  "sha256": "314598e5e0d0bd1298cfbc73a52b6bdd52832ba6a4a40f99699a1e341796be03"
 }

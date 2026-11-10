@@ -3841,6 +3841,9 @@ wss.on('connection', (ws, req) => {
           // jGrG__bubble_2 + __bubble_3 trong thread Hai Anh). Bỏ qua cả hai
           // chiều trôi (suffix->thuần và thuần->suffix); id khớp EXACT thì
           // để luồng INSERT IGNORE/squat-heal phía dưới xử lý như cũ.
+          if (/^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(stableMessageId))) {
+            stableMessageId = String(stableMessageId).replace(/__bubble_\d+$/, '');
+          }
           let existingStableMessage = db.prepare('SELECT id, thread_id, content, sender_name, media_type, media_url FROM messages WHERE fb_message_id = ?').get(stableMessageId);
           // Nếu stableMessageId đã tồn tại trong CÙNG thread nhưng mang nội dung
           // text thật KHÁC (2 bong bóng liên tiếp trong cùng article chia sẻ
@@ -3896,7 +3899,7 @@ wss.on('connection', (ws, req) => {
                     stableMessageId = targetRow.fb_message_id || stableMessageId;
                     existingStableMessage = { ...targetRow, content: m.content };
                   } else {
-                    for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
+                    if (!/^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(stableMessageId))) for (let bIdx = 1; bIdx <= 50; bIdx += 1) {
                       const candidateId = `${baseFamId}__bubble_${bIdx}`;
                       const taken = db.prepare('SELECT 1 FROM messages WHERE fb_message_id = ?').get(candidateId);
                       if (!taken) {
@@ -3910,6 +3913,7 @@ wss.on('connection', (ws, req) => {
               }
             } else if (isIncomingMediaRow && isExistingMediaRow && m.media_url && existingStableMessage.media_url
               && String(m.media_url) !== String(existingStableMessage.media_url)
+              && !/^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(stableMessageId))
               && !(String(m.media_type) === 'video' && String(m.media_url).startsWith('data:video/') && !String(existingStableMessage.media_url).startsWith('data:video/'))) {
               const baseFamId = String(stableMessageId).replace(/__bubble_\d+$/, '');
               const escFam = baseFamId.replace(/[_%]/g, (c) => `\\${c}`);
@@ -10301,6 +10305,139 @@ function startServer() {
           }
         }
       }
+      // Sửa các tin nhắn text chứa chữ "video" bị phân loại nhầm thành media_type = 'video' (murl = null)
+      db.prepare(`
+        UPDATE messages
+        SET media_type = 'text'
+        WHERE media_type = 'video'
+          AND media_url IS NULL
+          AND local_media_path IS NULL
+          AND attachment_id IS NULL
+          AND LENGTH(TRIM(COALESCE(content, ''))) > 0
+      `).run();
+
+      // Xóa caption rác ("Tôi", tên người gửi, tên nhóm) bám vào tin nhắn ảnh/video
+      db.prepare(`
+        UPDATE messages
+        SET content = ''
+        WHERE media_type IN ('image', 'video')
+          AND content IS NOT NULL AND TRIM(content) != ''
+          AND (
+            LOWER(TRIM(content)) IN ('tôi', 'bạn', 'you', 'bệnh viện')
+            OR LOWER(TRIM(content)) = LOWER(TRIM(COALESCE(sender_name, '')))
+            OR LOWER(TRIM(content)) = LOWER(TRIM(COALESCE((SELECT contact_name FROM threads t WHERE t.id = messages.thread_id), '')))
+          )
+      `).run();
+
+      // Xóa các bong bóng text rác là tên nhóm, tên người gửi, "Tôi", "Bệnh viện", thông báo quảng cáo
+      db.prepare(`
+        DELETE FROM messages
+        WHERE (media_type IS NULL OR media_type = 'text')
+          AND media_url IS NULL
+          AND attachment_id IS NULL
+          AND (
+            LOWER(TRIM(COALESCE(content, ''))) IN ('tôi', 'bạn', 'you', 'bệnh viện', 'bạn đã mở đoạn chat này thông qua quảng cáo.', 'bạn đã mở đoạn chat này thông qua quảng cáo')
+            OR (sender_name IS NOT NULL AND TRIM(sender_name) != '' AND LOWER(TRIM(COALESCE(content, ''))) = LOWER(TRIM(sender_name)))
+            OR LOWER(TRIM(COALESCE(content, ''))) = LOWER(TRIM(COALESCE((SELECT contact_name FROM threads t WHERE t.id = messages.thread_id), '')))
+          )
+      `).run();
+
+      // Gộp triệt để mọi row mid.$...__bubble_N về đúng 1 row mid.$ duy nhất (1 mid.$ = 1 tin nhắn)
+      const allMidBubbleRows = db.prepare(`
+        SELECT id, thread_id, fb_message_id, content, reply_to_text, media_type, media_url, sender_name
+        FROM messages
+        WHERE fb_message_id LIKE '%__bubble_%'
+        ORDER BY id ASC
+      `).all();
+      const midBubbleGroups = new Map();
+      for (const bRow of allMidBubbleRows) {
+        const baseMid = String(bRow.fb_message_id || '').replace(/__bubble_\d+$/, '');
+        const groupKey = `${bRow.thread_id}||${baseMid}`;
+        if (!midBubbleGroups.has(groupKey)) midBubbleGroups.set(groupKey, { threadId: bRow.thread_id, baseMid, rows: [] });
+        midBubbleGroups.get(groupKey).rows.push(bRow);
+      }
+      const scoreTextCandidate = (txt, senderName) => {
+        const t = String(txt || '').trim();
+        if (!t) return -1;
+        if (/^(?:tôi|bạn|you|bệnh viện|bạn đã mở đoạn chat này thông qua quảng cáo\.?)$/i.test(t)) return -1;
+        if (senderName && t.toLowerCase() === String(senderName).trim().toLowerCase()) return -1;
+        const isFileOnly = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(t) && !/https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(t);
+        if (isFileOnly) return 1;
+        const hasUrl = /https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(t);
+        return (hasUrl ? 10000 : 100) + t.length;
+      };
+      for (const { threadId, baseMid, rows } of midBubbleGroups.values()) {
+        const baseRow = db.prepare('SELECT id, fb_message_id, content, reply_to_text, media_type, media_url, sender_name FROM messages WHERE thread_id = ? AND fb_message_id = ?').get(threadId, baseMid);
+        const candidates = baseRow ? [baseRow, ...rows] : [...rows];
+        let bestText = baseRow ? String(baseRow.content || '') : '';
+        let bestScore = baseRow ? scoreTextCandidate(baseRow.content, baseRow.sender_name) : -2;
+        let bestReply = baseRow ? baseRow.reply_to_text : null;
+        for (const cand of candidates) {
+          const sc = scoreTextCandidate(cand.content, cand.sender_name || baseRow?.sender_name);
+          if (sc > bestScore) {
+            bestScore = sc;
+            bestText = cand.content;
+          }
+          if (!bestReply && cand.reply_to_text) bestReply = cand.reply_to_text;
+        }
+        if (baseRow) {
+          if (bestScore > 0 && bestText !== baseRow.content && (!baseRow.media_type || baseRow.media_type === 'text')) {
+            db.prepare('UPDATE messages SET content = ?, reply_to_text = COALESCE(reply_to_text, ?) WHERE id = ?').run(bestText, bestReply, baseRow.id);
+          } else if (bestReply && !baseRow.reply_to_text) {
+            db.prepare('UPDATE messages SET reply_to_text = ? WHERE id = ?').run(bestReply, baseRow.id);
+          }
+          for (const r of rows) {
+            db.prepare('DELETE FROM messages WHERE id = ?').run(r.id);
+          }
+        } else if (rows.length > 0) {
+          const keeper = rows.find((r) => scoreTextCandidate(r.content, r.sender_name) === bestScore) || rows[0];
+          const globalTaken = db.prepare('SELECT id FROM messages WHERE fb_message_id = ?').get(baseMid);
+          const targetMid = globalTaken ? `${baseMid}::${threadId}` : baseMid;
+          db.prepare('UPDATE OR IGNORE messages SET fb_message_id = ?, content = ?, reply_to_text = COALESCE(reply_to_text, ?) WHERE id = ?')
+            .run(targetMid, bestScore > 0 ? bestText : keeper.content, bestReply, keeper.id);
+          for (const r of rows) {
+            if (r.id !== keeper.id) db.prepare('DELETE FROM messages WHERE id = ?').run(r.id);
+          }
+        }
+      }
+
+      // Xóa các row text mid.$ đi kèm với mid.$_media mà chỉ chứa tên thành viên ngắn hoặc tên file
+      db.prepare(`
+        DELETE FROM messages
+        WHERE (media_type IS NULL OR media_type = 'text')
+          AND media_url IS NULL
+          AND fb_message_id LIKE 'mid.$%'
+          AND fb_message_id NOT LIKE '%_media%'
+          AND EXISTS (
+            SELECT 1 FROM messages m2
+            WHERE m2.thread_id = messages.thread_id
+              AND m2.fb_message_id = messages.fb_message_id || '_media'
+          )
+          AND (
+            TRIM(COALESCE(content, '')) = ''
+            OR EXISTS (
+              SELECT 1 FROM messages m3
+              WHERE m3.thread_id = messages.thread_id
+                AND m3.sender_name IS NOT NULL
+                AND LOWER(TRIM(m3.sender_name)) = LOWER(TRIM(messages.content))
+            )
+          )
+      `).run();
+
+      // Xóa sidebar_preview_% cũ khi đã có tin mid.$ mới hơn hoặc khi chỉ là tên file .mp4
+      db.prepare(`
+        DELETE FROM messages
+        WHERE fb_message_id LIKE 'sidebar_preview_%'
+          AND (
+            LOWER(TRIM(COALESCE(content, ''))) GLOB '*.mp4'
+            OR EXISTS (
+              SELECT 1 FROM messages m2
+              WHERE m2.thread_id = messages.thread_id
+                AND m2.fb_message_id LIKE 'mid.$%'
+                AND COALESCE(m2.timestamp_ms, 0) >= COALESCE(messages.timestamp_ms, 0) - 60000
+            )
+          )
+      `).run();
     } catch (cleanErr) {
       console.warn('[DB Self-Heal 4l] Cleanup warning:', cleanErr.message);
     }

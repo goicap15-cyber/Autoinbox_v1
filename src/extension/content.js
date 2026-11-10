@@ -1137,7 +1137,7 @@
     // have this race and is sufficient proof on its own that this is a real
     // message row, not composer/avatar/unrelated UI.
     const OPEN_PHOTO_ALT_PATTERN = /^(?:Mở ảnh|Xem ảnh|Open photo|View photo)$/i;
-    const OPEN_VIDEO_LABEL_PATTERN = /(?:ph\u00e1t|m\u1edf|xem|play|open|watch)?\s*video/i;
+    const OPEN_VIDEO_LABEL_PATTERN = /^(?:ph\u00e1t|m\u1edf|xem|play|open|watch)\s+video\b/i;
     let isPhotoMessage = false;
     let isVideoMessage = false;
     let mediaUrl = null;
@@ -1154,7 +1154,8 @@
       const height = Number(rect?.height || img.naturalHeight || 0);
       const isSmallAvatarOrIcon = width > 0 && height > 0 && width <= 68 && height <= 68;
       const isOpenPhotoAlt = Boolean(src && OPEN_PHOTO_ALT_PATTERN.test(alt));
-      const isLargePhoto = Boolean(src && !isSmallAvatarOrIcon && width >= 88 && height >= 88);
+      const isExternalLinkCardImg = Boolean(img.closest('a[href*="l.facebook.com"], a[href*="drive.google.com"], a[href*="docs.google.com"], a[href*="youtube.com"], a[href*="youtu.be"]'));
+      const isLargePhoto = Boolean(src && !isSmallAvatarOrIcon && !isExternalLinkCardImg && width >= 88 && height >= 88);
       if (isOpenPhotoAlt || isLargePhoto) {
         if (seenMediaEls.has(img)) continue;
         seenMediaEls.add(img);
@@ -1291,7 +1292,7 @@
     }
     if (isRealtime) {
       // Filter visual bubbles to avoid clones, hidden texts, or accessibility wrappers
-      finalBubbles = leafBubbles.filter(b => {
+      finalBubbles = finalBubbles.filter(b => {
         const rects = b.getClientRects();
         if (!rects || rects.length === 0) return false;
         const rect = b.getBoundingClientRect();
@@ -1552,6 +1553,11 @@
         if (filter?.isSystemOrMetadataText && filter.isSystemOrMetadataText(cleaned)) continue;
         if (!is_outgoing && labelSenderName
           && cleaned.replace(/\s+/g, ' ').trim().toLowerCase() === labelSenderName.replace(/\s+/g, ' ').trim().toLowerCase()) continue;
+        if (bubble.closest('h3') || bubble.closest('a[href]')) continue;
+        if (/^(?:Tôi|Bạn|You)$/i.test(cleaned.trim())) continue;
+        if (contactNameStr && cleaned.replace(/\s+/g, ' ').trim().toLowerCase() === contactNameStr.replace(/\s+/g, ' ').trim().toLowerCase()) continue;
+        if (sender_name && cleaned.replace(/\s+/g, ' ').trim().toLowerCase() === sender_name.replace(/\s+/g, ' ').trim().toLowerCase()) continue;
+        if (labelSenderName && cleaned.replace(/\s+/g, ' ').trim().toLowerCase() === labelSenderName.replace(/\s+/g, ' ').trim().toLowerCase()) continue;
         caption = cleaned;
         break;
       }
@@ -1621,7 +1627,7 @@
       const textContent = cleanBubbleText(bubble.textContent);
       // Keep icon ownership scoped to this exact bubble.
       const emojiContent = extractBubbleEmoji(bubble);
-      const cleanText = emojiContent && (!textContent || isClockMinuteFragment(textContent, effectiveLabel))
+      let cleanText = emojiContent && (!textContent || isClockMinuteFragment(textContent, effectiveLabel))
         ? emojiContent
         : textContent;
 
@@ -1669,6 +1675,36 @@
         continue;
       }
 
+      if (/^(?:Tôi|Bạn|You|Bệnh viện|Bạn đã mở đoạn chat này thông qua quảng cáo\.?)$/i.test(cleanText.trim())) {
+        continue;
+      }
+      if (contactNameStr && cleanText.replace(/\s+/g, ' ').trim().toLowerCase() === contactNameStr.replace(/\s+/g, ' ').trim().toLowerCase()) {
+        continue;
+      }
+      if (sender_name && cleanText.replace(/\s+/g, ' ').trim().toLowerCase() === sender_name.replace(/\s+/g, ' ').trim().toLowerCase()) {
+        continue;
+      }
+      const bNatElForCheck = bubble.closest?.('[data-message-id], [data-id], [id^="mid."]') || nativeIdEl;
+      const bNatIdForCheck = bNatElForCheck?.getAttribute?.('data-message-id') || bNatElForCheck?.getAttribute?.('data-id') || bNatElForCheck?.getAttribute?.('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null;
+      const fiberTextVal = bNatElForCheck?.getAttribute?.('data-crm-fiber-text') ? cleanBubbleText(bNatElForCheck.getAttribute('data-crm-fiber-text')) : '';
+      if (fiberTextVal && !filter?.isSystemOrMetadataText?.(fiberTextVal)) {
+        cleanText = fiberTextVal;
+      }
+      if (/^(?:Gọi lại|Call again|Call back)$/i.test(cleanText.trim()) && bubble.closest?.('[role="button"], button, a')) {
+        continue;
+      }
+      if (bNatIdForCheck && /^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(bNatIdForCheck))) {
+        const existingIdx = results.findIndex((r) => r.native_id === bNatIdForCheck);
+        if (existingIdx >= 0) {
+          const prevText = String(results[existingIdx].content || '');
+          const prevHasUrl = /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(prevText);
+          const curHasUrl = /(?:https?:\/\/|drive\.google\.com|docs\.google\.com)/i.test(cleanText);
+          if ((curHasUrl && !prevHasUrl) || (!prevHasUrl && cleanText.length > prevText.length)) {
+            results[existingIdx].content = cleanText;
+          }
+          continue;
+        }
+      }
       results.push({
         sender_name: sender_name || (is_outgoing ? 'Bạn' : ''),
         member_name: memberName,
@@ -1685,7 +1721,7 @@
           const map = finalBubbles._crmPerNativeMap || (finalBubbles._crmPerNativeMap = new Map());
           const idx = map.get(bNatId) || 0;
           map.set(bNatId, idx + 1);
-          return idx;
+          return /^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(bNatId)) ? 0 : idx;
         })(),
         reply_quote_text: replyQuoteText || null
       });
