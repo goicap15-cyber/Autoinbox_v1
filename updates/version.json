@@ -1,8 +1,8 @@
 {
-  "version": "1.0.33",
-  "releasedAt": "2026-11-10T07:32:14.687Z",
-  "notes": "Làm mới cache ảnh mã QR Telegram đã xóa số điện thoại (v1.0.33)",
+  "version": "1.0.34",
+  "releasedAt": "2026-11-10T09:22:50.997Z",
+  "notes": "v1.0.34: Sửa chuẩn chiều tin nhắn gửi đi (Bạn), chống lẫn tin nhắn khi chuyển luồng, tối ưu tốc độ tải Chrome và tự động sửa dữ liệu cũ",
   "requiresRestart": false,
-  "sizeBytes": 3327377,
-  "sha256": "756115e4b2a39bcf98897da2e2abf76d45e67fc244a78fce1dc38301fd8630fb"
+  "sizeBytes": 3330028,
+  "sha256": "fc63456d21cbb5d5651ac50b2363e0fd23bc6246496f8c3618345db53dcbc7f5"
 }

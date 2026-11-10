@@ -23,6 +23,16 @@ export function threadActivityTime(thread) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+export function hasRealThreadMessage(thread) {
+  if (Number(thread?.last_msg_ts) > 0) return true;
+  const preview = String(thread?.last_message || '').trim();
+  if (!preview) return false;
+  if (/^(?:chưa có tin nhắn|no messages yet)$/i.test(preview)) return false;
+  if (/tin nhắn và cuộc gọi được bảo mật bằng tính năng mã hóa đầu cuối/i.test(preview)) return false;
+  if (/^this is the official chat with meta business support/i.test(preview)) return false;
+  return true;
+}
+
 // "Mới trong ngày": last_activity từ 00:00 giờ máy hôm nay — quy tắc
 // hiển thị chip/tab "Chưa xử lý" (backfill lịch sử không làm ngập hội thoại cũ).
 export function isThreadActiveToday(thread) {
@@ -57,11 +67,11 @@ function threadPinnedTime(thread) {
 // trả lời bằng API nên hội thoại cũ vẫn bị sync hâm cờ; chỉ coi là chưa đọc
 // khi hội thoại thực sự hoạt động hôm nay (2026-10-21).
 function isThreadUnread(thread) {
-  return Number(thread?.is_unread) === 1 && (isThreadActiveToday(thread) || Number(thread?.unread_manual) === 1);
+  if (Number(thread?.unread_manual) === 1) return true;
+  return Number(thread?.is_unread) === 1 && hasRealThreadMessage(thread) && isThreadActiveToday(thread);
 }
 
-// Thứ tự: ghim -> chưa đọc -> hoạt động gần nhất. Mở hội thoại (seen) gỡ
-// cờ chưa đọc thì nó tự tụt về nhóm đã đọc, vị trí theo tin nhắn gần nhất.
+// Thứ tự: ghim -> chưa đọc -> hội thoại có tin nhắn thật -> hoạt động gần nhất.
 export function sortThreadsByActivity(threads = []) {
   return threads
     .map((thread, index) => ({ thread, index }))
@@ -76,6 +86,8 @@ export function sortThreadsByActivity(threads = []) {
       }
       const unreadDelta = (isThreadUnread(right.thread) ? 1 : 0) - (isThreadUnread(left.thread) ? 1 : 0);
       if (unreadDelta !== 0) return unreadDelta;
+      const hasMsgDelta = (hasRealThreadMessage(right.thread) ? 1 : 0) - (hasRealThreadMessage(left.thread) ? 1 : 0);
+      if (hasMsgDelta !== 0) return hasMsgDelta;
       const delta = threadActivityTime(right.thread) - threadActivityTime(left.thread);
       return delta || left.index - right.index;
     })

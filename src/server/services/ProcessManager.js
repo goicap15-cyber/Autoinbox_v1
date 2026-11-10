@@ -411,6 +411,8 @@ class ProcessManager {
       '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion',
       '--disable-popup-blocking',
       '--disable-notifications',
+      '--unlimited-storage',
+      '--disk-cache-size=104857600',
       '--autoplay-policy=no-user-gesture-required'
     ];
   }

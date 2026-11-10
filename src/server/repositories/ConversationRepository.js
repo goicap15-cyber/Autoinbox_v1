@@ -606,7 +606,11 @@ class ConversationRepository {
       INSERT INTO messages (thread_id, fb_message_id, sender_id, sender_name, content, media_type, media_url, timestamp_ms, timestamp_source, is_outgoing, sender_role, sequence_order, direction_status, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(fb_message_id) DO UPDATE SET
-        sender_name = COALESCE(excluded.sender_name, messages.sender_name),
+        sender_id = CASE WHEN excluded.direction_status = 'confirmed' THEN excluded.sender_id ELSE messages.sender_id END,
+        sender_name = CASE
+          WHEN excluded.direction_status = 'confirmed' AND excluded.is_outgoing = 1 THEN NULL
+          ELSE COALESCE(excluded.sender_name, messages.sender_name)
+        END,
         content = CASE WHEN excluded.content IS NOT NULL AND excluded.content <> '' THEN excluded.content ELSE messages.content END,
         media_type = CASE WHEN excluded.media_type IS NOT NULL AND excluded.media_type <> 'text' THEN excluded.media_type ELSE messages.media_type END,
         media_url = CASE WHEN messages.attachment_id IS NOT NULL AND messages.media_url IS NOT NULL THEN messages.media_url ELSE COALESCE(excluded.media_url, messages.media_url) END,
@@ -1093,13 +1097,12 @@ class ConversationRepository {
           // chiều ngược của guard hasMatchingOutgoingText phía trên
           // (reproduce 2026-11-03: heal xong bị crawler đọc sớm lật lại).
           const guardRow = database.prepare('SELECT sender_id, sender_name FROM messages WHERE fb_message_id = ?').get(stableId);
+          const hasAuthoritativeOutgoingEvidence = msg.direction_evidence === 'geometry';
           const namedIncomingFlipBlocked = isHistoryObservation
             && isOutgoing === 1
             && Number(existing.is_outgoing) === 0
-            && (
-              (guardRow && guardRow.sender_name && !/^(?:bạn|you)$/i.test(String(guardRow.sender_name).trim()))
-              || String((guardRow && guardRow.sender_id) || '') === 'CONTACT'
-            );
+            && !hasAuthoritativeOutgoingEvidence
+            && Boolean(guardRow && guardRow.sender_name && !/^(?:bạn|tôi|you|khách hàng)$/i.test(String(guardRow.sender_name).trim()));
           let upsertIsOutgoing = isOutgoing;
           let upsertSenderRole = senderRole;
           let upsertDirectionStatus = directionStatus;

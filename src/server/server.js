@@ -3713,13 +3713,25 @@ wss.on('connection', (ws, req) => {
           if (healIsIncoming
             && (!m.media_type || m.media_type === 'text') && !m.media_url
             && /^(?:dom_observer|dom_history_sync|page_dom_observer)$/.test(healSource)) {
-            const healThread = db.prepare('SELECT contact_name, external_thread_id, account_id FROM threads WHERE id = ?').get(m.thread_id);
+            const healThread = db.prepare('SELECT contact_name, external_thread_id, account_id, last_message, sync_cursor FROM threads WHERE id = ?').get(m.thread_id);
             if (healThread && String(healThread.external_thread_id || '') !== String(healThread.account_id || '')) {
+              const healPreview = String(healThread.last_message || '').trim();
+              const healPreviewOutgoingBody = /^(?:bạn|tôi|you)\s*:\s*/i.test(healPreview)
+                ? healPreview.replace(/^(?:bạn|tôi|you)\s*:\s*/i, '').replace(/(?:\u2026|\.{3})$/, '').trim().toLowerCase()
+                : '';
+              const healMsgText = String(m.content || '').trim().toLowerCase();
+              const blockedByOutgoingPreview = Boolean(
+                healPreviewOutgoingBody.length >= 4
+                && healMsgText
+                && (healMsgText === healPreviewOutgoingBody || healMsgText.startsWith(healPreviewOutgoingBody))
+              );
               const healContactClean = String(healThread.contact_name || '').replace(/\s·\s[^·]*$/, '').trim();
               const healContact = healContactClean.toLowerCase();
               const healSenderName = String(m.member_name || '').trim();
               const healLabel = healSenderName.toLowerCase();
-              let healNameMatches = healSenderName.length > 0 && healContact.length >= 3 && healLabel.length >= 3
+              let healNameMatches = !blockedByOutgoingPreview
+                && m.direction_evidence !== 'avatar'
+                && healSenderName.length > 0 && healContact.length >= 3 && healLabel.length >= 3
                 && (healContact.includes(healLabel) || healLabel.includes(healContact));
               // Hai acc TRÙNG TÊN (1-1): nhãn "Tin nhắn do X gửi lúc" với X
               // khớp CẢ tên contact LẪN tên account đăng nhập là mơ hồ tuyệt
@@ -3745,7 +3757,7 @@ wss.on('connection', (ws, req) => {
               // nhãn "Tin nhắn do X gửi lúc" với X trùng tên account là mơ hồ
               // — heal theo nhãn đã lật sai tin operator gõ tay trong Messenger
               // thành tin khách (reproduce 2026-11-03 12:09: Dkkskkss/alo).
-              if (healNameMatches || (healContact.length >= 3 && !healSenderName && m.direction_evidence === 'geometry')) {
+              if (!blockedByOutgoingPreview && (healNameMatches || (healContact.length >= 3 && !healSenderName && m.direction_evidence === 'geometry'))) {
                 const healFamilyId = String(stableMessageId).replace(/__bubble_\d+$/, '');
                 const healLikeEscaped = healFamilyId.replace(/[_%\\]/g, (c) => `\\${c}`);
                 const healRow = db.prepare(`
@@ -10617,6 +10629,78 @@ function startServer() {
           db.prepare('UPDATE messages SET sender_name = ? WHERE id = ?').run(neighbor.sender_name, msr.id);
         }
       }
+      // 1) Khôi phục chiều tin nhắn (is_outgoing = 1) cho các tin của operator bị lưu nhầm là tin khách (is_outgoing = 0)
+      // dựa trên sync_cursor.oldest_is_outgoing = 1 hoặc preview sidebar "Bạn: <nội dung>"
+      const cursorThreads = db.prepare("SELECT id, account_id, last_message, sync_cursor FROM threads WHERE sync_cursor IS NOT NULL OR last_message LIKE 'Bạn:%' OR last_message LIKE 'Tôi:%' OR last_message LIKE 'You:%'").all();
+      for (const ct of cursorThreads) {
+        if (ct.sync_cursor) {
+          try {
+            const parsedCursor = JSON.parse(ct.sync_cursor);
+            if (Number(parsedCursor?.oldest_is_outgoing) === 1 && parsedCursor?.oldest_message_id) {
+              db.prepare(`
+                UPDATE messages
+                SET is_outgoing = 1, sender_role = 'operator', direction_status = 'confirmed',
+                    sender_id = ?, sender_name = NULL
+                WHERE thread_id = ? AND fb_message_id = ? AND is_outgoing = 0
+              `).run(String(ct.account_id || 'SYSTEM'), ct.id, String(parsedCursor.oldest_message_id));
+            }
+          } catch (_) {}
+        }
+        const rawPreview = String(ct.last_message || '').trim();
+        if (/^(?:bạn|tôi|you)\s*:\s*/i.test(rawPreview)) {
+          const previewBody = rawPreview.replace(/^(?:bạn|tôi|you)\s*:\s*/i, '').replace(/(?:\u2026|\.{3})$/, '').trim();
+          if (previewBody.length >= 4) {
+            const lastMsg = db.prepare('SELECT id, content, is_outgoing FROM messages WHERE thread_id = ? ORDER BY COALESCE(timestamp_ms, 0) DESC, id DESC LIMIT 1').get(ct.id);
+            const lastContent = String(lastMsg?.content || '').trim();
+            if (lastMsg && Number(lastMsg.is_outgoing) === 0 && (
+              lastContent.toLowerCase() === previewBody.toLowerCase()
+              || (previewBody.length >= 15 && lastContent.toLowerCase().startsWith(previewBody.toLowerCase()))
+            )) {
+              db.prepare(`
+                UPDATE messages
+                SET is_outgoing = 1, sender_role = 'operator', direction_status = 'confirmed',
+                    sender_id = ?, sender_name = NULL
+                WHERE id = ?
+              `).run(String(ct.account_id || 'SYSTEM'), lastMsg.id);
+            }
+          }
+        }
+      }
+      // 2) Xóa các dòng ngăn cách ngày giờ (vd: "18:49 6/10/25") bị cào nhầm thành tin nhắn
+      const dateSepRows = db.prepare(`
+        SELECT id, content FROM messages
+        WHERE (media_type IS NULL OR media_type = 'text') AND media_url IS NULL
+          AND content GLOB '*[0-9]:[0-9][0-9]*/*/*'
+      `).all();
+      for (const ds of dateSepRows) {
+        if (/^\d{1,2}:\d{2}\s+\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(String(ds.content || '').trim())) {
+          db.prepare('DELETE FROM messages WHERE id = ?').run(ds.id);
+        }
+      }
+      // 3) Xóa sender_name dư thừa trên tin nhắn outgoing hoặc hội thoại 1-1 (sender_name trùng tên contact_name)
+      db.prepare("UPDATE messages SET sender_name = NULL WHERE is_outgoing = 1 AND sender_name IS NOT NULL").run();
+      db.prepare(`
+        UPDATE messages
+        SET sender_name = NULL
+        WHERE is_outgoing = 0
+          AND sender_name IS NOT NULL
+          AND LOWER(TRIM(sender_name)) = LOWER(TRIM(COALESCE((SELECT contact_name FROM threads t WHERE t.id = messages.thread_id), '')))
+      `).run();
+      // 4) Tắt cờ is_unread giả trên các hội thoại E2EE rỗng ("Chưa có tin nhắn") chưa từng có tin nhắn thật
+      db.prepare(`
+        UPDATE threads
+        SET is_unread = 0
+        WHERE COALESCE(is_unread, 0) = 1
+          AND COALESCE(unread_manual, 0) = 0
+          AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = threads.id)
+          AND (
+            last_message IS NULL
+            OR TRIM(last_message) = ''
+            OR LOWER(TRIM(last_message)) IN ('chưa có tin nhắn', 'no messages yet')
+            OR LOWER(last_message) LIKE '%tin nhắn và cuộc gọi được bảo mật bằng tính năng mã hóa đầu cuối%'
+            OR LOWER(last_message) LIKE 'this is the official chat with meta business support%'
+          )
+      `).run();
     } catch (cleanErr) {
       console.warn('[DB Self-Heal 4l] Cleanup warning:', cleanErr.message);
     }
@@ -10949,7 +11033,16 @@ InitialMessageSweepService.configure({
       AND COALESCE(t.sync_status, 'LOCAL') <> 'SYNCED'
     ORDER BY
       CASE WHEN COALESCE(t.is_unread, 0) = 1 THEN 0 ELSE 1 END ASC,
-      CASE WHEN (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) = 0 THEN 0 ELSE 1 END ASC,
+      CASE
+        WHEN (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) = 0
+          AND t.last_message IS NOT NULL
+          AND LOWER(TRIM(t.last_message)) NOT IN ('', 'chưa có tin nhắn', 'no messages yet')
+          AND LOWER(t.last_message) NOT LIKE '%tin nhắn và cuộc gọi được bảo mật bằng tính năng mã hóa đầu cuối%'
+          AND LOWER(t.last_message) NOT LIKE 'this is the official chat with meta business support%'
+        THEN 0
+        WHEN (SELECT COUNT(*) FROM messages m WHERE m.thread_id = t.id) > 0 THEN 1
+        ELSE 2
+      END ASC,
       t.last_activity DESC
   `).all(String(accountId)),
   // 2026-09-30 (Phase 1): bỏ qua sweep của thread không có gì mới - preview
@@ -10958,7 +11051,13 @@ InitialMessageSweepService.configure({
   shouldSkipSweep: (thread) => {
     try {
       const preview = String(thread?.last_message || '');
-      if (!preview.trim()) return false;
+      const trimmedPreview = preview.trim();
+      if (!trimmedPreview) return false;
+      if (/^(?:chưa có tin nhắn|no messages yet)$/i.test(trimmedPreview)
+        || /tin nhắn và cuộc gọi được bảo mật bằng tính năng mã hóa đầu cuối/i.test(trimmedPreview)
+        || /^this is the official chat with meta business support/i.test(trimmedPreview)) {
+        return true;
+      }
       if (Number(thread?.is_unread) === 1) return false;
       // 2026-09-30 (Phase 2.3): thread lạnh - tin cuối cũ hơn 30 ngày mà
       // không unread -> defer (Tier 2 on-demand), ưu tiên thread đang hoạt

@@ -1106,7 +1106,9 @@
     // Ã¢â€â‚¬Ã¢â€€ STALE DOM GUARD (Self-Tagging Marker) Ã¢â€â‚¬Ã¢â€€
     if (messageRow && messageRow.dataset) {
       const currentUrlThreadId = extractThreadIdFromUrl();
-      const existingThreadId = messageRow.dataset.crmThreadId;
+      const existingThreadId = messageRow.dataset.crmThreadId
+        || messageRow.closest?.('[data-crm-thread-id]')?.dataset?.crmThreadId
+        || messageRow.querySelector?.('[data-crm-thread-id]')?.dataset?.crmThreadId;
       if (existingThreadId && currentUrlThreadId && existingThreadId !== currentUrlThreadId) {
         return []; // BÃ¡Â»Â qua vÃƒÂ¬ Ã„â€˜ÃƒÂ¢y lÃƒÂ  DOM cÃ¡Â»Â§a thread cÃ…Â©!
       }
@@ -1372,14 +1374,24 @@
         const hasContactAvatar = (contactNameStr ? !!(
           Array.from(messageRow.querySelectorAll('img[alt], div[role="img"][aria-label], img[aria-label]')).some(el => {
             const alt = el.getAttribute('alt') || el.getAttribute('aria-label') || '';
-            return alt.toLowerCase().includes(contactNameStr.toLowerCase());
+            if (el.closest(COMPOSER_EXCLUDE)) return false;
+            if (/đã xem|seen by/i.test(alt)) return false;
+            if (!alt.toLowerCase().includes(contactNameStr.toLowerCase())) return false;
+            const r = el.getBoundingClientRect?.();
+            if (r && r.width > 0 && (r.width < 22 || r.width > 64 || r.height < 22 || r.height > 64)) return false;
+            if (logRect?.width > 0 && r && r.width > 0) {
+              const leftGap = r.left - logRect.left;
+              const rightGap = logRect.right - r.right;
+              return leftGap >= -8 && leftGap <= 96 && leftGap < rightGap;
+            }
+            return true;
           })
         ) : false) || Boolean(logRect?.width > 0 && Array.from(messageRow.querySelectorAll('img[src]')).some((img) => {
           if (img.closest(COMPOSER_EXCLUDE)) return false;
           const alt = (img.getAttribute('alt') || '').trim();
-          if (OPEN_PHOTO_ALT_PATTERN.test(alt)) return false;
+          if (OPEN_PHOTO_ALT_PATTERN.test(alt) || /đã xem|seen by/i.test(alt)) return false;
           const r = img.getBoundingClientRect?.();
-          if (!r || r.width < 18 || r.width > 64 || r.height < 18 || r.height > 64) return false;
+          if (!r || r.width < 22 || r.width > 64 || r.height < 22 || r.height > 64) return false;
           const leftGap = r.left - logRect.left;
           const rightGap = logRect.right - r.right;
           return leftGap >= -8 && leftGap <= 96 && leftGap < rightGap;
@@ -1430,7 +1442,7 @@
       }
     }
 
-    if (finalBubbles.length > 0 && !isPhotoMessage && !isVideoMessage && direction_evidence !== 'label_name' && direction_evidence !== 'avatar') {
+    if (finalBubbles.length > 0 && !isPhotoMessage && !isVideoMessage && direction_evidence !== 'label_name') {
       const mainEl = messageRow.closest?.('div[role="main"]')
         || document.querySelector('div[role="main"]');
       const logEl = messageRow.closest?.('[role="log"], [role="grid"]')

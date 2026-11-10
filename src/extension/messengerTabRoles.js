@@ -28,7 +28,7 @@
   function canForwardRealtime(role) {
     // Allow chat, interaction, discovery, and stationary history tabs to forward
     // live messages (actively scrolling history tabs use 'history_scrolling').
-    return role === 'chat' || role === 'interaction' || role === 'discovery' || role === 'history';
+    return role === 'chat' || role === 'interaction' || role === 'discovery';
   }
 
   function canForwardIncomingRealtime(role) {
@@ -36,7 +36,7 @@
   }
 
   function canForwardCallRealtime(role) {
-    return role === 'chat' || role === 'interaction' || role === 'discovery' || role === 'history';
+    return role === 'chat' || role === 'interaction' || role === 'discovery';
   }
 
   // 2026-09-30: scheduler retry nối suffix "_extension_replay"/"_replay" vào

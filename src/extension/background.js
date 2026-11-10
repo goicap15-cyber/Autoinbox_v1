@@ -7733,6 +7733,16 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
       const [nextAccountKey, nextScan] = nextEntry.value;
       pendingDiscoveryScans.delete(nextAccountKey);
       setTimeout(() => handleSync100Threads(nextScan).catch(() => {}), 0);
+    } else if (!isRealtimeScan && account_id) {
+      // Đóng tab discovery tạm sau khi hoàn tất quét full để tránh tích tụ nhiều tab Messenger
+      const discRole = FbCrmMessengerTabRoles.roleKey(account_id, 'discovery');
+      getRegisteredTab(discRole).then(async (discTab) => {
+        const chatTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'chat'));
+        await unregisterTab(discRole);
+        if (discTab?.id && discTab.id !== chatTab?.id) {
+          await chrome.tabs.remove(discTab.id).catch(() => {});
+        }
+      }).catch(() => {});
     }
   }
 }
@@ -8649,6 +8659,17 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
       const clicked = await executeScriptWithTimeout({
         target: { tabId: tab.id },
         func: (tid, reqUrl) => {
+          const prevMatch = location.href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/i);
+          const prevThreadId = prevMatch ? decodeURIComponent(prevMatch[1]) : '';
+          if (prevThreadId !== String(tid)) {
+            const mainEl = document.querySelector('div[role="main"]');
+            if (mainEl) {
+              const staleTag = prevThreadId || '__stale_previous_thread__';
+              for (const oldRow of mainEl.querySelectorAll('div[role="row"], div[role="article"], [data-message-id]')) {
+                if (!oldRow.dataset.crmThreadId) oldRow.dataset.crmThreadId = staleTag;
+              }
+            }
+          }
           const links = Array.from(document.querySelectorAll('a[href*="/messages/t/"], a[href*="/messages/e2ee/t/"]'));
           const link = links.find((anchor) => {
             const href = anchor.getAttribute('href') || anchor.href || '';
@@ -8942,7 +8963,27 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     ? await chrome.tabs.get(_history_tab_id).catch(() => null)
     : page_id
       ? await getBusinessSuiteTab(page_id)
-      : await ensureRoleMessengerTab(targetAcc, 'history');
+      : usesVisibleCrmTab
+        ? await ensureRoleMessengerTab(targetAcc, 'chat')
+        : await ensureRoleMessengerTab(targetAcc, 'history');
+  if (!page_id && !_history_tab_id && !usesVisibleCrmTab && targetAcc) {
+    if (!globalThis.__CRM_HISTORY_IDLE_TIMERS__) globalThis.__CRM_HISTORY_IDLE_TIMERS__ = new Map();
+    const prevTimer = globalThis.__CRM_HISTORY_IDLE_TIMERS__.get(String(targetAcc));
+    if (prevTimer) clearTimeout(prevTimer);
+    globalThis.__CRM_HISTORY_IDLE_TIMERS__.set(String(targetAcc), setTimeout(async () => {
+      globalThis.__CRM_HISTORY_IDLE_TIMERS__.delete(String(targetAcc));
+      if (bulkHistorySyncInFlight) return;
+      try {
+        const histRole = FbCrmMessengerTabRoles.roleKey(targetAcc, 'history');
+        const histTab = await getRegisteredTab(histRole);
+        const chatTab = await getRegisteredTab(FbCrmMessengerTabRoles.roleKey(targetAcc, 'chat'));
+        await unregisterTab(histRole);
+        if (histTab?.id && histTab.id !== chatTab?.id) {
+          await chrome.tabs.remove(histTab.id).catch(() => {});
+        }
+      } catch (_) {}
+    }, 30000));
+  }
 
   if (!tab && page_id) {
     // 2026-09-30 (Phase 2): ngân sách tab page - trước khi tạo tab mới, đuổi
@@ -9310,10 +9351,10 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                 .normalize('NFC').replace(/\s+/g, ' ').trim().toLocaleLowerCase('vi-VN');
               const expectedIdentity = normalizeIdentity(contactName);
               const conversationLabel = mainContainer.querySelector(
-                '[aria-label^="Tin nhắn trong cuộc trò chuyện với "], [aria-label^="Messages in conversation with "]'
+                '[aria-label^="Tin nhắn trong cuộc trò chuyện với "], [aria-label^="Tin nhắn trong cuộc trò chuyện có tiêu đề "], [aria-label^="Messages in conversation with "], [aria-label^="Messages in conversation titled "]'
               )?.getAttribute('aria-label') || '';
               const labelIdentity = normalizeIdentity(conversationLabel
-                .replace(/^(?:Tin nhắn trong cuộc trò chuyện với|Messages in conversation with)\s+/i, ''));
+                .replace(/^(?:Tin nhắn trong cuộc trò chuyện (?:với|có tiêu đề)|Messages in conversation (?:with|titled))\s+/i, ''));
               const headingCandidates = Array.from(mainContainer.querySelectorAll('h1, h2, span[aria-level="1"], span[aria-level="2"]'))
                 .map((node) => normalizeIdentity(node.textContent))
                 .filter(Boolean);
@@ -9344,10 +9385,12 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               continue;
             }
 
-            // Kiểm tra marker crmThreadId từ content.js
+            // Kiểm tra marker crmThreadId từ content.js hoặc pre-nav stamp
             let markerMismatch = false;
             for (const row of existingRows) {
-              const taggedId = row.dataset.crmThreadId;
+              const taggedId = row.dataset.crmThreadId
+                || row.querySelector?.('[data-crm-thread-id]')?.dataset?.crmThreadId
+                || row.closest?.('[data-crm-thread-id]')?.dataset?.crmThreadId;
               if (taggedId && String(taggedId) !== String(targetThreadId)) {
                 markerMismatch = true;
                 break;
@@ -9584,6 +9627,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // 1 second stable after a real DOM change is sufficient for all
             // bubbles/media of that page to mount before extraction.
             if (changed && stableRounds >= 4) return { moved: true };
+            if (!changed && !spinnerVisible && stableRounds >= 4) break;
           }
           return { moved: changed || beforeTop !== scroller.scrollTop };
         }
@@ -10446,10 +10490,20 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (!directionMatched) {
               // Check if row contains contact's avatar (Facebook puts alt="<Contact Name>" on incoming message avatars)
               const safeName = (contactName || '').trim();
+              const dirRectForAvatar = historyDirectionContainer?.getBoundingClientRect?.();
               const hasContactAvatar = safeName ? !!(
                 Array.from(row.querySelectorAll('img[alt], div[role="img"][aria-label], img[aria-label]')).some(el => {
                   const alt = el.getAttribute('alt') || el.getAttribute('aria-label') || '';
-                  return alt.toLowerCase().includes(safeName.toLowerCase());
+                  if (/đã xem|seen by/i.test(alt)) return false;
+                  if (!alt.toLowerCase().includes(safeName.toLowerCase())) return false;
+                  const r = el.getBoundingClientRect?.();
+                  if (r && r.width > 0 && (r.width < 22 || r.width > 64 || r.height < 22 || r.height > 64)) return false;
+                  if (dirRectForAvatar && dirRectForAvatar.width > 0 && r && r.width > 0) {
+                    const leftGap = r.left - dirRectForAvatar.left;
+                    const rightGap = dirRectForAvatar.right - r.right;
+                    return leftGap >= -8 && leftGap <= 96 && leftGap < rightGap;
+                  }
+                  return true;
                 })
               ) : false;
 
