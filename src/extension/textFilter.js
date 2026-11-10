@@ -109,7 +109,7 @@ function isBareVietnamMobileText(text) {
     /^Bạn đã gửi (?:một )?(?:file|tệp|tập tin|ảnh|video) đính kèm\.?$/i,
     /^You sent (?:an )?attachment\.?$/i,
     /^(?:(?:Bạn|Tôi|You|[^\n]{1,80})\s+)?(?:đã gửi|sent|shared)\s+(?:(?:một|\d+|an?|one)\s+)?(?:ảnh|bức ảnh|photo|photos|image|images|video|videos|tệp|file|files|tập tin|nhãn dán|sticker|GIF|tin nhắn thoại|file âm thanh|voice message|audio)(?:\s+đính kèm)?\.?$/iu,
-    /^(?:[^\n]{1,60}[\s\u00a0]*[·•][\s\u00a0]*)?(?:Đã chỉnh sửa|Edited)\.?$/iu,
+    /^(?:[^\n]{1,60}[\s\u00a0]*[·•][\s\u00a0]*)?(?:Đã chỉnh sửa|Edited|Đã ghim|Pinned)\.?$/iu,
     /^(?:drive\.google\.com|docs\.google\.com|Google Docs|Google Drive|youtube\.com|youtu\.be|facebook\.com|fb\.watch|tiktok\.com|vt\.tiktok\.com|instagram\.com|zalo\.me|shopee\.vn|lazada\.vn|tiki\.vn|maps\.app\.goo\.gl|goo\.gl|bit\.ly)$/i,
 
     /^Bạn đã phản hồi ghi chú của (?:họ|họ\.|họ\.?)$/i,
@@ -244,13 +244,13 @@ function isBareVietnamMobileText(text) {
     if (!text) return '';
 
     // 1. Strip accessibility prefix (handling 'Tin nhắn do X gửi lúc Thứ Năm 18:00ch:', 'Tin nhắn do X gửi lúc 18:00:', etc.)
-    text = text.replace(/^(?:Nhập,\s*)?Tin nhắn do [^\n]+? gửi lúc [^\n]*:\s*/i, '').trim();
-    text = text.replace(/^(?:Nhập,\s*)?Message sent by [^\n]+? at [^\n]*:\s*/i, '').trim();
+    text = text.replace(/^(?:Nhập,\s*)?Tin nhắn do [\s\S]+? gửi lúc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm))?:|\b\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm))?\s+)\s*/i, '').trim();
+    text = text.replace(/^(?:Nhập,\s*)?Message sent by [\s\S]+? at [^\n]*?(?::|\b\d{1,2}:\d{2}(?:\s*(?:[ap]m))?:|\b\d{1,2}:\d{2}(?:\s*(?:[ap]m))?\s+)\s*/i, '').trim();
     // Nhãn trợ năng dạng "Enter, Message sent 13:58 by Khang: <payload>" -
     // bubble icon-only/text của Messenger E2EE để nguyên nhãn này trong DOM
     // text; strip prefix giữ lại payload (emoji HOẶC text - bản cũ chỉ giữ
     // emoji làm tin text của operator thành bubble nhãn trần).
-    text = text.replace(/^Enter,\s*Message sent\b.*:\s*/iu, '').trim();
+    text = text.replace(/^Enter,\s*Message sent\b[^:\n]*(?::\d{2}[^:\n]*)?:\s*/iu, '').trim();
     text = text.replace(/^Nhập,\s*/i, '').trim();
     text = text.replace(/^[:\s]+/, '').trim();
 

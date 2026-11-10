@@ -1,8 +1,8 @@
 {
-  "version": "1.0.27",
-  "releasedAt": "2026-11-10T02:39:56.554Z",
-  "notes": "Đồng bộ lịch sử chuẩn 100% qua React Fiber & chụp từng nhịp cuộn không sót tin, khóa cứng 1 mid.$ = 1 tin nhắn không nhân bản và tự động sửa sạch data cũ khi cập nhật (v1.0.27)",
+  "version": "1.0.28",
+  "releasedAt": "2026-11-10T03:27:54.276Z",
+  "notes": "Đồng bộ chuẩn 100% nhóm E2EE (@g.us), giải mã đúng mốc thời gian Snowflake, chặn cắt chữ trước dấu hai chấm và tự động làm sạch triệt để tin nhắn lặp (v1.0.28)",
   "requiresRestart": true,
-  "sizeBytes": 3091951,
-  "sha256": "314598e5e0d0bd1298cfbc73a52b6bdd52832ba6a4a40f99699a1e341796be03"
+  "sizeBytes": 3093213,
+  "sha256": "2ad4c928fb8ed5d39fade41dce14fb188b85f7a2f9fac18e55661ef242537cd9"
 }

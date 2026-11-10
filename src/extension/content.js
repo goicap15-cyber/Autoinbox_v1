@@ -464,7 +464,7 @@
         }
       } catch (_) {}
     }
-    const sfMatch = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
+    const sfMatch = raw.match(/(?:@(?:msgr|g\.us)\.|^)(\d{15,21})$/);
     if (sfMatch) {
       try {
         const ts = Number(BigInt(sfMatch[1]) >> 22n);
@@ -1623,6 +1623,11 @@
     for (const bubble of finalBubbles) {
       if (!bubble._crmPerNativeMap) {
         finalBubbles._crmPerNativeMap = finalBubbles._crmPerNativeMap || new Map();
+      }
+      const rawBubbleStr = String(bubble.textContent || '').trim();
+      if (finalBubbles.length > 1 && /^(?:Nhập,\s*|Enter,\s*)?(?:Tin nhắn do .+ gửi lúc|Message sent by .+ at|Message sent \d{1,2}:\d{2})/i.test(rawBubbleStr)) {
+        bubble_idx++;
+        continue;
       }
       const textContent = cleanBubbleText(bubble.textContent);
       // Keep icon ownership scoped to this exact bubble.

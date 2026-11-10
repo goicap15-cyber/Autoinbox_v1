@@ -2918,7 +2918,7 @@ wss.on('connection', (ws, req) => {
           }
 
 
-          const cleanedContent = cleanMessageText(m.content);
+          let cleanedContent = cleanMessageText(m.content);
           const isDomObserverRow = m.source === 'dom_observer' || m.source === 'page_dom_observer';
           // Network interception is a fast path only. Facebook also returns
           // unrelated payload fragments with a `body` field; when those frames
@@ -3010,9 +3010,15 @@ wss.on('connection', (ws, req) => {
 // DOM rows often expose the sender heading as a standalone text node.
           // It is metadata, not a customer message; reject it before persistence.
           const knownContactName = db.prepare('SELECT contact_name FROM threads WHERE id = ?').get(canonicalThreadId)?.contact_name || '';
-          const observedPersonLabels = [m.sender_name, m.contact_name, knownContactName]
+          const observedPersonLabels = [m.sender_name, m.member_name, m.contact_name, knownContactName, 'Tôi', 'Bạn', 'You', 'Bệnh viện']
             .map((value) => String(value || '').trim())
             .filter(Boolean);
+          if (hasMediaPayload && cleanedContent) {
+            const normCap = String(cleanedContent).trim().toLocaleLowerCase('vi-VN');
+            if (observedPersonLabels.some((label) => normCap === label.toLocaleLowerCase('vi-VN'))) {
+              cleanedContent = '';
+            }
+          }
           const normalizedObservedContent = String(cleanedContent || '').trim().toLocaleLowerCase('vi-VN');
           const senderLabelOnly = !hasMediaPayload
             && isDomObserverRow
@@ -5460,7 +5466,21 @@ wss.on('connection', (ws, req) => {
           let resolvedSyncStatus = null;
           
           if (Array.isArray(messages) && messages.length > 0) {
-            let validMessages = messages.map(m => ({ ...m, content: cleanMessageText(m.content) }))
+            let validMessages = messages.map(m => {
+              let fbId = String(m.fb_message_id || '');
+              if (/^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(fbId)) {
+                fbId = fbId.replace(/__bubble_\d+$/, '');
+              }
+              let cleaned = cleanMessageText(m.content);
+              if ((m.media_url || (m.media_type && m.media_type !== 'text')) && cleaned) {
+                const capLow = cleaned.trim().toLocaleLowerCase('vi-VN');
+                const badCaps = [m.member_name, m.sender_name, m.contact_name, 'tôi', 'bạn', 'you', 'bệnh viện']
+                  .map((v) => String(v || '').trim().toLocaleLowerCase('vi-VN'))
+                  .filter(Boolean);
+                if (badCaps.includes(capLow)) cleaned = '';
+              }
+              return { ...m, fb_message_id: fbId || m.fb_message_id, content: cleaned };
+            })
               .filter(m => {
                 if (String(m.thread_id || thread_id) !== String(thread_id)) return false;
                 if (!isRenderableStoredMessage(m)) return false;
@@ -5477,6 +5497,36 @@ wss.on('connection', (ws, req) => {
                 }
                 return true;
               });
+            {
+              const dedupedByNativeId = [];
+              const nativeIdxMap = new Map();
+              for (const vm of validMessages) {
+                const fid = String(vm.fb_message_id || '');
+                if (/^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(fid) && !fid.endsWith('_media')) {
+                  if (nativeIdxMap.has(fid)) {
+                    const prev = dedupedByNativeId[nativeIdxMap.get(fid)];
+                    const prevTxt = String(prev.content || '').trim();
+                    const curTxt = String(vm.content || '').trim();
+                    const prevHasUrl = /https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(prevTxt);
+                    const curHasUrl = /https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(curTxt);
+                    if ((curHasUrl && !prevHasUrl) || (curTxt.length > prevTxt.length && (!prevHasUrl || curHasUrl))) {
+                      prev.content = vm.content;
+                    }
+                    if (!prev.member_name && vm.member_name) {
+                      prev.member_name = vm.member_name;
+                      prev.sender_name = vm.sender_name || vm.member_name;
+                      prev.is_outgoing = 0;
+                      prev.sender_role = 'customer';
+                    }
+                    if (!prev.reply_to_text && vm.reply_to_text) prev.reply_to_text = vm.reply_to_text;
+                    continue;
+                  }
+                  nativeIdxMap.set(fid, dedupedByNativeId.length);
+                }
+                dedupedByNativeId.push(vm);
+              }
+              validMessages = dedupedByNativeId;
+            }
 
             // A successful image/video send may first return through the
             // on-demand history scraper instead of the realtime observer.
@@ -10336,7 +10386,9 @@ function startServer() {
           AND media_url IS NULL
           AND attachment_id IS NULL
           AND (
-            LOWER(TRIM(COALESCE(content, ''))) IN ('tôi', 'bạn', 'you', 'bệnh viện', 'bạn đã mở đoạn chat này thông qua quảng cáo.', 'bạn đã mở đoạn chat này thông qua quảng cáo')
+            LOWER(TRIM(COALESCE(content, ''))) IN ('tôi', 'bạn', 'you', 'bệnh viện', 'đã ghim', 'pinned', 'bạn đã mở đoạn chat này thông qua quảng cáo.', 'bạn đã mở đoạn chat này thông qua quảng cáo')
+            OR LOWER(TRIM(COALESCE(content, ''))) GLOB '*[·•]*đã ghim*'
+            OR LOWER(TRIM(COALESCE(content, ''))) GLOB '*[·•]*pinned*'
             OR (sender_name IS NOT NULL AND TRIM(sender_name) != '' AND LOWER(TRIM(COALESCE(content, ''))) = LOWER(TRIM(sender_name)))
             OR LOWER(TRIM(COALESCE(content, ''))) = LOWER(TRIM(COALESCE((SELECT contact_name FROM threads t WHERE t.id = messages.thread_id), '')))
           )
@@ -10485,17 +10537,25 @@ function startServer() {
         }
         ConversationRepository.normalizeMessageSequence(thread_id, db);
         const latestMsg = db.prepare(`
-          SELECT content, timestamp_ms, created_at FROM messages
-          WHERE thread_id = ? AND COALESCE(content, '') != ''
+          SELECT content, media_type, timestamp_ms, created_at FROM messages
+          WHERE thread_id = ?
+            AND (COALESCE(content, '') != '' OR media_type IN ('image', 'video', 'audio', 'file'))
           ORDER BY COALESCE(sequence_order, id) DESC, id DESC LIMIT 1
         `).get(thread_id);
-        if (latestMsg && latestMsg.content) {
+        if (latestMsg) {
+          const previewText = String(latestMsg.content || '').trim()
+            || (latestMsg.media_type === 'video' ? '[Video]' : latestMsg.media_type === 'image' ? '[Ảnh]' : '[Tệp]');
           const iso = latestMsg.timestamp_ms > 0 ? new Date(Number(latestMsg.timestamp_ms)).toISOString() : latestMsg.created_at;
           db.prepare('UPDATE threads SET last_message = ?, last_activity = COALESCE(?, last_activity) WHERE id = ?')
-            .run(latestMsg.content, iso, thread_id);
+            .run(previewText, iso, thread_id);
         }
       }
     }
+    db.prepare(`
+      UPDATE threads
+      SET last_message = ''
+      WHERE LOWER(TRIM(COALESCE(last_message, ''))) = LOWER(TRIM(COALESCE(contact_name, '')))
+    `).run();
   } catch (cleanErr) {
     console.warn('[DB] Lỗi dọn dẹp tên hệ thống / chuẩn hóa sequence:', cleanErr.message);
   }

@@ -23,7 +23,7 @@ class OutboundDomCorrelationService {
       .replace(/_media$/, '')
       .replace(/__bubble_\d+$/, '')
       .trim();
-    const m = cleaned.match(/^(?:\d+@msgr\.)?(\d{15,21})$/);
+    const m = cleaned.match(/^(?:\d+@(?:msgr|g\.us)\.)?(\d{15,21})$/);
     return m ? m[1] : null;
   }
 

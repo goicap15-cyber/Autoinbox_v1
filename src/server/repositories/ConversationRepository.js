@@ -79,7 +79,7 @@ class ConversationRepository {
   static bubbleFamilyId(messageId) {
     return String(messageId || '')
       .replace(/__bubble_\d+$/, '')
-      .replace(/^[^@]+@msgr\.(\d{15,22})$/, '$1');
+      .replace(/^[^@]+@(?:msgr|g\.us)\.(\d{15,22})$/, '$1');
   }
 
   static extractSnowflakeBigInt(fbMessageId) {
@@ -97,7 +97,7 @@ class ConversationRepository {
         }
       } catch (_) {}
     }
-    const m = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
+    const m = raw.match(/(?:@(?:msgr|g\.us)\.|^)(\d{15,21})$/);
     if (!m) return null;
     try {
       const sf = BigInt(m[1]);
@@ -681,7 +681,14 @@ class ConversationRepository {
             content = null;
           }
         }
-        const cleanedContent = cleanMessageText(content);
+        let cleanedContent = cleanMessageText(content);
+        if ((mediaUrl || (mediaType && mediaType !== 'text')) && cleanedContent) {
+          const capLow = cleanedContent.trim().toLocaleLowerCase('vi-VN');
+          const badCaps = [memberName, msg.sender_name, msg.contact_name, 'tôi', 'bạn', 'you', 'bệnh viện']
+            .map((v) => String(v || '').trim().toLocaleLowerCase('vi-VN'))
+            .filter(Boolean);
+          if (badCaps.includes(capLow)) cleanedContent = '';
+        }
         if (!mediaUrl && (mediaType === 'text' || !mediaType) && (!cleanedContent || isSystemOrMetadataText(cleanedContent) || cleanedContent === 'Đang tải...')) {
           result.skippedCount += 1;
           continue;
@@ -762,7 +769,7 @@ class ConversationRepository {
         // gốc dán nhầm tên người gửi còn text thật nằm dưới id __bubble_N).
         // KHÔNG áp cho id anchor kiểu peer@msgr.N__bubble_N - đó là id tổng
         // hợp cho pending outgoing, có thể là tin thật riêng (like-group).
-        if (/^mid\.\$/.test(String(stableId))) {
+        if (/^(?:mid\.\$|\d+@(?:msgr|g\.us)\.\d+)/.test(String(stableId))) {
           const bubbleFamilyId = String(stableId).replace(/__bubble_\d+$/, '');
           const incomingText = String(content || '').trim();
           const isIncomingLinkCardFile = /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(incomingText);
@@ -922,7 +929,7 @@ class ConversationRepository {
               .replace(/_media$/, '')
               .replace(/__bubble_\d+$/, '')
               .trim();
-            const bareSfMatch = cleanedFbId.match(/^(?:\d+@msgr\.)?(\d{15,21})$/);
+            const bareSfMatch = cleanedFbId.match(/^(?:\d+@(?:msgr|g\.us)\.)?(\d{15,21})$/);
             const bareSf = bareSfMatch ? bareSfMatch[1] : null;
             if (bareSf) {
               const sfCandidate = database.prepare(`
@@ -1154,7 +1161,8 @@ class ConversationRepository {
               || /\.(?:mp4|mov|avi|mkv|png|jpe?g|pdf|docx?|xlsx?|zip|rar)$/i.test(exTxt);
             const inHasUrl = /https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(inTxt);
             const exHasUrl = /https?:\/\/|drive\.google\.com|docs\.google\.com/i.test(exTxt);
-            if (!exIsHeaderOrFile && !(inHasUrl && !exHasUrl)) {
+            const inIsSuperstring = inTxt.length > exTxt.length && inTxt.includes(exTxt);
+            if (!exIsHeaderOrFile && !(inHasUrl && !exHasUrl) && !inIsSuperstring) {
               content = existing.content;
             }
           }

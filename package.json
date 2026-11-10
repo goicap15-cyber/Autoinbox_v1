@@ -1,6 +1,6 @@
 {
   "name": "autochatbot-fb-crm",
-  "version": "1.0.27",
+  "version": "1.0.28",
   "description": "FB Personal Messenger CRM - Desktop Application",
   "author": "Adsup <contact@adsup.vn>",
   "main": "src/electron.js",

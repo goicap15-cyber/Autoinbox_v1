@@ -9825,7 +9825,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           /^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}(?:,?\s+\d{1,2}:\d{2}\s*(?:AM|PM)?)?$/i,
           /^\d{1,2}(?::\d{2})?\s*(?:AM|PM)\s+by\s+[A-ZÀ-ỸĐ][\p{L}\p{M}\s.]{0,40}$/u,
           /^(?:(?:Bạn|Tôi|You|[^\n]{1,80})\s+)?(?:đã gửi|sent|shared)\s+(?:(?:một|\d+|an?|one)\s+)?(?:ảnh|bức ảnh|photo|photos|image|images|video|videos|tệp|file|files|tập tin|nhãn dán|sticker|GIF|tin nhắn thoại|file âm thanh|voice message|audio)(?:\s+đính kèm)?\.?$/iu,
-          /^(?:[^\n]{1,60}[\s\u00a0]*[·•][\s\u00a0]*)?(?:Đã chỉnh sửa|Edited)\.?$/iu,
+          /^(?:[^\n]{1,60}[\s\u00a0]*[·•][\s\u00a0]*)?(?:Đã chỉnh sửa|Edited|Đã ghim|Pinned)\.?$/iu,
           /^(?:drive\.google\.com|docs\.google\.com|Google Docs|Google Drive|youtube\.com|youtu\.be|facebook\.com|fb\.watch|tiktok\.com|vt\.tiktok\.com|instagram\.com|zalo\.me|shopee\.vn|lazada\.vn|tiki\.vn|maps\.app\.goo\.gl|goo\.gl|bit\.ly)$/i
         ];
 
@@ -9842,8 +9842,9 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           if (!raw) return '';
           let t = raw.trim();
           if (!t) return '';
-          t = t.replace(/^(?:Nhập,\s*)?Tin nhắn do [^\n]+? gửi lúc [^\n]*:\s*/i, '').trim();
-          t = t.replace(/^(?:Nhập,\s*)?Message sent by [^\n]+? at [^\n]*:\s*/i, '').trim();
+          t = t.replace(/^(?:Nhập,\s*)?Tin nhắn do [\s\S]+? gửi lúc [^\n]*?(?:ch:|\b\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm))?:|\b\d{1,2}:\d{2}(?:\s*(?:ch|sa|am|pm))?\s+)\s*/i, '').trim();
+          t = t.replace(/^(?:Nhập,\s*)?Message sent by [\s\S]+? at [^\n]*?(?::|\b\d{1,2}:\d{2}(?:\s*(?:[ap]m))?:|\b\d{1,2}:\d{2}(?:\s*(?:[ap]m))?\s+)\s*/i, '').trim();
+          t = t.replace(/^Enter,\s*Message sent\b[^:\n]*(?::\d{2}[^:\n]*)?:\s*/iu, '').trim();
           t = t.replace(/^Nhập,\s*/i, '').trim();
           t = t.replace(/^[:\s]+/, '').trim();
           const sentEmojiMatch = t.match(/^[^,\n]{1,80}\s+(?:đã gửi|sent),\s*(.+)$/i);
@@ -9977,7 +9978,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               }
             } catch (_) {}
           }
-          const sfMatch = raw.match(/(?:@msgr\.|^)(\d{17,21})$/);
+          const sfMatch = raw.match(/(?:@(?:msgr|g\.us)\.|^)(\d{15,21})$/);
           if (sfMatch) {
             try {
               const ts = Number(BigInt(sfMatch[1]) >> 22n);
@@ -10336,6 +10337,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               ? rowEmojiContent
               : (leafBubble.textContent || '').trim();
             const rawEmojiContent = extractHistoryBubbleEmoji(leafBubble);
+            if (leafBubbles.length > 1 && /^(?:Nhập,\s*|Enter,\s*)?(?:Tin nhắn do .+ gửi lúc|Message sent by .+ at|Message sent \d{1,2}:\d{2})/i.test(rawBubbleText)) { bubble_idx++; continue; }
 
             const bubbleLabelEl = leafBubble.closest('[aria-label]');
             const bubbleLabel = bubbleLabelEl ? (bubbleLabelEl.getAttribute('aria-label') || '') : '';

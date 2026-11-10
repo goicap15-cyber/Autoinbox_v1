@@ -114,7 +114,7 @@ const SYSTEM_PATTERNS = [
   /^Bạn đã gửi (?:một )?(?:file|tệp|tập tin|ảnh|video) đính kèm\.?$/i,
   /^You sent (?:an )?attachment\.?$/i,
   /^(?:(?:Bạn|Tôi|You|[^\n]{1,80})\s+)?(?:đã gửi|sent|shared)\s+(?:(?:một|\d+|an?|one)\s+)?(?:ảnh|bức ảnh|photo|photos|image|images|video|videos|tệp|file|files|tập tin|nhãn dán|sticker|GIF|tin nhắn thoại|file âm thanh|voice message|audio)(?:\s+đính kèm)?\.?$/iu,
-  /^(?:[^\n]{1,60}[\s\u00a0]*[·•][\s\u00a0]*)?(?:Đã chỉnh sửa|Edited)\.?$/iu,
+  /^(?:[^\n]{1,60}[\s\u00a0]*[·•][\s\u00a0]*)?(?:Đã chỉnh sửa|Edited|Đã ghim|Pinned)\.?$/iu,
   /^(?:drive\.google\.com|docs\.google\.com|Google Docs|Google Drive|youtube\.com|youtu\.be|facebook\.com|fb\.watch|tiktok\.com|vt\.tiktok\.com|instagram\.com|zalo\.me|shopee\.vn|lazada\.vn|tiki\.vn|maps\.app\.goo\.gl|goo\.gl|bit\.ly)$/i,
 
   /^Bạn đã phản hồi ghi chú của (?:họ|họ\.|họ\.?)$/i,
@@ -300,7 +300,7 @@ function cleanMessageText(rawText) {
   // bubble icon-only/text của Messenger E2EE để nguyên nhãn này trong DOM
   // text; strip prefix giữ lại payload (emoji HOẶC text - bản cũ chỉ giữ
   // emoji làm tin text của operator thành bubble nhãn trần).
-  text = text.replace(/^Enter,\s*Message sent\b.*:\s*/iu, '').trim();
+  text = text.replace(/^Enter,\s*Message sent\b[^:\n]*(?::\d{2}[^:\n]*)?:\s*/iu, '').trim();
   text = text.replace(/^Nhập,\s*/i, '').trim();
   text = text.replace(/^[:\s]+/, '').trim();
 
