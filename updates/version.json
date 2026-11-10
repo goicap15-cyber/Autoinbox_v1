@@ -1,8 +1,8 @@
 {
-  "version": "1.0.29",
-  "releasedAt": "2026-11-10T04:04:47.330Z",
-  "notes": "Sửa triệt để lỗi icon Like (👍) bị hiển thị thành số phút (17, 04, 38, 47) và tự động khôi phục lại icon Like trong lịch sử chat (v1.0.29)",
-  "requiresRestart": true,
-  "sizeBytes": 3094107,
-  "sha256": "036031f2c09d4a1be1a7e7152e8c76a4b11ffef3e861969cbe2dd98e44517242"
+  "version": "1.0.30",
+  "releasedAt": "2026-11-10T04:46:47.096Z",
+  "notes": "Sửa lỗi mất tên và avatar thành viên nhóm trên tin nhắn icon Like (👍), ảnh/video và tin nhiều dòng (v1.0.30)",
+  "requiresRestart": false,
+  "sizeBytes": 3096057,
+  "sha256": "d569ede0db191ab92445a1323db68c3cd963e167ec43f68c84b22b4bf4bf7fcd"
 }

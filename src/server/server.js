@@ -1072,6 +1072,34 @@ function prepareMessagesForClient(rows = []) {
   // Avatar từng thành viên nhóm: tra theo (thread_id, sender_name) một lượt
   // cho cả snapshot thay vì query per-row.
   const memberNamesByThread = new Map();
+  const hasGroupNamedInBatch = new Set();
+  for (const row of prepared) {
+    const name = String(row.sender_name || '').trim();
+    if (!name || Number(row.is_outgoing) === 1) continue;
+    hasGroupNamedInBatch.add(row.thread_id);
+  }
+  for (let i = 0; i < prepared.length; i++) {
+    const row = prepared[i];
+    if (Number(row.is_outgoing) === 1 || String(row.sender_name || '').trim()) continue;
+    if (!hasGroupNamedInBatch.has(row.thread_id)) continue;
+    const rowTs = Number(row.timestamp_ms || 0);
+    let bestName = '';
+    let bestDiff = Infinity;
+    for (let j = 0; j < prepared.length; j++) {
+      if (i === j) continue;
+      const cand = prepared[j];
+      if (cand.thread_id !== row.thread_id || Number(cand.is_outgoing) === 1) continue;
+      const cName = String(cand.sender_name || '').trim();
+      if (!cName) continue;
+      const cTs = Number(cand.timestamp_ms || 0);
+      const diff = (rowTs > 0 && cTs > 0) ? Math.abs(cTs - rowTs) : (Math.abs(j - i) * 15000);
+      if (diff <= 90000 && diff < bestDiff) {
+        bestDiff = diff;
+        bestName = cName;
+      }
+    }
+    if (bestName) row.sender_name = bestName;
+  }
   for (const row of prepared) {
     const name = String(row.sender_name || '').trim();
     if (!name || Number(row.is_outgoing) === 1) continue;
@@ -1080,15 +1108,31 @@ function prepareMessagesForClient(rows = []) {
   }
   for (const [threadId, names] of memberNamesByThread) {
     try {
-      const nameList = [...names];
       const avatarRows = db.prepare(`
         SELECT sender_name, avatar_url FROM message_sender_avatars
-        WHERE thread_id = ? AND sender_name IN (${nameList.map(() => '?').join(',')})
-      `).all(threadId, ...nameList);
-      const avatarByName = new Map(avatarRows.map((r) => [String(r.sender_name), r.avatar_url]));
+        WHERE thread_id = ?
+      `).all(threadId);
+      const avatarByName = new Map(avatarRows.map((r) => [String(r.sender_name).trim(), r.avatar_url]));
+      const resolveAvatarForName = (rawName) => {
+        const n = String(rawName || '').trim();
+        if (!n) return null;
+        if (avatarByName.has(n)) return avatarByName.get(n);
+        const nLower = n.toLowerCase();
+        for (const [k, url] of avatarByName.entries()) {
+          const kLower = k.toLowerCase();
+          if (kLower === nLower || kLower.endsWith(' ' + nLower) || nLower.endsWith(' ' + kLower)) return url;
+        }
+        const globalHit = db.prepare(`
+          SELECT avatar_url FROM message_sender_avatars
+          WHERE LOWER(sender_name) = LOWER(?) OR LOWER(sender_name) LIKE '% ' || LOWER(?)
+          ORDER BY updated_at DESC LIMIT 1
+        `).get(n, n);
+        return globalHit?.avatar_url || null;
+      };
       for (const row of prepared) {
+        if (row.thread_id !== threadId) continue;
         const name = String(row.sender_name || '').trim();
-        const localAvatar = name && avatarByName.get(name);
+        const localAvatar = name && resolveAvatarForName(name);
         if (localAvatar) row.sender_avatar_url = localAvatar;
       }
     } catch (_) { /* enrich là lành hóa */ }
@@ -10375,6 +10419,17 @@ function startServer() {
           AND (
             LOWER(TRIM(content)) IN ('tôi', 'bạn', 'you', 'bệnh viện')
             OR LOWER(TRIM(content)) = LOWER(TRIM(COALESCE(sender_name, '')))
+            OR (LENGTH(TRIM(content)) >= 2 AND LOWER(TRIM(COALESCE(sender_name, ''))) LIKE '% ' || LOWER(TRIM(content)))
+            OR EXISTS (
+              SELECT 1 FROM messages m2
+              WHERE m2.thread_id = messages.thread_id
+                AND m2.sender_name IS NOT NULL AND TRIM(m2.sender_name) != ''
+                AND LENGTH(TRIM(messages.content)) >= 2
+                AND (
+                  LOWER(TRIM(m2.sender_name)) = LOWER(TRIM(messages.content))
+                  OR LOWER(TRIM(m2.sender_name)) LIKE '% ' || LOWER(TRIM(messages.content))
+                )
+            )
             OR LOWER(TRIM(content)) = LOWER(TRIM(COALESCE((SELECT contact_name FROM threads t WHERE t.id = messages.thread_id), '')))
           )
       `).run();
@@ -10389,7 +10444,20 @@ function startServer() {
             LOWER(TRIM(COALESCE(content, ''))) IN ('tôi', 'bạn', 'you', 'bệnh viện', 'đã ghim', 'pinned', 'bạn đã mở đoạn chat này thông qua quảng cáo.', 'bạn đã mở đoạn chat này thông qua quảng cáo')
             OR LOWER(TRIM(COALESCE(content, ''))) GLOB '*[·•]*đã ghim*'
             OR LOWER(TRIM(COALESCE(content, ''))) GLOB '*[·•]*pinned*'
-            OR (sender_name IS NOT NULL AND TRIM(sender_name) != '' AND LOWER(TRIM(COALESCE(content, ''))) = LOWER(TRIM(sender_name)))
+            OR (sender_name IS NOT NULL AND TRIM(sender_name) != '' AND (
+              LOWER(TRIM(COALESCE(content, ''))) = LOWER(TRIM(sender_name))
+              OR (LENGTH(TRIM(COALESCE(content, ''))) >= 2 AND LOWER(TRIM(sender_name)) LIKE '% ' || LOWER(TRIM(COALESCE(content, ''))))
+            ))
+            OR EXISTS (
+              SELECT 1 FROM messages m2
+              WHERE m2.thread_id = messages.thread_id
+                AND m2.sender_name IS NOT NULL AND TRIM(m2.sender_name) != ''
+                AND LENGTH(TRIM(COALESCE(messages.content, ''))) >= 2
+                AND (
+                  LOWER(TRIM(m2.sender_name)) = LOWER(TRIM(messages.content))
+                  OR LOWER(TRIM(m2.sender_name)) LIKE '% ' || LOWER(TRIM(messages.content))
+                )
+            )
             OR LOWER(TRIM(COALESCE(content, ''))) = LOWER(TRIM(COALESCE((SELECT contact_name FROM threads t WHERE t.id = messages.thread_id), '')))
           )
       `).run();
@@ -10517,6 +10585,36 @@ function startServer() {
           db.prepare('DELETE FROM messages WHERE id = ?').run(mf.id);
         } else {
           db.prepare("UPDATE messages SET content = '👍' WHERE id = ?").run(mf.id);
+        }
+      }
+      // Khôi phục sender_name bị khuyết cho các tin nhắn icon Like (👍) hoặc media nằm cùng cụm tin của 1 thành viên nhóm
+      const missingSenderGroupRows = db.prepare(`
+        SELECT m.id, m.thread_id, m.timestamp_ms
+        FROM messages m
+        WHERE m.is_outgoing = 0
+          AND (m.sender_name IS NULL OR TRIM(m.sender_name) = '')
+          AND m.timestamp_ms > 0
+          AND EXISTS (
+            SELECT 1 FROM messages g
+            WHERE g.thread_id = m.thread_id
+              AND g.is_outgoing = 0
+              AND g.sender_name IS NOT NULL AND TRIM(g.sender_name) != ''
+              AND LOWER(TRIM(g.sender_name)) != LOWER(TRIM(COALESCE((SELECT contact_name FROM threads t WHERE t.id = m.thread_id), '')))
+          )
+      `).all();
+      for (const msr of missingSenderGroupRows) {
+        const neighbor = db.prepare(`
+          SELECT sender_name FROM messages
+          WHERE thread_id = ?
+            AND id != ?
+            AND is_outgoing = 0
+            AND sender_name IS NOT NULL AND TRIM(sender_name) != ''
+            AND ABS(COALESCE(timestamp_ms, 0) - ?) <= 90000
+          ORDER BY ABS(COALESCE(timestamp_ms, 0) - ?) ASC, id ASC
+          LIMIT 1
+        `).get(msr.thread_id, msr.id, Number(msr.timestamp_ms), Number(msr.timestamp_ms));
+        if (neighbor?.sender_name) {
+          db.prepare('UPDATE messages SET sender_name = ? WHERE id = ?').run(neighbor.sender_name, msr.id);
         }
       }
     } catch (cleanErr) {

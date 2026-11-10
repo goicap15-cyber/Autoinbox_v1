@@ -1471,7 +1471,7 @@
     if (!effectiveLabel && ownArticleLabel) effectiveLabel = ownArticleLabel;
     const rowNativeIdForTs = nativeIdEl?.getAttribute('data-message-id') || nativeIdEl?.getAttribute('data-id') || nativeIdEl?.getAttribute('id') || messageRow.getAttribute?.('data-message-id') || messageRow.getAttribute?.('data-id') || null;
     const rowMidTs = extractMidTimestampMs(rowNativeIdForTs);
-    const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+.*,\s*([^:]+?):\s+(.+)$/);
+    const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::\s*([\s\S]*))?$/i);
     if (ownSenderMatch && !/^(?:Bạn|You)$/i.test(ownSenderMatch[1].trim())) {
       is_outgoing = false;
       sender_name = ownSenderMatch[1].trim();
@@ -1483,6 +1483,25 @@
     // (labelSenderName). Override hình ảnh phía trên đổi sender_name thành tên
     // nhóm cho tin trái - không được lan vào member_name, vì client dùng
     // member_name để hiện tên + avatar riêng từng người trong nhóm.
+    if (!is_outgoing && !labelSenderName) {
+      const outerArt = messageRow.closest?.('div[role="article"], div[role="row"]') || messageRow;
+      for (const sib of outerArt.querySelectorAll?.('[data-message-id][aria-label], [aria-label^="Lúc "], [aria-label*="Tin nhắn do"]') || []) {
+        const sLbl = String(sib.getAttribute('aria-label') || '');
+        const sMatch = sLbl.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::|$)/i) || sLbl.match(/Tin nhắn do ([^]+?) gửi lúc/i);
+        if (sMatch && !/^(?:Bạn|You)$/i.test(sMatch[1].trim())) {
+          labelSenderName = sMatch[1].trim();
+          sender_name = labelSenderName;
+          break;
+        }
+      }
+      if (!labelSenderName) {
+        const h3Text = String(outerArt.querySelector?.('h3')?.textContent || '').trim();
+        if (h3Text && h3Text.length <= 60 && !/^(?:Bạn|You)$/i.test(h3Text) && !/đã trả lời|replied to/i.test(h3Text)) {
+          labelSenderName = h3Text;
+          sender_name = h3Text;
+        }
+      }
+    }
     const memberName = (!is_outgoing && labelSenderName) ? labelSenderName : '';
     const memberAvatarUrl = memberName ? extractRowSenderAvatar(messageRow, memberName) : '';
     const filter = globalThis.FbCrmTextFilter;
@@ -1792,7 +1811,8 @@
   // leo lên ancestor như extractContactAvatarFromNode - tránh bắt nhầm avatar
   // của row kề). Ưu tiên img có alt/aria-label trùng tên người gửi.
   function extractRowSenderAvatar(messageRow, senderName) {
-    const imgs = messageRow?.querySelectorAll?.('img');
+    const searchRoot = messageRow?.closest?.('div[role="article"], div[role="row"]') || messageRow;
+    const imgs = searchRoot?.querySelectorAll?.('img');
     if (!imgs || !imgs.length) return null;
     const nameLower = String(senderName || '').trim().toLowerCase();
     let fallback = null;
@@ -1804,9 +1824,9 @@
       const rect = img.getBoundingClientRect?.();
       const width = Number(rect?.width || img.width || 0);
       const height = Number(rect?.height || img.height || 0);
-      if (!(width > 0 && height > 0 && width <= 80 && height <= 80)) continue;
+      if (!(width >= 20 && height >= 20 && width <= 68 && height <= 68)) continue;
       const label = (String(img.getAttribute?.('alt') || '') + ' ' + String(img.getAttribute?.('aria-label') || '')).toLowerCase();
-      if (/open photo|view photo|mở ảnh|xem ảnh|video/.test(label)) continue;
+      if (/open photo|view photo|mở ảnh|xem ảnh|video|đã xem|seen by/.test(label)) continue;
       if (nameLower && label.includes(nameLower)) return src;
       if (!fallback) fallback = src;
     }

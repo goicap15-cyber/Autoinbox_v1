@@ -9505,6 +9505,35 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
                 }
               }
               if (hasLeftAv) unit.setAttribute('data-crm-left-avatar', '1');
+              const articleRow = unit.closest('div[role="article"], div[role="row"]') || unit;
+              let groupSender = '';
+              const unitLabel = String(unit.getAttribute('aria-label') || '');
+              const uMatch = unitLabel.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::|$)/i) || unitLabel.match(/Tin nhắn do ([^]+?) gửi lúc/i) || unitLabel.match(/Message sent by ([^]+?) at/i);
+              if (uMatch && !/^(?:Bạn|You)$/i.test(uMatch[1].trim())) groupSender = uMatch[1].trim();
+              if (!groupSender) {
+                for (const sib of articleRow.querySelectorAll('[data-message-id][aria-label], [aria-label^="Lúc "], [aria-label*="Tin nhắn do"]')) {
+                  const sLbl = String(sib.getAttribute('aria-label') || '');
+                  const sMatch = sLbl.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::|$)/i) || sLbl.match(/Tin nhắn do ([^]+?) gửi lúc/i) || sLbl.match(/Message sent by ([^]+?) at/i);
+                  if (sMatch && !/^(?:Bạn|You)$/i.test(sMatch[1].trim())) { groupSender = sMatch[1].trim(); break; }
+                }
+              }
+              if (!groupSender) {
+                const h3Text = String(articleRow.querySelector('h3')?.textContent || '').trim();
+                if (h3Text && h3Text.length <= 60 && !/^(?:Bạn|You)$/i.test(h3Text) && !/đã trả lời|replied to/i.test(h3Text)) groupSender = h3Text;
+              }
+              if (groupSender) unit.setAttribute('data-crm-group-sender', groupSender);
+              for (const avImg of articleRow.querySelectorAll('img[src]')) {
+                const avSrc = avImg.currentSrc || avImg.src || '';
+                if (!avSrc || avSrc.length < 50 || !/fbcdn\.net|scontent|platform\.facebook\.com/.test(avSrc) || /transparent|blank/.test(avSrc)) continue;
+                const avr = avImg.getBoundingClientRect();
+                const avW = Math.round(avr.width || Number(avImg.getAttribute('data-crm-img-w') || 0) || avImg.width || 0);
+                const avH = Math.round(avr.height || Number(avImg.getAttribute('data-crm-img-h') || 0) || avImg.height || 0);
+                if (avW < 20 || avW > 68 || avH < 20 || avH > 68) continue;
+                const avLbl = (String(avImg.getAttribute('alt') || '') + ' ' + String(avImg.getAttribute('aria-label') || '')).toLowerCase();
+                if (/open photo|view photo|mở ảnh|xem ảnh|video|đã xem|seen by/.test(avLbl)) continue;
+                unit.setAttribute('data-crm-group-avatar', avSrc);
+                break;
+              }
             }
             const cloned = unit.cloneNode(true);
             const prev = harvestedUnitsByMid.get(mid);
@@ -10029,8 +10058,9 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
         // CHÍNH row tin (không leo lên ancestor), ưu tiên img có alt/aria-label
         // trùng tên người gửi - tránh bắt nhầm avatar của row kề.
         function extractHistoryMemberAvatar(messageRow, senderName) {
-          const imgs = messageRow?.querySelectorAll?.('img');
-          if (!imgs || !imgs.length) return '';
+          const searchRoot = messageRow?.closest?.('div[role="article"], div[role="row"]') || messageRow;
+          const imgs = searchRoot?.querySelectorAll?.('img');
+          if (!imgs || !imgs.length) return messageRow?.getAttribute?.('data-crm-group-avatar') || '';
           const nameLower = String(senderName || '').trim().toLowerCase();
           let fallback = '';
           for (const img of imgs) {
@@ -10039,15 +10069,15 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             if (!/fbcdn\.net|scontent|platform\.facebook\.com/.test(src)) continue;
             if (/transparent|blank/.test(src)) continue;
             const rect = img.getBoundingClientRect?.();
-            const width = Number(rect?.width || img.width || 0);
-            const height = Number(rect?.height || img.height || 0);
-            if (!(width > 0 && height > 0 && width <= 80 && height <= 80)) continue;
+            const width = Number(rect?.width || img.getAttribute?.('data-crm-img-w') || img.width || 0);
+            const height = Number(rect?.height || img.getAttribute?.('data-crm-img-h') || img.height || 0);
+            if (!(width >= 20 && height >= 20 && width <= 68 && height <= 68)) continue;
             const label = (String(img.getAttribute?.('alt') || '') + ' ' + String(img.getAttribute?.('aria-label') || '')).toLowerCase();
-            if (/open photo|view photo|mở ảnh|xem ảnh|video/.test(label)) continue;
+            if (/open photo|view photo|mở ảnh|xem ảnh|video|đã xem|seen by/.test(label)) continue;
             if (nameLower && label.includes(nameLower)) return src;
             if (!fallback) fallback = src;
           }
-          return fallback;
+          return fallback || messageRow?.getAttribute?.('data-crm-group-avatar') || '';
         }
 
         // ── Chiến lược: Chỉ lấy tin từ message row đã xác minh ──
@@ -10292,7 +10322,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               : '';
             const mediaArticleLabel = nativeIdEl?.getAttribute('aria-label')
               || row.getAttribute('aria-label') || '';
-            const mediaArticleSender = mediaArticleLabel.match(/^Lúc\s+.*,\s*([^:]+?):\s+(.+)$/);
+            const mediaArticleSender = mediaArticleLabel.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::\s*([\s\S]*))?$/i);
             if (mediaArticleSender && !/^(?:Bạn|You)$/i.test(mediaArticleSender[1].trim())) {
               mediaOutgoing = false;
               mediaMemberName = mediaArticleSender[1].trim();
@@ -10456,7 +10486,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // phía trên ép mọi bubble trái về senderName=tên nhóm nên
             // member_name rỗng + header tên <h3> chảy qua thành tin rác
             // (reproduce 2026-10-11 nhóm Bi-aaaaaaa).
-            const ownArticleEl = leafBubble.closest('[data-message-id]');
+            const ownArticleEl = leafBubble.closest('[data-message-id]') || (leafBubble.matches?.('[data-message-id]') ? leafBubble : null) || leafBubble.querySelector?.('[data-message-id]') || nativeIdEl;
             if (historyDirectionEvidence !== 'geometry') {
               const stampedRel = Number(leafBubble.getAttribute('data-crm-rel-center'));
               if (Number.isFinite(stampedRel) && (stampedRel <= 0.45 || stampedRel >= 0.55)) {
@@ -10472,7 +10502,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               }
             }
             const ownArticleLabel = ownArticleEl ? (ownArticleEl.getAttribute('aria-label') || '') : '';
-            const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+.*,\s*([^:]+?):\s+(.+)$/);
+            const ownSenderMatch = ownArticleLabel.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::\s*([\s\S]*))?$/i);
             if (ownSenderMatch) {
               const ownSender = ownSenderMatch[1].trim();
               if (!/^(?:Bạn|You)$/i.test(ownSender)) {
@@ -10485,6 +10515,24 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
             // Tên thành viên giải từ aria-label mạnh hơn hình ảnh trong NHÓM:
             // visual override phía trên đổi sender_name thành tên nhóm cho tin
             // trái - khôi phục tên thành viên để member_name không mất.
+            if (!isOutgoing && !labelSenderName) {
+              const stampedGroupSender = ownArticleEl?.getAttribute?.('data-crm-group-sender') || row.getAttribute?.('data-crm-group-sender') || '';
+              if (stampedGroupSender && !/^(?:Bạn|You)$/i.test(stampedGroupSender)) {
+                labelSenderName = stampedGroupSender;
+                senderName = stampedGroupSender;
+              } else {
+                const outerArt = row.closest?.('div[role="article"], div[role="row"]') || row;
+                for (const sib of outerArt.querySelectorAll?.('[data-message-id][aria-label], [aria-label^="Lúc "], [aria-label*="Tin nhắn do"]') || []) {
+                  const sLbl = String(sib.getAttribute('aria-label') || '');
+                  const sMatch = sLbl.match(/^Lúc\s+[^,]+,\s*([^:]+?)(?::|$)/i) || sLbl.match(/Tin nhắn do ([^]+?) gửi lúc/i);
+                  if (sMatch && !/^(?:Bạn|You)$/i.test(sMatch[1].trim())) {
+                    labelSenderName = sMatch[1].trim();
+                    senderName = labelSenderName;
+                    break;
+                  }
+                }
+              }
+            }
             if (!isOutgoing && labelSenderName) senderName = labelSenderName;
 
             let textContent = rawBubbleText;
