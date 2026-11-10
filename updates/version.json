@@ -1,8 +1,8 @@
 {
-  "version": "1.0.37",
-  "releasedAt": "2026-11-10T10:44:57.084Z",
-  "notes": "Fix group message direction/sender ('Toi' vs 'Ban'), restore thread order, and enforce strict 3-tab architecture",
+  "version": "1.0.38",
+  "releasedAt": "2026-11-10T11:10:45.410Z",
+  "notes": "Fix ReferenceError in handleSyncThreadMessages, auto-activate Tab 2/Tab 3 during sync, and keep all 3 tabs unthrottled in background",
   "requiresRestart": false,
-  "sizeBytes": 3333339,
-  "sha256": "5f2235daf56b24768469665a1fa269df63ae211302668ada4dad6c71ada7caca"
+  "sizeBytes": 3333051,
+  "sha256": "f7e10ee2b1b2689196c6c9403b6a0bf0ea2ac1ddacf040541a0008350e9b2f70"
 }

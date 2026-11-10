@@ -19,6 +19,67 @@
   } catch (_) {}
 
   window.__AUTOCHATBOT_INJECTED__ = true;
+  // Giữ tất cả 3 tab Messenger (chat, history, requests) luôn ở trạng thái active/visible
+  // đối với React/Relay của Facebook ngay cả khi tab đang nằm ở nền (không được click).
+  try {
+    Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+    Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+    Object.defineProperty(document, 'webkitHidden', { get: () => false, configurable: true });
+    Object.defineProperty(document, 'webkitVisibilityState', { get: () => 'visible', configurable: true });
+    if (typeof Document !== 'undefined' && Document.prototype) {
+      Object.defineProperty(Document.prototype, 'hidden', { get: () => false, configurable: true });
+      Object.defineProperty(Document.prototype, 'visibilityState', { get: () => 'visible', configurable: true });
+    }
+    const stopHiddenEvent = (e) => {
+      try { e.stopImmediatePropagation(); } catch (_) {}
+    };
+    window.addEventListener('visibilitychange', stopHiddenEvent, true);
+    document.addEventListener('visibilitychange', stopHiddenEvent, true);
+    document.addEventListener('webkitvisibilitychange', stopHiddenEvent, true);
+
+    const nativeRAF = window.requestAnimationFrame ? window.requestAnimationFrame.bind(window) : null;
+    const nativeCAF = window.cancelAnimationFrame ? window.cancelAnimationFrame.bind(window) : null;
+    if (nativeRAF) {
+      const activeHandles = new Map();
+      let nextHandleId = 1;
+      window.requestAnimationFrame = function(callback) {
+        if (typeof callback !== 'function') return nativeRAF(callback);
+        const id = nextHandleId++;
+        let fired = false;
+        const timerId = setTimeout(() => {
+          if (fired) return;
+          fired = true;
+          const entry = activeHandles.get(id);
+          activeHandles.delete(id);
+          if (entry && entry.rafId && nativeCAF) {
+            try { nativeCAF(entry.rafId); } catch (_) {}
+          }
+          try { callback(performance.now()); } catch (err) { setTimeout(() => { throw err; }, 0); }
+        }, 28);
+        const rafId = nativeRAF((ts) => {
+          if (fired) return;
+          fired = true;
+          clearTimeout(timerId);
+          activeHandles.delete(id);
+          callback(ts);
+        });
+        activeHandles.set(id, { rafId, timerId });
+        return id;
+      };
+      window.cancelAnimationFrame = function(id) {
+        const entry = activeHandles.get(id);
+        if (entry) {
+          activeHandles.delete(id);
+          clearTimeout(entry.timerId);
+          if (entry.rafId && nativeCAF) {
+            try { nativeCAF(entry.rafId); } catch (_) {}
+          }
+        } else if (nativeCAF) {
+          try { nativeCAF(id); } catch (_) {}
+        }
+      };
+    }
+  } catch (_) {}
 
   console.log('[FB Interceptor] 🚀 MAIN World Interceptor initialized at document_start');
 

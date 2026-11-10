@@ -7323,18 +7323,8 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
         // Quét sâu/Requests vẫn cần active để Facebook mount row ảo trong tab
         // nền. Riêng quét nhẹ 2s đọc tab chat không được force active - nó
         // đang là nguyên nhân tab khác bị giật khỏi vị trí mỗi 2 giây.
-        if (!isRealtimeInboxScan) {
-          if (target.requestSection) {
-            // Tab requests quét nền 30s: KHÔNG lật tab khi Chrome đang được
-            // focus (user đang nhìn) - chỉ activate khi window ẩn/nền. DOM
-            // sidebar đã mount từ lần quét trước vẫn đọc được khi tab nền.
-            const requestsWin = await chrome.windows.get(target.tab.windowId).catch(() => null);
-            if (!requestsWin?.focused) {
-              await chrome.tabs.update(target.tab.id, { active: true }).catch(() => null);
-            }
-          } else {
-            await chrome.tabs.update(target.tab.id, { active: true }).catch(() => null);
-          }
+        if (!isRealtimeInboxScan && !isPersonalSyncBusy()) {
+          await chrome.tabs.update(target.tab.id, { active: true }).catch(() => null);
         }
         await delay(target.requestSection ? 1200 : (isRealtimeScan ? 50 : 500));
         let scraped = [];
@@ -7807,7 +7797,12 @@ async function handleSync100Threads({ account_id, resume = false, scan_mode = 'f
       const [nextAccountKey, nextScan] = nextEntry.value;
       pendingDiscoveryScans.delete(nextAccountKey);
       setTimeout(() => handleSync100Threads(nextScan).catch(() => {}), 0);
-    } else if (!isRealtimeScan && account_id) {
+    } else if (account_id) {
+      if (!isRealtimeInboxScan && !isPersonalSyncBusy()) {
+        getRegisteredTab(FbCrmMessengerTabRoles.roleKey(account_id, 'chat')).then((chatTab) => {
+          if (chatTab?.id) chrome.tabs.update(chatTab.id, { active: true }).catch(() => null);
+        }).catch(() => {});
+      }
       // Giữ cố định 3 tab (chat, history, requests); chỉ đóng tab discovery dư thừa nếu có
       const discRole = FbCrmMessengerTabRoles.roleKey(account_id, 'discovery');
       getRegisteredTab(discRole).then(async (discTab) => {
@@ -8772,9 +8767,11 @@ async function ensureTabOnThread(tab, targetThreadId, requestedThreadUrl, pageId
           // dang co thanh link dich roi click: router SPA bat click <a> va
           // dieu huong ngay tai cho, khong reload ca trang (reload mat
           // 15-25s moi mount lai viewport - do chuong ngai hydrate nhanh).
-          const donor = links.find((a) => typeof a.click === 'function');
+          const donor = links.find((a) => typeof a.click === 'function' && !a.getAttribute('aria-current'))
+            || links.find((a) => typeof a.click === 'function');
           if (donor) {
             const savedHref = donor.getAttribute('href');
+            donor.setAttribute('data-crm-spoofed-href', String(tid));
             donor.setAttribute('href', targetPath);
             donor.click();
             setTimeout(() => { try { donor.setAttribute('href', savedHref); } catch (_) {} }, 300);
@@ -9100,40 +9097,36 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     sendToBackend('THREAD_MESSAGES_SYNCED', { account_id: targetAcc, thread_id, messages: [], reason: 'navigation_superseded', mode, cursor });
     return;
   }
+  const usesVisibleCrmTab = false;
   const isScrollingOlderHistory = mode === 'older' || Number(scroll_delta) > 0 || bulkHistorySyncInFlight;
   const manualHistoryOwner = isScrollingOlderHistory ? (navigationToken?.sequence || Date.now()) : null;
   if (isScrollingOlderHistory && manualHistoryOwner != null) manualHistoryTabOwners.set(tab.id, manualHistoryOwner);
   const lastCrmThreadId = usesVisibleCrmTab ? String(crmHistoryThreadByTab.get(tab.id) || '') : '';
   const forceCleanViewport = usesVisibleCrmTab && Boolean(lastCrmThreadId) && lastCrmThreadId !== navigationThreadId;
+  let previousActiveTabId = null;
+  const restorePreviousActiveTab = async () => {
+    if (previousActiveTabId) {
+      const toRestore = previousActiveTabId;
+      previousActiveTabId = null;
+      await chrome.tabs.update(toRestore, { active: true }).catch(() => null);
+    }
+  };
   const releaseManualHistoryOwner = () => {
     if (manualHistoryOwner != null && manualHistoryTabOwners.get(tab.id) === manualHistoryOwner) {
       manualHistoryTabOwners.delete(tab.id);
     }
   };
-  // 2026-09-29: Focus the page's Business Suite tab before scanning. Chrome
-  // throttles rendering of background tabs, which stretched each scan cycle
-  // to 20-40s and blew the lane deadline mid-scan - successful batches were
-  // still reported as extension_history_timeout (reproduce: SW console log,
-  // batch committed then deadline fired for the same thread). Focusing the
-  // per-page tab is also the requested UX: the operator sees which
-  // conversation is being synced.
   if (page_id && tab && tab.id != null) {
-    // Nhịp chuyển tab gom về một điểm: tối đa 1 lần/5s, Messenger ưu tiên.
-    // Click của operator vẫn chuyển ngay (immediate).
     requestTabActivation(tab.id, { immediate: isUserDrivenReason });
-    // Chỉ bật cửa sổ Chrome lên trên CRM khi người dùng chủ động click
-    // thread. Sync nền (sidebar_incoming/initial_sweep/retry) không được
-    // giật cửa sổ Chrome mỗi lần khách nhắn - tab vẫn active trong cửa sổ
-    // nên Chrome render đầy đủ, không bị throttle (reproduce 2026-09-30:
-    // khách nhắn là Chrome nhảy lên che mất CRM).
-    
-  } else if (!page_id && !usesVisibleCrmTab && tab && tab.id != null
-    && ['sidebar_incoming', 'initial_sweep', 'history_retry', 'manual_resync'].includes(baseReason)) {
-    // Tab Messenger cá nhân là "tab nhà": request active của nó đè request
-    // Page đang chờ, không giật cửa sổ Chrome (chỉ tabs.update nội bộ).
-    // immediate vì job ĐANG chạy cần render media ngay, đợi gap 5s là
-    // Messenger throttle làm blob/data-url không mount -> ảnh/video mất.
+  } else if (!page_id && tab && tab.id != null) {
+    // Kích hoạt Tab 2 ('history') ngay TRƯỚC khi điều hướng để Chromium mount
+    // khung chat + tin nhắn ngay lập tức, sau khi quét xong sẽ tự trả về Tab 1 ('chat').
+    setPersonalSyncBusy(65000);
+    const [activeTab] = await chrome.tabs.query({ active: true, windowId: tab.windowId }).catch(() => []);
+    if (activeTab?.id && activeTab.id !== tab.id) previousActiveTabId = activeTab.id;
     requestTabActivation(tab.id, { isMessengerHome: true, immediate: true });
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => null);
+    await new Promise((resolve) => setTimeout(resolve, 180));
   }
   const onTargetThread = await ensureTabOnThread(
     tab,
@@ -9152,12 +9145,10 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
     console.log(`[FB Engine] Bỏ sync thread ${thread_id}: đã có click Messenger cá nhân mới hơn.`);
     sendToBackend('THREAD_MESSAGES_SYNCED', { account_id: targetAcc, thread_id, messages: [], reason: 'navigation_superseded', mode, cursor });
     releaseManualHistoryOwner();
+    await restorePreviousActiveTab();
     return;
   }
   let currentTabThreadId = await getCurrentThreadIdInTab(tab.id);
-  // 2026-09-29: Facebook ghi selected_item_id vao URL TRE tren hoi thoai lanh
-  // (chua tung mo) - doc 1 lan tra null va day ca sync vao nhanh header fallback.
-  // Thu lai toi da 2 lan x 1s cho page thread truoc khi cham dich.
   if (page_id && String(currentTabThreadId || '') !== String(navigationThreadId || '')) {
     for (let attempt = 0; attempt < 2 && String(currentTabThreadId || '') !== String(navigationThreadId || ''); attempt++) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -9170,11 +9161,6 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
 
   if (onTargetThread) crmHistoryThreadByTab.set(tab.id, navigationThreadId);
 
-  // Page thread yêu cầu danh tính NGHIÊM NGẶT: URL (Facebook tự ghi
-  // selected_item_id khi mở hội thoại) là bằng chứng chính - khớp là ĐỦ, không
-  // phụ thuộc onTargetThread (verify header có thể nhặt nhầm nhãn nút hành
-  // động kiểu "Chuyển đến thư mục Spam" - reproduce 2026-09-21). Chỉ khi URL
-  // không có ID mới dùng header làm bằng chứng phụ.
   let pageIdentityOk = true;
   let routeDetail = null;
   if (page_id) {
@@ -9206,6 +9192,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
       cursor
     });
     releaseManualHistoryOwner();
+    await restorePreviousActiveTab();
     return;
   }
 
@@ -9235,18 +9222,6 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
       sendToBackend('THREAD_MESSAGES_SYNCED', { account_id: targetAcc, thread_id, messages: [], reason: 'page_content_unavailable', mode, cursor });
     });
     return;
-  }
-  // Messenger can leave a newly opened conversation completely unmounted in
-  // an inactive background tab. Activate initial sync as well as older-page
-  // sync so a blank CRM conversation does not require sending a message before
-  // Facebook creates its first message rows.
-  let previousActiveTabId = null;
-  if (!page_id && ['ondemand_initial', 'ondemand_viewport', 'ondemand_older'].includes(mode)) {
-    setPersonalSyncBusy(65000);
-    const [activeTab] = await chrome.tabs.query({ active: true, windowId: tab.windowId }).catch(() => []);
-    if (activeTab?.id && activeTab.id !== tab.id) previousActiveTabId = activeTab.id;
-    await chrome.tabs.update(tab.id, { active: true }).catch(() => null);
-    await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
   // Facebook ignores synthetic WheelEvent for its virtualized history list.
@@ -9373,7 +9348,7 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
           while (Date.now() - startTime < timeoutMs) {
             // Personal Messenger exposes the thread in /messages/t/<id>;
             // Business Suite exposes it as selected_item_id/thread_id query params.
-            const currentThreadMatch = location.href.match(/\/messages\/(?:e2ee\/)?t\/([^\/?#]+)/) ||
+            const currentThreadMatch = location.href.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/) ||
               location.href.match(/[?&](?:selected_item_id|thread_id)=([^&#]+)/);
             const currentThreadId = currentThreadMatch ? decodeURIComponent(currentThreadMatch[1]) : null;
             if (String(currentThreadId) !== String(targetThreadId)) {
@@ -9382,11 +9357,14 @@ async function handleSyncThreadMessages({ account_id, thread_id, external_thread
               continue;
             }
 
-            // Kiểm tra sidebar active nếu có
-            const activeSidebarItem = document.querySelector('a[aria-current="page"][href*="/messages/"], a[aria-current="true"][href*="/messages/"]');
-            if (activeSidebarItem) {
+            // Kiểm tra sidebar active chỉ khi không có contactName để xác thực trực tiếp trên mainContainer
+            // và link không phải là donor vừa dùng để điều hướng SPA (href_spoof_click).
+            const activeSidebarItem = !contactName
+              ? document.querySelector('a[aria-current="page"][href*="/messages/"], a[aria-current="true"][href*="/messages/"]')
+              : null;
+            if (activeSidebarItem && activeSidebarItem.getAttribute('data-crm-spoofed-href') !== String(targetThreadId)) {
               const activeUrl = activeSidebarItem.getAttribute('href') || '';
-              const activeMatch = activeUrl.match(/\/messages\/(?:e2ee\/)?t\/([^\/?#]+)/);
+              const activeMatch = activeUrl.match(/\/messages\/(?:(?:requests(?:\/spam)?|spam)\/)?(?:e2ee\/)?t\/([^\/?#]+)/);
               const activeId = activeMatch ? decodeURIComponent(activeMatch[1]) : null;
               if (activeId && String(activeId) !== String(targetThreadId)) {
                 lastReason = 'sidebar_mismatch';
