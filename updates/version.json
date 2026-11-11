@@ -1,8 +1,8 @@
 {
-  "version": "1.0.38",
-  "releasedAt": "2026-11-10T11:10:45.410Z",
-  "notes": "Fix ReferenceError in handleSyncThreadMessages, auto-activate Tab 2/Tab 3 during sync, and keep all 3 tabs unthrottled in background",
+  "version": "1.0.40",
+  "releasedAt": "2026-11-11T08:23:22.021Z",
+  "notes": "EasyChat: sửa lỗi đồng bộ ngược hướng tin nhắn dài, cập nhật giao diện và QR thanh toán",
   "requiresRestart": false,
-  "sizeBytes": 3333051,
-  "sha256": "f7e10ee2b1b2689196c6c9403b6a0bf0ea2ac1ddacf040541a0008350e9b2f70"
+  "sizeBytes": 3343622,
+  "sha256": "fe5e45399b7f3f05a97f69cd42a470e9b76beead0a554678b9fd63ef32df6372"
 }
