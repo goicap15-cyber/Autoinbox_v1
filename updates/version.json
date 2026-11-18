@@ -1,8 +1,8 @@
 {
-  "version": "1.0.40",
-  "releasedAt": "2026-11-11T08:23:22.021Z",
-  "notes": "EasyChat: sửa lỗi đồng bộ ngược hướng tin nhắn dài, cập nhật giao diện và QR thanh toán",
+  "version": "1.0.41",
+  "releasedAt": "2026-11-18T11:12:30.340Z",
+  "notes": "EasyChat Desktop: sửa lỗi đồng bộ tên thành viên Tôi trong nhóm và thêm API đồng bộ sang App Mobile",
   "requiresRestart": false,
-  "sizeBytes": 3343622,
-  "sha256": "fe5e45399b7f3f05a97f69cd42a470e9b76beead0a554678b9fd63ef32df6372"
+  "sizeBytes": 3349180,
+  "sha256": "6d6e32377a2b2d98e70916ce4376fd53373e2cf3d778a21c3d276baf8cb5a6c5"
 }
